@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
+from typing import Dict
 
 ACCEL_SENS = {
     '4G': 0.122,
@@ -126,8 +127,8 @@ def parse_sporsa_log(log_file):
 
 
 def parse_phone_log(log_file):
-	"""
-	Parse the phone log file and return the data.
+        """
+        Parse the phone log file and return the data.
 	
 	Args:
 		log_file: The path to the phone log file.
@@ -150,33 +151,84 @@ def parse_phone_log(log_file):
 			z = float(line[4])
 			data.append(SensorData(ts=ts, x=x, y=y, z=z))
 
-	return pd.DataFrame(data)
+        return pd.DataFrame(data)
 
-def export_to_csv(acc_df, gyro_df, output_file):
+def _ts_to_seconds(ts: datetime) -> float:
+        """Convert datetime to seconds since epoch, assuming UTC when naive."""
 
-	# Convert timestamps to milliseconds values
-	acc_df['ts'] = acc_df['ts'].apply(lambda x: int(x.timestamp() * 1000))
-	gyro_df['ts'] = gyro_df['ts'].apply(lambda x: int(x.timestamp() * 1000))
+        if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        return ts.timestamp()
 
-	# Add a sum column
-	acc_df['total'] = np.sqrt(acc_df['x']*acc_df['x'] + acc_df['y']*acc_df['y'] + acc_df['z']*acc_df['z'])
-	gyro_df['total'] = np.sqrt(gyro_df['x']*gyro_df['x'] + gyro_df['y']*gyro_df['y'] + gyro_df['z']*gyro_df['z'])
 
-	# Export to CSV
-	os.makedirs(output_file, exist_ok=True)
-	acc_df.to_csv(output_file + "/acc.csv", index=False)
-	gyro_df.to_csv(output_file + "/gyro.csv", index=False)
+def standardize_sensor_frame(df: pd.DataFrame, sensor_type: str, add_magnitude: bool = True) -> pd.DataFrame:
+        """Convert parsed dataframes into the library's standard CSV schema.
+
+        The multi-IMU analysis pipeline expects a ``timestamp`` column in seconds
+        plus axis-specific columns (``ax``, ``ay``, ``az`` for accelerometers;
+        ``gx``, ``gy``, ``gz`` for gyroscopes; and ``mx``, ``my``, ``mz`` for
+        magnetometers). This helper performs that conversion and optionally adds
+        a vector magnitude column for quick inspection.
+        """
+
+        if df.empty:
+                return pd.DataFrame()
+
+        axis_map = {
+                "acc": ("ax", "ay", "az"),
+                "gyro": ("gx", "gy", "gz"),
+                "mag": ("mx", "my", "mz"),
+        }
+
+        if sensor_type not in axis_map:
+                raise ValueError(f"Unsupported sensor type: {sensor_type}")
+
+        axis_labels = axis_map[sensor_type]
+        standardized = df.copy()
+        standardized["timestamp"] = standardized["ts"].apply(_ts_to_seconds)
+        standardized = standardized.rename(columns={
+                "x": axis_labels[0],
+                "y": axis_labels[1],
+                "z": axis_labels[2],
+        })
+        standardized = standardized.drop(columns=["ts"])
+
+        if add_magnitude:
+                standardized["total"] = np.sqrt(sum(standardized[label] ** 2 for label in axis_labels))
+
+        ordered_cols = ["timestamp", *axis_labels]
+        if add_magnitude:
+                ordered_cols.append("total")
+
+        return standardized[ordered_cols]
+
+
+def export_to_csv(sensor_frames: Dict[str, pd.DataFrame], output_file: str, add_magnitude: bool = True):
+        """Write standardized sensor CSVs for downstream analysis.
+
+        Args:
+                sensor_frames: Mapping of sensor type (``acc``, ``gyro``, ``mag``)
+                        to raw parsed DataFrames containing ``ts``, ``x``, ``y``, ``z``.
+                output_file: Directory to place the CSV exports.
+                add_magnitude: Whether to append the vector magnitude column.
+        """
+
+        os.makedirs(output_file, exist_ok=True)
+
+        for sensor_type, df in sensor_frames.items():
+                standardized = standardize_sensor_frame(df, sensor_type, add_magnitude)
+                standardized.to_csv(os.path.join(output_file, f"{sensor_type}.csv"), index=False)
 
 
 if __name__ == "__main__":
 
-	for i in range(1, 9):
-		acc_df, gyro_df, mag_df = parse_arduino_log("data/raw/arduino/log" + str(i) + ".txt")
-		export_to_csv(acc_df, gyro_df, "data/processed/session_" + str(i) + "/arduino")
+        for i in range(1, 9):
+                acc_df, gyro_df, mag_df = parse_arduino_log("data/raw/arduino/log" + str(i) + ".txt")
+                export_to_csv({"acc": acc_df, "gyro": gyro_df, "mag": mag_df}, "data/processed/session_" + str(i) + "/arduino")
 
-		acc_df, gyro_df = parse_sporsa_log("data/raw/sporsa/sporsa-session" + str(i) + ".txt")
-		export_to_csv(acc_df, gyro_df, "data/processed/session_" + str(i) + "/sporsa")
+                acc_df, gyro_df = parse_sporsa_log("data/raw/sporsa/sporsa-session" + str(i) + ".txt")
+                export_to_csv({"acc": acc_df, "gyro": gyro_df}, "data/processed/session_" + str(i) + "/sporsa")
 
-	acc_df = parse_phone_log("data/raw/smartphone/AccelerometerUncalibrated.csv")
-	gyro_df = parse_phone_log("data/raw/smartphone/GyroscopeUncalibrated.csv")
-	export_to_csv(acc_df, gyro_df, "data/processed/session_8/phone")
+        acc_df = parse_phone_log("data/raw/smartphone/AccelerometerUncalibrated.csv")
+        gyro_df = parse_phone_log("data/raw/smartphone/GyroscopeUncalibrated.csv")
+        export_to_csv({"acc": acc_df, "gyro": gyro_df}, "data/processed/session_8/phone")
