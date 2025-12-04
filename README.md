@@ -1,13 +1,65 @@
 # multi-imu
 
-I have collected Accelerometer and Gyroscope data in an experiment and I want to use this data for analysis. One sensor is the Arduino that was attached on my head and has recorded acc, gyro and mag data at +- 50 Hz with 4g range. The other sensor is a custom IMU that records at 120Hz with 16g range.
+A modular Python toolkit for loading, synchronizing, aligning, visualizing, and analyzing data from multiple IMU sensors such as your Arduino (≈50 Hz, ±4g) and custom (≈120 Hz, ±16g) units.
 
-I am looking for a python project that helps me processing this data.
+## Features
+- CSV loading with column normalization.
+- Resampling, gravity removal, and axis normalization utilities.
+- Time-offset estimation via cross-correlation and synchronized stream trimming.
+- Axis alignment using best-fit rotation matrices.
+- Event analytics for falls, harsh braking, and aggressive turns.
+- Matplotlib visualizations for sensor comparisons and event overlays.
 
-It should
-- Have some tools that helps me visualise the data, compare the sensors, see the acceleration and rotation etc.
-- Be able to synchronize the data in time, now the recordings are not started at the same time and thus the movements are not lined up properly. So I need to be able to run an algorithm that finds the best time displacement that matches up these movements. I have done some synchronizing motions in the beginning of every recording so that can maybe be used.
-- It should be able to align the axes, or do some kind of calibration or remove the gravity vector in or something else so the data can be used for fusion and be used for a motion model. 
-- It should do some kind of danger analysis, like detect falls or heavy brake motions or maybe heavy turning or some other useful thing
+## Installation
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-Create all this in a modular python setup and use clear code that can easily be reviewed and adapted where needed.
+## Quickstart
+The `examples/pipeline_example.py` script generates synthetic data and runs the full pipeline:
+```bash
+python examples/pipeline_example.py
+```
+Replace the synthetic generators with your own CSV files using `multi_imu.load_imu_csv`.
+
+### Typical workflow
+1. **Load streams**
+   ```python
+   from multi_imu import load_imu_csv
+
+   arduino = load_imu_csv("arduino.csv", name="arduino", sample_rate_hz=50.0)
+   custom = load_imu_csv("custom.csv", name="custom", sample_rate_hz=120.0)
+   ```
+2. **Resample target to match reference rate**
+   ```python
+   from multi_imu import resample_signal
+   custom_resampled = resample_signal(custom, target_rate_hz=arduino.sample_rate_hz)
+   ```
+3. **Synchronize in time**
+   ```python
+   from multi_imu import synchronize_streams
+   synced = synchronize_streams(reference=arduino, target=custom_resampled)
+   print("Offset (s):", synced.offset_seconds)
+   ```
+4. **Align axes**
+   ```python
+   from multi_imu import compute_alignment_matrix, align_axes
+   alignment_matrix = compute_alignment_matrix(synced.reference, synced.target)
+   aligned_target = align_axes(synced.target, alignment_matrix)
+   ```
+5. **Remove gravity and analyze events**
+   ```python
+   from multi_imu import remove_gravity, detect_falls, detect_braking_events, detect_turns
+   arduino_hp = remove_gravity(synced.reference)
+   events = detect_falls(arduino_hp) + detect_braking_events(arduino_hp) + detect_turns(arduino_hp)
+   ```
+6. **Visualize**
+   ```python
+   from multi_imu import plot_comparison, plot_event_annotations
+   plot_comparison(arduino_hp, aligned_target, columns=["ax", "ay", "az"])
+   plot_event_annotations(arduino_hp, events)
+   ```
+
+Adjust thresholds and column selections to suit your specific motion patterns and calibration motions.
