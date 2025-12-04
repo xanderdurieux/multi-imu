@@ -24,6 +24,15 @@ python examples/pipeline_example.py
 ```
 Replace the synthetic generators with your own CSV files using `multi_imu.load_imu_csv`.
 
+### Converting raw logs
+Use `examples/convert_raw.py` to translate raw Arduino or Sporsa captures into the
+library's standardized CSV schema using device-recorded timestamps:
+
+```bash
+python examples/convert_raw.py --arduino-log path/to/arduino.log --output-dir output/drive1
+python examples/convert_raw.py --sporsa-log path/to/sporsa.log --output-dir output/drive1
+```
+
 ### Typical workflow
 1. **Load streams**
    ```python
