@@ -12,7 +12,7 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .data_models import IMUSensorData
+from multi_imu.data_models import IMUSensorData
 
 
 DEFAULT_COLUMN_MAP = {
@@ -236,3 +236,4 @@ def export_raw_session(
     """Export parsed raw frames to standardized CSVs ready for ``load_imu_csv``."""
 
     _export_to_csv(sensor_frames, output_dir, add_magnitude=add_magnitude)
+   
