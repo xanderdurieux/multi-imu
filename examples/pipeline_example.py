@@ -32,35 +32,34 @@ def _generate_synthetic_stream(name: str, rate: float, offset: float = 0.0, nois
 
 
 def main():
-    session_id = "session_6"
-    arduino = load_imu_csv(f"data/new/{session_id}/arduino/acc.csv", name="arduino", sample_rate_hz=50.0)
-    custom = load_imu_csv(f"data/new/{session_id}/sporsa/acc.csv", name="sporsa", sample_rate_hz=120.0)
+    session_id = "session4"
+    arduino = load_imu_csv(f"data/processed/{session_id}/arduino/acc.csv", name="arduino")
+    sporsa = load_imu_csv(f"data/processed/{session_id}/sporsa/acc.csv", name="sporsa")
 
-    custom_resampled = resample_signal(custom, target_rate_hz=arduino.sample_rate_hz)
-    synced = synchronize_streams(reference=arduino, target=custom_resampled)
+    arduino_resampled = resample_signal(arduino, target_rate_hz=sporsa.sample_rate_hz)
+    synced = synchronize_streams(reference=sporsa, target=arduino_resampled)
 
-    alignment_matrix = compute_alignment_matrix(synced.reference, synced.target)
-    aligned_target = align_axes(synced.target, alignment_matrix)
-    synced = synced.__class__(reference=synced.reference, target=aligned_target, offset_seconds=synced.offset_seconds, alignment_matrix=alignment_matrix)
+    # alignment_matrix = compute_alignment_matrix(synced.reference, synced.target)
+    # aligned_target = align_axes(synced.target, alignment_matrix)
+    # synced = synced.__class__(reference=synced.reference, target=aligned_target, offset_seconds=synced.offset_seconds, alignment_matrix=alignment_matrix)
 
-    gravity_free_ref = remove_gravity(synced.reference)
-    gravity_free_target = remove_gravity(aligned_target)
+    # gravity_free_ref = remove_gravity(synced.reference)
+    # gravity_free_target = remove_gravity(aligned_target)
 
-    fall_events = detect_falls(gravity_free_ref)
-    brake_events = detect_braking_events(gravity_free_ref)
-    turn_events = detect_turns(gravity_free_ref)
+    # fall_events = detect_falls(gravity_free_ref)
+    # brake_events = detect_braking_events(gravity_free_ref)
+    # turn_events = detect_turns(gravity_free_ref)
 
-    plot_comparison(gravity_free_ref, gravity_free_target, columns=["ax", "ay", "az"])
-    plot_magnitude(gravity_free_ref)
-    plot_event_annotations(gravity_free_ref, fall_events + brake_events + turn_events)
+    plot_comparison(sporsa, arduino, columns=["ax", "ay", "az"])
+    plot_comparison(synced.reference, synced.target, columns=["ax", "ay", "az"])
 
     plt.show()  # Display all plots
 
     print("Estimated offset (s):", synced.offset_seconds)
     print("Alignment matrix:\n", alignment_matrix)
-    print("Detected events:")
-    for evt in fall_events + brake_events + turn_events:
-        print(evt)
+    # print("Detected events:")
+    # for evt in fall_events + brake_events + turn_events:
+    #     print(evt)
 
 
 if __name__ == "__main__":

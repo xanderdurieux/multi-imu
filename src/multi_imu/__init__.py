@@ -5,14 +5,13 @@ Provides modules for loading, synchronizing, aligning, visualizing, and analyzin
 
 from .data_models import IMUSensorData, SyncedIMUData
 from .io import (
-    assemble_motion_sensor_data,
-    export_raw_session,
+    export_joined_imu_frame,
+    export_sensor_frames,
     load_imu_csv,
+	load_sensor_csv,
     parse_arduino_log,
-    parse_arduino_imu,
     parse_phone_log,
     parse_sporsa_log,
-    parse_sporsa_imu,
 )
 from .preprocessing import resample_signal, remove_gravity
 from .synchronization import estimate_time_offset, synchronize_streams
@@ -28,14 +27,13 @@ from .visualization import (
 __all__ = [
     "IMUSensorData",
     "SyncedIMUData",
-    "assemble_motion_sensor_data",
-    "export_raw_session",
     "load_imu_csv",
     "parse_arduino_log",
-    "parse_arduino_imu",
     "parse_phone_log",
     "parse_sporsa_log",
-    "parse_sporsa_imu",
+	"export_joined_imu_frame",
+	"export_sensor_frames",
+	"load_sensor_csv",
     "resample_signal",
     "remove_gravity",
     "estimate_time_offset",

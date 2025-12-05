@@ -1,4 +1,4 @@
-"""I/O helpers for IMU datasets."""
+"""Raw log parsing and export helpers."""
 from __future__ import annotations
 
 import csv
@@ -6,28 +6,12 @@ import os
 import re
 import struct
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from multi_imu.data_models import IMUSensorData
-
-
-DEFAULT_COLUMN_MAP = {
-    "time": "timestamp",
-    "t": "timestamp",
-    "acc_x": "ax",
-    "acc_y": "ay",
-    "acc_z": "az",
-    "gyro_x": "gx",
-    "gyro_y": "gy",
-    "gyro_z": "gz",
-    "mag_x": "mx",
-    "mag_y": "my",
-    "mag_z": "mz",
-}
 
 ACCEL_SENS = {
     "4G": 0.122,
@@ -43,76 +27,34 @@ GYRO_SENS = {
     "2000DPS": 70.000,
 }
 
-
+# =============================================== Helper functions ===============================================
 @dataclass
 class _SensorData:
-    ts: datetime
+    device_time_ms: int
     x: float
     y: float
     z: float
-    device_time_ms: Optional[int] = None
 
 
-def load_imu_csv(
-    path: str,
-    name: str,
-    sample_rate_hz: float,
-    time_column: str = "timestamp",
-    column_map: Optional[Mapping[str, str]] = None,
-    required_columns: Optional[Iterable[str]] = None,
-) -> IMUSensorData:
-    """Load an IMU CSV file into a standardized :class:`IMUSensorData`.
+def _compute_common_base_ms(frames: Iterable[pd.DataFrame]) -> Optional[int]:
+    """Return the earliest device timestamp across provided frames, if available."""
 
-    Args:
-        path: Path to the CSV file.
-        name: Label for the sensor (e.g., "arduino", "custom").
-        sample_rate_hz: Nominal sampling rate of the sensor.
-        time_column: Name of the column containing timestamps in seconds.
-        column_map: Optional mapping to rename columns to standard keys.
-        required_columns: Optional iterable of required columns to keep.
-
-    Returns:
-        IMUSensorData with renamed columns and timestamps sorted.
-    """
-
-    df = pd.read_csv(path)
-    rename_map = {**DEFAULT_COLUMN_MAP, **(column_map or {})}
-    df = df.rename(columns=rename_map)
-
-    if time_column != "timestamp":
-        df = df.rename(columns={time_column: "timestamp"})
-
-    if required_columns:
-        df = df[[col for col in df.columns if col in set(required_columns) or col == "timestamp"]]
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    return IMUSensorData(name=name, data=df, sample_rate_hz=sample_rate_hz)
+    mins = [int(df["device_time_ms"].min()) for df in frames if "device_time_ms" in df.columns and not df.empty]
+    return min(mins) if mins else None
 
 
-def _ts_to_seconds(ts: datetime) -> float:
-    """Convert ``datetime`` to seconds since epoch, assuming UTC when naive."""
+def _relative_timestamp_from_device(df: pd.DataFrame, base_ms: Optional[int] = None) -> pd.Series:
+    """Return timestamps in seconds using the device clock."""
 
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=UTC)
-    return ts.timestamp()
+    if "device_time_ms" not in df.columns:
+        raise ValueError("Expected 'device_time_ms' in dataframe")
 
-
-def _relative_timestamp_from_device(df: pd.DataFrame) -> pd.Series:
-    """Return timestamps in seconds using device clock when available."""
-
-    if "device_time_ms" in df.columns:
-        base = df["device_time_ms"].min()
-        return (df["device_time_ms"] - base) / 1000.0
-
-    if "ts" not in df.columns:
-        raise ValueError("Expected either 'device_time_ms' or 'ts' in dataframe")
-
-    return df["ts"].apply(_ts_to_seconds)
+    base = base_ms if base_ms is not None else df["device_time_ms"].min()
+    return (df["device_time_ms"] - base) / 1000
 
 
 def _standardize_sensor_frame(
-    df: pd.DataFrame, sensor_type: str, add_magnitude: bool = True
+    df: pd.DataFrame, sensor_type: str, add_magnitude: bool = True, base_ms: Optional[int] = None
 ) -> pd.DataFrame:
     """Convert parsed dataframes into the library's standard CSV schema."""
 
@@ -130,10 +72,10 @@ def _standardize_sensor_frame(
 
     axis_labels = axis_map[sensor_type]
     standardized = df.copy()
-    standardized["timestamp"] = _relative_timestamp_from_device(standardized)
+    standardized["timestamp"] = _relative_timestamp_from_device(standardized, base_ms=base_ms)
     standardized = standardized.rename(
         columns={"x": axis_labels[0], "y": axis_labels[1], "z": axis_labels[2]}
-    ).drop(columns=[col for col in ["ts", "device_time_ms"] if col in standardized])
+    ).drop(columns=["device_time_ms"])
 
     if add_magnitude:
         standardized["total"] = np.sqrt(sum(standardized[label] ** 2 for label in axis_labels))
@@ -145,23 +87,7 @@ def _standardize_sensor_frame(
     return standardized[ordered_cols]
 
 
-def _export_to_csv(sensor_frames: Dict[str, pd.DataFrame], output_dir: str, add_magnitude: bool = True):
-    """Write standardized sensor CSVs for downstream analysis."""
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    for sensor_type, df in sensor_frames.items():
-        standardized = _standardize_sensor_frame(df, sensor_type, add_magnitude)
-        standardized.to_csv(os.path.join(output_dir, f"{sensor_type}.csv"), index=False)
-
-
-def _get_arduino_date(log_file: str) -> datetime.date:
-    with open(log_file) as f:
-        first_line = f.readline()
-        date_str = first_line.split(",")[1]
-    return datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
-
-
+# =============================================== Log parsers ===============================================
 def parse_arduino_log(log_file: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Parse Arduino log and return accelerometer, gyro, and magnetometer frames."""
 
@@ -175,10 +101,6 @@ def parse_arduino_log(log_file: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Dat
                 continue
 
             linelist = line.split("\t")
-            ts_str = linelist[1]
-            d = _get_arduino_date(log_file)
-            t = datetime.strptime(ts_str, "%H:%M:%S.%f").time()
-            ts = datetime.combine(d, t)
 
             data_str = linelist[2].replace("received", "")
             if "Notifications" in data_str:
@@ -190,16 +112,16 @@ def parse_arduino_log(log_file: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Dat
 
             if sensor_type == 1:
                 acc_data.append(
-                    _SensorData(
-                        ts=ts, x=x * 9.81, y=y * 9.81, z=z * 9.81, device_time_ms=sensor_time_ms
-                    )
+                    _SensorData(device_time_ms=sensor_time_ms, x=x * 9.81, y=y * 9.81, z=z * 9.81)
                 )
             elif sensor_type == 2:
                 gyro_data.append(
-                    _SensorData(ts=ts, x=x, y=y, z=z, device_time_ms=sensor_time_ms)
+                    _SensorData(device_time_ms=sensor_time_ms, x=x, y=y, z=z)
                 )
             elif sensor_type == 4:
-                mag_data.append(_SensorData(ts=ts, x=x, y=y, z=z, device_time_ms=sensor_time_ms))
+                mag_data.append(
+                    _SensorData(device_time_ms=sensor_time_ms, x=x, y=y, z=z)
+                )
 
     return pd.DataFrame(acc_data), pd.DataFrame(gyro_data), pd.DataFrame(mag_data)
 
@@ -218,7 +140,6 @@ def parse_sporsa_log(log_file: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
             ts_str = linelist[0].replace("uart:~$ ", "")
             device_time_ms = int(ts_str)
-            ts = datetime.fromtimestamp(device_time_ms / 1000.0, UTC) + timedelta(hours=1)
 
             acc_x = int(linelist[1]) * ACCEL_SENS["16G"] * 9.81 / 1000
             acc_y = int(linelist[2]) * ACCEL_SENS["16G"] * 9.81 / 1000
@@ -229,10 +150,10 @@ def parse_sporsa_log(log_file: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
             gyro_z = int(linelist[6]) * GYRO_SENS["2000DPS"] / 1000
 
             acc_data.append(
-                _SensorData(ts=ts, x=acc_x, y=acc_y, z=acc_z, device_time_ms=device_time_ms)
+                _SensorData(device_time_ms=device_time_ms, x=acc_x, y=acc_y, z=acc_z)
             )
             gyro_data.append(
-                _SensorData(ts=ts, x=gyro_x, y=gyro_y, z=gyro_z, device_time_ms=device_time_ms)
+                _SensorData(device_time_ms=device_time_ms, x=gyro_x, y=gyro_y, z=gyro_z)
             )
 
     return pd.DataFrame(acc_data), pd.DataFrame(gyro_data)
@@ -249,87 +170,69 @@ def parse_phone_log(log_file: str) -> pd.DataFrame:
             if reader.line_num == 1:
                 continue
 
-            ts = datetime.fromtimestamp(int(line[0]) / 1_000_000_000.0, UTC)
-            data.append(_SensorData(ts=ts, x=float(line[2]), y=float(line[3]), z=float(line[4])))
+            data.append(
+                _SensorData(device_time_ms=int(float(line[1]) * 1000), x=float(line[2]), y=float(line[3]), z=float(line[4]))
+            )
 
     return pd.DataFrame(data)
 
 
-def _estimate_sample_rate(timestamps: pd.Series) -> float:
-    """Approximate sample rate from timestamps in seconds."""
+# =============================================== Export dataframes ===============================================
+def export_sensor_frames(sensor_frames: Dict[str, pd.DataFrame], output_dir: str, add_magnitude: bool = True):
+    """Write standardized sensor CSVs for downstream analysis.
 
-    diffs = timestamps.diff().dropna()
-    if diffs.empty:
-        return 0.0
-
-    median_period = diffs.median()
-    return float(1.0 / median_period) if median_period else 0.0
-
-
-def assemble_motion_sensor_data(
-    acc_df: pd.DataFrame,
-    gyro_df: pd.DataFrame,
-    name: str,
-    sample_rate_hz: Optional[float] = None,
-) -> IMUSensorData:
-    """Combine accelerometer and gyroscope frames into :class:`IMUSensorData`.
-
-    The function aligns rows based on the device-recorded timestamps when available
-    (``device_time_ms`` column) so accelerometer and gyroscope measurements that
-    were captured at the same moment share the same ``timestamp`` value in seconds.
-
-    Args:
-        acc_df: Accelerometer dataframe with ``x``, ``y``, ``z`` columns.
-        gyro_df: Gyroscope dataframe with ``x``, ``y``, ``z`` columns.
-        name: Name for the resulting IMU stream.
-        sample_rate_hz: Optional sampling rate override. When omitted, the median
-            period between merged samples is used to estimate a rate.
-
-    Returns:
-        IMUSensorData with ``ax/ay/az`` and ``gx/gy/gz`` columns aligned on
-        ``timestamp``.
+    Each key in ``sensor_frames`` should be ``"acc"``, ``"gyro"``, or ``"mag"`` with
+    corresponding dataframes. Files are written as ``acc.csv``, ``gyro.csv``, etc.
     """
 
-    acc = acc_df.copy()
-    gyro = gyro_df.copy()
+    os.makedirs(output_dir, exist_ok=True)
 
-    acc["timestamp"] = _relative_timestamp_from_device(acc) if not acc.empty else pd.Series(dtype=float)
-    gyro["timestamp"] = _relative_timestamp_from_device(gyro) if not gyro.empty else pd.Series(dtype=float)
+    base_ms = _compute_common_base_ms(sensor_frames.values())
 
-    acc = acc.rename(columns={"x": "ax", "y": "ay", "z": "az"})
-    gyro = gyro.rename(columns={"x": "gx", "y": "gy", "z": "gz"})
+    for sensor_type, df in sensor_frames.items():
+        standardized = _standardize_sensor_frame(df, sensor_type, add_magnitude, base_ms=base_ms)
+        standardized.to_csv(os.path.join(output_dir, f"{sensor_type}.csv"), index=False)
 
-    combined = pd.merge(acc, gyro, on="timestamp", how="outer")
-    combined = combined[[col for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz"] if col in combined]]
+
+def export_joined_imu_frame(sensor_frames: Dict[str, pd.DataFrame], output_dir: str, add_magnitude: bool = True) -> pd.DataFrame:
+    """Merge accelerometer and gyroscope frames and write a single CSV to ``output_dir``.
+
+    The output contains ``timestamp``, ``ax/ay/az``, ``gx/gy/gz``, and optional ``mx/my/mz`` columns
+    sorted by time. The merged dataframe is returned for convenience.
+    """
+
+    base_ms = _compute_common_base_ms(sensor_frames.values())
+
+    standardized_frames = []
+    for sensor_type, df in sensor_frames.items():
+        standardized = _standardize_sensor_frame(df, sensor_type, add_magnitude, base_ms=base_ms)
+        standardized_frames.append(standardized)
+
+    combined = pd.merge(standardized_frames[0], standardized_frames[1], on="timestamp", how="outer")
+    if len(standardized_frames) > 2:
+        combined = pd.merge(combined, standardized_frames[2], on="timestamp", how="outer")
+    combined = combined[[col for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"] if col in combined]]
     combined = combined.sort_values("timestamp").reset_index(drop=True)
 
-    inferred_rate = sample_rate_hz if sample_rate_hz is not None else _estimate_sample_rate(combined["timestamp"])
-
-    return IMUSensorData(name=name, data=combined, sample_rate_hz=inferred_rate)
-
-
-def parse_arduino_imu(
-    log_file: str, name: str, sample_rate_hz: Optional[float] = None
-) -> IMUSensorData:
-    """Parse Arduino log and return aligned IMU stream."""
-
-    acc_df, gyro_df, _ = parse_arduino_log(log_file)
-    return assemble_motion_sensor_data(acc_df, gyro_df, name=name, sample_rate_hz=sample_rate_hz)
+    os.makedirs(output_dir, exist_ok=True)
+    combined.to_csv(os.path.join(output_dir, "imu.csv"), index=False)
+    return combined
 
 
-def parse_sporsa_imu(
-    log_file: str, name: str, sample_rate_hz: Optional[float] = None
-) -> IMUSensorData:
-    """Parse Sporsa log and return aligned IMU stream."""
+# =============================================== Load dataframes ===============================================
+def load_sensor_csv(path: str) -> pd.DataFrame:
+    """Load a sensor CSV into a dataframe."""
+    df = pd.read_csv(path)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return df
 
-    acc_df, gyro_df = parse_sporsa_log(log_file)
-    return assemble_motion_sensor_data(acc_df, gyro_df, name=name, sample_rate_hz=sample_rate_hz)
 
+def load_imu_csv(path: str, name: str) -> IMUSensorData:
+    """Load a standardized IMU CSV into :class:`IMUSensorData`."""
 
-def export_raw_session(
-    sensor_frames: Dict[str, pd.DataFrame], output_dir: str, add_magnitude: bool = True
-):
-    """Export parsed raw frames to standardized CSVs ready for ``load_imu_csv``."""
+    df = pd.read_csv(path)
+    df = df.sort_values("timestamp").reset_index(drop=True)
 
-    _export_to_csv(sensor_frames, output_dir, add_magnitude=add_magnitude)
-   
+    sample_rate_hz = 1.0 / df["timestamp"].diff().median()
+
+    return IMUSensorData(name=name, data=df, sample_rate_hz=sample_rate_hz)
