@@ -10,6 +10,10 @@ from .io import (
 	parse_sporsa_log,
 	parse_phone_log,
 )
+from .synchronization import (
+	apply_synchronization,
+	lida_synchronize,
+)
 
 __all__ = [
     "IMUSensorData",
@@ -19,5 +23,7 @@ __all__ = [
     "load_sensor_csv",
     "parse_arduino_log",
     "parse_sporsa_log",
-    "parse_phone_log"
+    "parse_phone_log",
+    "lida_synchronize",
+    "apply_synchronization",
 ]
