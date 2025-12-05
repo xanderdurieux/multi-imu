@@ -66,26 +66,39 @@ def _convert_sporsa(log_path: str, output_dir: str, name: str) -> None:
     _write_stream(imu.data, os.path.join(output_dir, "sporsa"), prefix=name)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arduino-log", help="Path to Arduino BLE log file")
-    parser.add_argument("--sporsa-log", help="Path to Sporsa UART log file")
-    parser.add_argument(
-        "--output-dir", default="converted", help="Directory to write standardized CSVs"
-    )
-    parser.add_argument("--session-name", default="session", help="Prefix for output files")
+def main2():
+    session_id = 6
+    
+    arduino_log = f"data/raw/arduino/log{session_id}.txt"
+    arduino_out = f"data/new/session_{session_id}/sporsa"
+    _convert_arduino(arduino_log, arduino_out, f"session{session_id}")
 
-    args = parser.parse_args()
+    sporsa_log = f"data/raw/sporsa/sporsa-session{session_id}.txt"
+    sporsa_out = f"data/new/session_{session_id}/sporsa"
+    _convert_sporsa(sporsa_log, sporsa_out, f"session{session_id}")
 
-    if not args.arduino_log and not args.sporsa_log:
-        parser.error("Provide at least one of --arduino-log or --sporsa-log")
+    acc_data = parse_phone_log("data/raw/smartphone/AccelerometerUncalibrated.csv")
+    gyro_data = parse_phone_log("data/raw/smartphone/GyroscopeUncalibrated.csv")
+    mag_data = parse_phone_log("data/raw/smartphone/MagnetometerUncalibrated.csv")
+    export_raw_session({"acc": acc_data, "gyro": gyro_data, "mag": mag_data}, "data/new/smartphone", False)
 
-    if args.arduino_log:
-        _convert_arduino(args.arduino_log, args.output_dir, args.session_name)
 
-    if args.sporsa_log:
-        _convert_sporsa(args.sporsa_log, args.output_dir, args.session_name)
+def convert_raw_session(session_id: int, include_phone: bool = False):
+	acc, gyro, mag = parse_arduino_log(f"data/raw/arduino/log{session_id}.txt")
+	export_raw_session({"acc": acc, "gyro": gyro, "mag": mag}, f"data/new/session_{session_id}/arduino", False)
 
+	acc, gyro = parse_sporsa_log(f"data/raw/sporsa/sporsa-session{session_id}.txt")
+	export_raw_session({"acc": acc, "gyro": gyro}, f"data/new/session_{session_id}/sporsa", False)
+
+	if include_phone:
+		acc_data = parse_phone_log("data/raw/smartphone/AccelerometerUncalibrated.csv")
+		gyro_data = parse_phone_log("data/raw/smartphone/GyroscopeUncalibrated.csv")
+		mag_data = parse_phone_log("data/raw/smartphone/MagnetometerUncalibrated.csv")
+		export_raw_session({"acc": acc_data, "gyro": gyro_data, "mag": mag_data}, "data/new/smartphone", False)
+
+def main():
+	for i in range(1, 9):
+		convert_raw_session(i, include_phone=(i==8))
 
 if __name__ == "__main__":
     main()
