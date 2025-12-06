@@ -219,6 +219,19 @@ def export_joined_imu_frame(sensor_frames: Dict[str, pd.DataFrame], output_dir: 
     return combined
 
 
+def export_imu_csv(sensor: IMUSensorData, output_path: str) -> None:
+    """Export an :class:`IMUSensorData` to a CSV file.
+    
+    Args:
+        sensor: IMUSensorData to export
+        output_path: Path where the CSV file will be written
+    """
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    sensor.data.to_csv(output_path, index=False)
+
+
 # =============================================== Load dataframes ===============================================
 def load_sensor_csv(path: str) -> pd.DataFrame:
     """Load a sensor CSV into a dataframe."""
