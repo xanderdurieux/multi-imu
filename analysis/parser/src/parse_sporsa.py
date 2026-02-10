@@ -14,15 +14,12 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 try:
-    # When run as a module: python3 -m analysis.src.parse_sporsa
-    from analysis.src.imu_common import IMUSample, write_csv
+    # Preferred when installed / run as module:
+    #   python3 -m analysis.parser.src.parse_sporsa
+    from analysis.parser.src.parse_common import IMUSample, write_csv
 except ImportError:
-    try:
-        # When imported via the local package: from src import parse_sporsa
-        from src.imu_common import IMUSample, write_csv
-    except ImportError:
-        # When run directly from inside analysis/src: python3 parse_sporsa.py
-        from imu_common import IMUSample, write_csv
+    # Fallback when run from within src/:
+    from parse_common import IMUSample, write_csv
 
 ACCEL_SENS = {
     "4G": 0.122,

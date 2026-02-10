@@ -1,2 +1,5 @@
 data/
-docs/
+
+# Python 
+**/__pycache__/
+**/.venv/

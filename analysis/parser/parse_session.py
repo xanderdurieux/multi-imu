@@ -44,15 +44,16 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 try:
-    # When run as a module: python3 -m analysis.parse_session
-    from analysis.src.parse_arduino import parse_arduino_log
-    from analysis.src.parse_sporsa import parse_sporsa_log
-    from analysis.src.imu_common import IMUSample, write_csv
+    # Preferred when installed / run as module:
+    #   python3 -m analysis.parser.parse_session
+    from analysis.parser.src.parse_arduino import parse_arduino_log
+    from analysis.parser.src.parse_sporsa import parse_sporsa_log
+    from analysis.parser.src.parse_common import IMUSample, write_csv
 except ImportError:
-    # When run directly as a script: python3 analysis/parse_session.py
+    # Fallback when run from within parser folder:
     from src.parse_arduino import parse_arduino_log
     from src.parse_sporsa import parse_sporsa_log
-    from src.imu_common import IMUSample, write_csv
+    from src.parse_common import IMUSample, write_csv
 
 
 def _classify_file(path: Path) -> Optional[str]:
@@ -84,7 +85,8 @@ def process_session(session_name: str) -> None:
     Parse all known sensor logs for a given session and write CSVs.
     """
     here = Path(__file__).resolve().parent
-    data_root = here.parent / "data"
+    # Go up to the repo root (.../master-thesis) and then into data/
+    data_root = here.parent.parent / "data"
 
     raw_dir = data_root / "raw" / session_name
     out_dir = data_root / "processed" / session_name
