@@ -1,0 +1,7 @@
+[project]
+name = "parser"
+version = "0.1.0"
+description = "Parse raw txt logs of recorder IMU sessions from arduino and/or sporsa sensors, and export the IMU data to csv"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
