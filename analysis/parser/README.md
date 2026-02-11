@@ -5,24 +5,24 @@ normalized CSV files for analysis.
 
 ## Goal
 
-- Read raw sensor logs from `../data/raw/<session_name>/`
+- Read raw sensor logs from `data/raw/<session_name>/`
 - Parse each sensor file (e.g. Arduino Nano 33 BLE, Sporsa)
 - Write processed CSVs with a fixed schema:
   - `timestamp, ax, ay, az, gx, gy, gz, mx, my, mz`
-- Store the results in `../data/processed/<session_name>/`
+- Store the results in `data/processed/<session_name>/`
 
 ## Directory layout
 
 Relative to this folder:
 
-- **Raw data input**: `../data/raw/<session_name>/`
+- **Raw data input**: `data/raw/<session_name>/`
   - Example:
-    - `../data/raw/session_1/arduino_imu.txt`
-    - `../data/raw/session_1/sporsa_imu.txt`
-- **Processed output**: `../data/processed/<session_name>/`
+    - `data/raw/session_1/arduino_imu.txt`
+    - `data/raw/session_1/sporsa_imu.txt`
+- **Processed output**: `data/processed/<session_name>/`
   - Example:
-    - `../data/processed/session_1/arduino_imu.csv`
-    - `../data/processed/session_1/sporsa_imu.csv`
+    - `data/processed/session_1/arduino_imu.csv`
+    - `data/processed/session_1/sporsa_imu.csv`
 
 `parse_session.py` inspects all files in the raw session folder:
 
@@ -36,6 +36,31 @@ Relative to this folder:
 - `src/parse_arduino.py` – parser for Arduino Nano 33 BLE IMU logs.
 - `src/parse_sporsa.py` – parser for Sporsa IMU logs.
 - `parse_session.py` – orchestrates parsing of an entire session folder.
+
+## Session parser (`parse_session.py`)
+
+`parse_session.py` ties everything together for a given session:
+
+- Computes:
+  - `raw_dir = data/raw/<session_name>/`
+  - `out_dir = data/processed/<session_name>/`
+- Creates `out_dir` if needed.
+- Iterates over files in `raw_dir`:
+  - Classifies each by name (`arduino` / `sporsa` / ignore).
+  - Chooses the correct parser.
+  - Writes `<raw_stem>_imu.csv` in `out_dir`.
+
+### CLI usage
+From the `analysis/` folder, run the package as a module:
+
+```bash
+uv run -m parser.parse_session <session_name>
+# or
+python3 -m parser.parse_session <session_name>
+```
+
+This reads logs from `data/raw/<session_name>/` and writes processed CSVs to
+`data/processed/<session_name>/`.
 
 ## Arduino parser (`src/parse_arduino.py`)
 
@@ -54,7 +79,7 @@ Relative to this folder:
 ### CLI usage
 
 ```bash
-python3 analysis/parser/src/parse_arduino.py <source_txt> <destination_csv>
+python3 parser/src/parse_arduino.py <source_txt> <destination_csv>
 ```
 
 ## Sporsa parser (`src/parse_sporsa.py`)
@@ -73,28 +98,5 @@ python3 analysis/parser/src/parse_arduino.py <source_txt> <destination_csv>
 ### CLI usage
 
 ```bash
-python3 analysis/parser/src/parse_sporsa.py <source_txt> <destination_csv>
+python3 parser/src/parse_sporsa.py <source_txt> <destination_csv>
 ```
-
-## Session parser (`parse_session.py`)
-
-`parse_session.py` ties everything together for a given session:
-
-- Computes:
-  - `raw_dir = ../data/raw/<session_name>/`
-  - `out_dir = ../data/processed/<session_name>/`
-- Creates `out_dir` if needed.
-- Iterates over files in `raw_dir`:
-  - Classifies each by name (`arduino` / `sporsa` / ignore).
-  - Chooses the correct parser.
-  - Writes `<raw_stem>_imu.csv` in `out_dir`.
-
-### CLI usage
-
-```bash
-python3 analysis/parser/parse_session.py <session_name>
-```
-
-This reads logs from `../data/raw/session_1/` and writes processed CSVs to
-`../data/processed/session_1/`.
-

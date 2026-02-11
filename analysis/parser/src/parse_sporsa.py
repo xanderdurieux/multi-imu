@@ -12,13 +12,7 @@ import sys
 from pathlib import Path
 from typing import Iterator, Optional
 
-try:
-    # Preferred when installed / run as module:
-    #   python3 -m analysis.parser.src.parse_sporsa
-    from analysis.parser.src.parse_common import IMUSample, write_csv
-except ImportError:
-    # Fallback when run from within src/:
-    from parse_common import IMUSample, write_csv
+from .parse_common import IMUSample, write_csv
 
 ACCEL_SENS = {
     "4G": 0.122,

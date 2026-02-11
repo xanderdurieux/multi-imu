@@ -3,6 +3,7 @@ Convert a raw Arduino BLE IMU log to a normalized CSV.
 
 Output CSV columns (in order):
 timestamp, ax, ay, az, gx, gy, gz, mx, my, mz
+
 """
 
 from __future__ import annotations
@@ -13,13 +14,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterator, Optional
 
-try:
-    # Preferred when installed / run as module:
-    #   python3 -m analysis.parser.src.parse_arduino
-    from analysis.parser.src.parse_common import IMUSample, write_csv
-except ImportError:
-    # Fallback when run from within src/:
-    from parse_common import IMUSample, write_csv
+from .parse_common import IMUSample, write_csv
 
 GRAVITY = 9.81
 

@@ -1,40 +1,11 @@
 """
-High-level parser for IMU sessions in the ../data folder.
+High-level parser for IMU sessions in the data folder.
 
-Directory layout (relative to this file):
+This file orchestrates the conversion of all raw IMU log files in a given session folder
+(under data/raw/<session_name>/) into normalized CSV files (under data/processed/<session_name>/).
+It detects each log file type, selects the appropriate parser, and writes standardized CSVs
+for further analysis.
 
-    ../data/
-        raw/
-            session_1/
-                arduino_imu.txt
-                sporsa_imu.txt
-                ...
-            session_2/
-                ...
-        processed/
-            session_1/
-                arduino_imu.csv
-                sporsa_imu.csv
-                ...
-
-Usage (from the repo root):
-
-    python3 analysis/parse_session.py <session_name>
-
-Example:
-
-    python3 analysis/parse_session.py session_1
-
-This will read from:
-    data/raw/<session_name>/
-and write CSVs to:
-    data/processed/<session_name>/
-
-File naming:
-- All files in the raw session folder are inspected.
-- Files whose name contains "arduino" are parsed with the Arduino parser.
-- Files whose name contains "sporsa"  are parsed with the Sporsa parser.
-- Output CSVs are named "<raw_stem>.csv" in the processed folder.
 """
 
 from __future__ import annotations
@@ -43,13 +14,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-try:
-    # Preferred when installed / run as module:
-    #   python3 -m analysis.parser.parse_session
-    from analysis.parser.src import parse_arduino_log, parse_sporsa_log, IMUSample, write_csv
-except ImportError:
-    # Fallback when run from within parser folder:
-    from src import parse_arduino_log, parse_sporsa_log, IMUSample, write_csv
+from .src import parse_arduino_log, parse_sporsa_log, IMUSample, write_csv
 
 
 def _classify_file(path: Path) -> Optional[str]:
@@ -81,8 +46,7 @@ def process_session(session_name: str) -> None:
     Parse all known sensor logs for a given session and write CSVs.
     """
     here = Path(__file__).resolve().parent
-    # Go up to the repo root (.../master-thesis) and then into data/
-    data_root = here.parent.parent / "data"
+    data_root = here.parent / "data"
 
     raw_dir = data_root / "raw" / session_name
     out_dir = data_root / "processed" / session_name
@@ -107,17 +71,11 @@ def process_session(session_name: str) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
-    """
-    CLI entry point.
-
-    Usage:
-        python3 analysis/parse_session.py <session_name>
-    """
     if argv is None:
         argv = sys.argv[1:]
 
     if len(argv) != 1:
-        print("Usage: python3 analysis/parse_session.py <session_name>")
+        print("Usage: python3 parser/parse_session.py <session_name>")
         return
 
     session_name = argv[0]
