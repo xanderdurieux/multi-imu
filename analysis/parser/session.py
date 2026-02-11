@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
-from .src import parse_arduino_log, parse_sporsa_log, IMUSample, write_csv
+from common import write_csv, raw_session_dir, processed_session_dir
+from .arduino import parse_arduino_log
+from .sporsa import parse_sporsa_log
 
 
 def _classify_file(path: Path) -> Optional[str]:
@@ -45,11 +47,8 @@ def process_session(session_name: str) -> None:
     """
     Parse all known sensor logs for a given session and write CSVs.
     """
-    here = Path(__file__).resolve().parent
-    data_root = here.parent / "data"
-
-    raw_dir = data_root / "raw" / session_name
-    out_dir = data_root / "processed" / session_name
+    raw_dir = raw_session_dir(session_name)
+    out_dir = processed_session_dir(session_name)
 
     if not raw_dir.is_dir():
         print(f"Raw session folder not found: {raw_dir}")
@@ -75,7 +74,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         argv = sys.argv[1:]
 
     if len(argv) != 1:
-        print("Usage: python3 parser/parse_session.py <session_name>")
+        print("Usage: python3 -m parser.session <session_name>")
         return
 
     session_name = argv[0]
