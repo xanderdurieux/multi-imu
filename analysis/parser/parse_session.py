@@ -46,14 +46,10 @@ from typing import Iterable, Optional
 try:
     # Preferred when installed / run as module:
     #   python3 -m analysis.parser.parse_session
-    from analysis.parser.src.parse_arduino import parse_arduino_log
-    from analysis.parser.src.parse_sporsa import parse_sporsa_log
-    from analysis.parser.src.parse_common import IMUSample, write_csv
+    from analysis.parser.src import parse_arduino_log, parse_sporsa_log, IMUSample, write_csv
 except ImportError:
     # Fallback when run from within parser folder:
-    from src.parse_arduino import parse_arduino_log
-    from src.parse_sporsa import parse_sporsa_log
-    from src.parse_common import IMUSample, write_csv
+    from src import parse_arduino_log, parse_sporsa_log, IMUSample, write_csv
 
 
 def _classify_file(path: Path) -> Optional[str]:
