@@ -3,8 +3,6 @@ Convert a raw Arduino BLE IMU log to a normalized CSV.
 
 Output CSV columns (in order):
 timestamp, ax, ay, az, gx, gy, gz, mx, my, mz
-
-This script intentionally avoids an argument parser; edit the paths in `main()`.
 """
 
 from __future__ import annotations
@@ -13,7 +11,7 @@ import re
 import struct
 import sys
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Dict, Iterator, Optional
 
 try:
     # Preferred when installed / run as module:
@@ -58,14 +56,7 @@ def _parse_arduino_line(line: str) -> Optional[IMUSample]:
     #   float y;
     #   float z;
     #   uint32_t timestamp;
-    try:
-        sensor_type, x, y, z, sensor_time_ms = struct.unpack("<BfffI", raw[:17])
-    except struct.error:
-        # Fallback: older 20‑byte layout with 3 padding bytes after the type.
-        try:
-            sensor_type, x, y, z, sensor_time_ms = struct.unpack("<B3xfffI", raw[:20])
-        except struct.error:
-            return None
+    sensor_type, x, y, z, sensor_time_ms = struct.unpack("<B3xfffI", raw)
 
     if sensor_type == 1:  # accelerometer
         return IMUSample(
@@ -92,25 +83,63 @@ def _parse_arduino_line(line: str) -> Optional[IMUSample]:
     return None
 
 
+def _merge_samples(a: IMUSample, b: IMUSample) -> IMUSample:
+    """Merge two IMUSample objects with the same timestamp."""
+    if a.timestamp != b.timestamp:
+        # Should not happen in normal flow; prefer b's timestamp if it does.
+        ts = b.timestamp
+    else:
+        ts = a.timestamp
+
+    return IMUSample(
+        timestamp=ts,
+        ax=b.ax if b.ax is not None else a.ax,
+        ay=b.ay if b.ay is not None else a.ay,
+        az=b.az if b.az is not None else a.az,
+        gx=b.gx if b.gx is not None else a.gx,
+        gy=b.gy if b.gy is not None else a.gy,
+        gz=b.gz if b.gz is not None else a.gz,
+        mx=b.mx if b.mx is not None else a.mx,
+        my=b.my if b.my is not None else a.my,
+        mz=b.mz if b.mz is not None else a.mz,
+    )
+
+
 def parse_arduino_log(txt_path: Path) -> Iterator[IMUSample]:
-    """Yield IMUSample objects parsed from a raw Arduino log file."""
+    """
+    Yield IMUSample objects parsed from a raw Arduino log file.
+
+    Multiple packets with the same timestamp (acc/gyro/mag) are merged into
+    a single row so that each timestamp appears only once in the CSV.
+    """
+    by_timestamp: Dict[int, IMUSample] = {}
+
     with txt_path.open("r", encoding="utf-8", errors="replace") as f:
         for raw_line in f:
             sample = _parse_arduino_line(raw_line)
-            if sample is not None:
-                yield sample
+            if sample is None:
+                continue
+
+            existing = by_timestamp.get(sample.timestamp)
+            if existing is None:
+                by_timestamp[sample.timestamp] = sample
+            else:
+                by_timestamp[sample.timestamp] = _merge_samples(existing, sample)
+
+    for ts in sorted(by_timestamp.keys()):
+        yield by_timestamp[ts]
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     """
-    Usage (from the analysis/src/ directory):
+    Usage (from the analysis/parser/src/ directory):
 
         python3 parse_arduino.py <source_txt> <destination_csv>
 
     Or from the repo root:
 
-        python3 analysis/src/parse_arduino.py <source_txt> <destination_csv>
-        python3 -m analysis.src.parse_arduino <source_txt> <destination_csv>
+        python3 analysis/parser/src/parse_arduino.py <source_txt> <destination_csv>
+        python3 -m analysis.parser.src.parse_arduino <source_txt> <destination_csv>
     """
 
     if argv is None:

@@ -4,7 +4,6 @@ Convert a raw Sporsa IMU log to a normalized CSV.
 Output CSV columns (in order):
 timestamp, ax, ay, az, gx, gy, gz, mx, my, mz
 
-This script intentionally avoids an argument parser; edit the paths in `main()`.
 """
 
 from __future__ import annotations
@@ -94,14 +93,14 @@ def parse_sporsa_log(txt_path: Path) -> Iterator[IMUSample]:
 
 def main(argv: Optional[list[str]] = None) -> None:
     """
-    Usage (from the analysis/src/ directory):
+    Usage (from the analysis/parser/src/ directory):
 
         python3 parse_sporsa.py <source_txt> <destination_csv>
 
     Or from the repo root:
 
-        python3 analysis/src/parse_sporsa.py <source_txt> <destination_csv>
-        python3 -m analysis.src.parse_sporsa <source_txt> <destination_csv>
+        python3 analysis/parser/src/parse_sporsa.py <source_txt> <destination_csv>
+        python3 -m analysis.parser.src.parse_sporsa <source_txt> <destination_csv>
     """
 
     if argv is None:
