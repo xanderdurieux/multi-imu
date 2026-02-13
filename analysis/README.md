@@ -37,6 +37,18 @@ uv run -m parser.session <session_name>
 uv run -m plot.plot_session data/processed/<session_name>/<filename>
 ```
 
+- **Synchronize two processed IMU CSVs** (writes aligned CSVs next to the inputs):
+
+```bash
+uv run -m sync.sync_streams \
+  data/processed/<session_name>/ref.csv \
+  data/processed/<session_name>/tgt.csv \
+  --resample-rate 100.0 \
+  --max-lag-s 2.0
+```
+
+This uses SDA-style lag estimation and a LIDA-style linear drift correction to align the target stream to the reference.
+
 Everything uses the shared `IMUSample` model and CSV schema from `common`, so new processing modules can plug into the same types later.
 
 
