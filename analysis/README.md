@@ -1,6 +1,6 @@
 ## Analysis: IMU Data Processing
 
-Python toolkit for offline analysis of the IMU data
+Python toolkit for offline analysis of the IMU data.
 
 ### Modules
 
@@ -8,8 +8,11 @@ Python toolkit for offline analysis of the IMU data
   - Shared types and helpers (`IMUSample`, CSV helpers, data paths).
 - **`parser/`**
   - Parses raw IMU logs under `data/raw/<session_name>/` into CSV files under `data/processed/<session_name>/`.
+- **`sync/`**
+  - Synchronizes two processed IMU streams with correlation-based offset + linear drift estimation.
+  - Provides reusable methods for loading, feature building, offset/drift estimation, model persistence, model application, and resampling.
 - **`plot/`**
-  - Plots time‑series from processed CSV files.
+  - Plots time-series from processed CSV files.
 
 ### Setup
 
@@ -31,24 +34,57 @@ uv sync
 uv run -m parser.session <session_name>
 ```
 
+- **Synchronize IMU streams** (`sporsa` as reference, `arduino` as target):
+
+Session mode (automatic stream selection in `data/processed/<session_name>/`):
+
+```bash
+uv run -m sync.sync_streams session <session_name>
+```
+
+Manual mode (explicit reference and target CSV paths):
+
+```bash
+uv run -m sync.sync_streams pair data/processed/<session_name>/<ref>.csv data/processed/<session_name>/<target>.csv
+```
+
+Optional CLI arguments:
+
+- `--sample-rate-hz 60`
+- `--max-lag-seconds 30`
+- `--resample-rate-hz 100`
+
+Generated outputs (next to target CSV):
+
+- `<target>_to_<reference>_sync.json`
+  - Contains estimated time offset, drift, scale, quality metrics and settings.
+- `<target>_synced.csv`
+  - Target stream in reference clock; includes `timestamp_orig` and `timestamp_aligned`.
+- `<target>_synced_resampled_<hz>hz.csv` (only if `resample_hz` is provided)
+  - Uniformly resampled synchronized target stream.
+
 - **Plot a processed CSV** (writes a PNG next to the CSV):
 
 ```bash
-uv run -m plot.plot_session data/processed/<session_name>/<filename>
+uv run -m plot.plot_device data/processed/<session_name>/<filename>
 ```
 
-- **Synchronize two processed IMU CSVs** (writes aligned CSVs next to the inputs):
+- **Plot two streams in one figure** (for raw vs raw, synced vs reference, or other processed files):
 
 ```bash
-uv run -m sync.sync_streams \
-  data/processed/<session_name>/ref.csv \
-  data/processed/<session_name>/tgt.csv \
-  --resample-rate 100.0 \
-  --max-lag-s 2.0
+uv run -m plot.compare_streams data/processed/<session_name>/sporsa.csv data/processed/<session_name>/arduino.csv
 ```
 
-This uses SDA-style lag estimation and a LIDA-style linear drift correction to align the target stream to the reference.
+Example for synced comparison:
 
-Everything uses the shared `IMUSample` model and CSV schema from `common`, so new processing modules can plug into the same types later.
+```bash
+uv run -m plot.compare_streams data/processed/<session_name>/sporsa.csv data/processed/<session_name>/arduino_synced.csv
+```
 
+Optional CLI arguments:
 
+- `--label-a sporsa`
+- `--label-b arduino_synced`
+- `--output data/processed/<session_name>/comparison.png`
+- `--relative-time` (x-axis starts at 0 for each stream)
+- `--split-axes` (plots `x`, `y`, `z` in separate panels to avoid overlap)
