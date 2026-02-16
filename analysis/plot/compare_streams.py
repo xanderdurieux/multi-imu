@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 from common.csv_schema import load_dataframe
 
 if TYPE_CHECKING:
-    import pandas as pd
+    pass
 
 
 def _prepare_time(df: "pd.DataFrame", *, relative: bool) -> "pd.Series":
@@ -105,6 +107,51 @@ def _plot_single_axis(
     ax.legend(loc="upper right", fontsize=8)
 
 
+def _vector_magnitude(df: "pd.DataFrame", cols: tuple[str, str, str]) -> "pd.Series":
+    """Compute vector magnitude and keep NaN when any component is missing."""
+    valid = (~df[cols[0]].isna()) & (~df[cols[1]].isna()) & (~df[cols[2]].isna())
+    mag = np.full(len(df), np.nan, dtype=float)
+    xyz = df.loc[valid, list(cols)].to_numpy(dtype=float)
+    mag[valid.to_numpy()] = np.sqrt(np.sum(xyz * xyz, axis=1))
+    return pd.Series(mag, index=df.index)
+
+
+def _plot_magnitude(
+    ax: Any,
+    t_a: "pd.Series",
+    df_a: "pd.DataFrame",
+    t_b: "pd.Series",
+    df_b: "pd.DataFrame",
+    *,
+    cols: tuple[str, str, str],
+    unit: str,
+    label_a: str,
+    label_b: str,
+    title: str,
+) -> None:
+    """Plot vector magnitudes for one sensor type."""
+    mag_a = _vector_magnitude(df_a, cols)
+    mag_b = _vector_magnitude(df_b, cols)
+
+    mask_a = ~mag_a.isna()
+    mask_b = ~mag_b.isna()
+
+    ax.plot(t_a[mask_a], mag_a[mask_a], color="tab:blue", linewidth=1.0, alpha=0.85, label=label_a)
+    ax.plot(
+        t_b[mask_b],
+        mag_b[mask_b],
+        color="tab:orange",
+        linewidth=1.0,
+        alpha=0.9,
+        linestyle="--",
+        label=label_b,
+    )
+    ax.set_title(title)
+    ax.set_ylabel(unit)
+    ax.grid(alpha=0.25)
+    ax.legend(loc="upper right", fontsize=8)
+
+
 def plot_stream_comparison(
     df_a: "pd.DataFrame",
     df_b: "pd.DataFrame",
@@ -115,6 +162,7 @@ def plot_stream_comparison(
     output: Path,
     relative_time: bool = False,
     split_axes: bool = False,
+    magnitudes: bool = False,
 ) -> None:
     """
     Overlay two IMU streams for direct visual comparison.
@@ -124,7 +172,47 @@ def plot_stream_comparison(
     t_a = _prepare_time(df_a, relative=relative_time)
     t_b = _prepare_time(df_b, relative=relative_time)
 
-    if not split_axes:
+    if magnitudes:
+        fig, axes = plt.subplots(3, 1, figsize=(14, 10), constrained_layout=True, sharex=True)
+        _plot_magnitude(
+            axes[0],
+            t_a,
+            df_a,
+            t_b,
+            df_b,
+            cols=("ax", "ay", "az"),
+            unit="m/s^2",
+            label_a=label_a,
+            label_b=label_b,
+            title="Acceleration Magnitude",
+        )
+        _plot_magnitude(
+            axes[1],
+            t_a,
+            df_a,
+            t_b,
+            df_b,
+            cols=("gx", "gy", "gz"),
+            unit="deg/s",
+            label_a=label_a,
+            label_b=label_b,
+            title="Gyroscope Magnitude",
+        )
+        _plot_magnitude(
+            axes[2],
+            t_a,
+            df_a,
+            t_b,
+            df_b,
+            cols=("mx", "my", "mz"),
+            unit="uT",
+            label_a=label_a,
+            label_b=label_b,
+            title="Magnetometer Magnitude",
+        )
+        x_label = "Timestamp (ms from start)" if relative_time else "Timestamp (ms)"
+        axes[-1].set_xlabel(x_label)
+    elif not split_axes:
         fig, axes = plt.subplots(3, 1, figsize=(14, 10), constrained_layout=True)
 
         _plot_triplet(
@@ -221,10 +309,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use time since each stream start on the x-axis.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--split-axes",
         action="store_true",
         help="Use dedicated panels for x/y/z components.",
+    )
+    mode_group.add_argument(
+        "--magnitudes",
+        action="store_true",
+        help="Plot |x,y,z| magnitudes instead of individual axis components.",
     )
     return parser
 
@@ -250,6 +344,7 @@ def main(argv: list[str] | None = None) -> None:
         output=output,
         relative_time=args.relative_time,
         split_axes=args.split_axes,
+        magnitudes=args.magnitudes,
     )
 
     print(f"comparison_plot={output}")

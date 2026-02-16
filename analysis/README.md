@@ -69,22 +69,23 @@ Generated outputs (next to target CSV):
 uv run -m plot.plot_device data/processed/<session_name>/<filename>
 ```
 
-- **Plot two streams in one figure** (for raw vs raw, synced vs reference, or other processed files):
+- **Plot a processed CSV with vector magnitudes** (`|acc|`, `|gyro|`, `|mag|`):
 
 ```bash
-uv run -m plot.compare_streams data/processed/<session_name>/sporsa.csv data/processed/<session_name>/arduino.csv
+uv run -m plot.plot_device data/processed/<session_name>/<filename> --magnitudes
 ```
 
-Example for synced comparison:
+- **Compare two streams in one plot** (for raw vs raw, synced vs reference, or other processed files):
 
 ```bash
 uv run -m plot.compare_streams data/processed/<session_name>/sporsa.csv data/processed/<session_name>/arduino_synced.csv
 ```
 
-Optional CLI arguments:
+Useful comparison options:
 
-- `--label-a sporsa`
-- `--label-b arduino_synced`
-- `--output data/processed/<session_name>/comparison.png`
+- `--label-a sporsa` (label for first stream)
+- `--label-b arduino_synced` (label for second stream)
+- `--output data/processed/<session_name>/comparison.png` (custom output path)
 - `--relative-time` (x-axis starts at 0 for each stream)
 - `--split-axes` (plots `x`, `y`, `z` in separate panels to avoid overlap)
+- `--magnitudes` (plot magnitudes instead of x/y/z)
