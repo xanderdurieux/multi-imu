@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def plot_dataframe(df: "pd.DataFrame", title: str, output: Path | None) -> None:
-    """Plot IMU time-series data from a pandas DataFrame."""
+    """Plot one processed IMU CSV stream in acceleration/gyro/magnetometer panels."""
     t = df["timestamp"]
 
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), constrained_layout=True)
@@ -48,20 +48,28 @@ def plot_dataframe(df: "pd.DataFrame", title: str, output: Path | None) -> None:
 
     fig.suptitle(title)
     fig.savefig(output, dpi=150)
-    # plt.show() unknown error TODO: fix this
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for single-stream plotting."""
+    parser = argparse.ArgumentParser(
+        prog="python -m plot.plot_device",
+        description="Plot one processed IMU CSV file.",
+    )
+    parser.add_argument("csv_file", type=Path, help="Input CSV path.")
+    parser.add_argument("--output", type=Path, default=None, help="Optional output PNG path.")
+    parser.add_argument("--title", default=None, help="Optional plot title.")
+    return parser
+
 
 def main(argv: Optional[list[str]] = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
 
-    if len(argv) != 1:
-        print("Usage: python3 -m plot.plot_session <csv_file>")
-        return
-
-    csv_path = Path(argv[0])
+    csv_path = args.csv_file
     df = load_dataframe(csv_path)
-    png_path = csv_path.with_suffix(".png")
-    plot_dataframe(df, title=csv_path.name, output=png_path)
+    png_path = args.output or csv_path.with_suffix(".png")
+    plot_title = args.title or csv_path.name
+    plot_dataframe(df, title=plot_title, output=png_path)
 
 
 if __name__ == "__main__":
