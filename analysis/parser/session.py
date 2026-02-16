@@ -10,7 +10,7 @@ for further analysis.
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +33,7 @@ def _classify_file(path: Path) -> Optional[str]:
 
 
 def _process_file(sensor_type: str, src: Path, dst: Path) -> None:
+    """Dispatch one raw log file to the matching parser and write CSV output."""
     if sensor_type == "arduino":
         samples = parse_arduino_log(src)
     elif sensor_type == "sporsa":
@@ -69,19 +70,22 @@ def process_session(session_name: str) -> None:
         _process_file(sensor_type, src, dst)
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for session processing."""
+    parser = argparse.ArgumentParser(
+        prog="python -m parser.session",
+        description="Parse all recognized raw logs for one session into processed CSVs.",
+    )
+    parser.add_argument("session_name", help="Session folder under data/raw.")
+    return parser
+
+
 def main(argv: Optional[list[str]] = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
-
-    if len(argv) != 1:
-        print("Usage: python3 -m parser.session <session_name>")
-        return
-
-    session_name = argv[0]
-    process_session(session_name)
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+    process_session(args.session_name)
 
 
 if __name__ == "__main__":
     main()
-
 

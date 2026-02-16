@@ -5,7 +5,7 @@ Convert a raw Sporsa IMU log to a normalized CSV.
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -82,21 +82,24 @@ def parse_sporsa_log(txt_path: Path) -> Iterator[IMUSample]:
                 yield sample
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for Sporsa log conversion."""
+    parser = argparse.ArgumentParser(
+        prog="python -m parser.sporsa",
+        description="Convert a raw Sporsa log to processed IMU CSV format.",
+    )
+    parser.add_argument("source_txt", type=Path, help="Path to raw Sporsa text log.")
+    parser.add_argument("destination_csv", type=Path, help="Output CSV path.")
+    return parser
+
+
 def main(argv: Optional[list[str]] = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
 
-    if len(argv) != 2:
-        print("Usage: python3 parse_sporsa.py <source_txt> <destination_csv>")
-        return
-
-    txt_path = Path(argv[0])
-    csv_path = Path(argv[1])
-
-    samples = parse_sporsa_log(txt_path)
-    write_csv(samples, csv_path)
+    samples = parse_sporsa_log(args.source_txt)
+    write_csv(samples, args.destination_csv)
 
 
 if __name__ == "__main__":
     main()
-

@@ -5,9 +5,9 @@ Convert a raw Arduino BLE IMU log to a normalized CSV.
 
 from __future__ import annotations
 
+import argparse
 import re
 import struct
-import sys
 from pathlib import Path
 from typing import Dict, Iterator, Optional
 
@@ -122,19 +122,23 @@ def parse_arduino_log(txt_path: Path) -> Iterator[IMUSample]:
         yield by_timestamp[ts]
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for Arduino log conversion."""
+    parser = argparse.ArgumentParser(
+        prog="python -m parser.arduino",
+        description="Convert a raw Arduino BLE log to processed IMU CSV format.",
+    )
+    parser.add_argument("source_txt", type=Path, help="Path to raw Arduino text log.")
+    parser.add_argument("destination_csv", type=Path, help="Output CSV path.")
+    return parser
+
+
 def main(argv: Optional[list[str]] = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
 
-    if len(argv) != 2:
-        print("Usage: python3 parse_arduino.py <source_txt> <destination_csv>")
-        return
-
-    txt_path = Path(argv[0])
-    csv_path = Path(argv[1])
-
-    samples = parse_arduino_log(txt_path)
-    write_csv(samples, csv_path)
+    samples = parse_arduino_log(args.source_txt)
+    write_csv(samples, args.destination_csv)
 
 
 if __name__ == "__main__":
