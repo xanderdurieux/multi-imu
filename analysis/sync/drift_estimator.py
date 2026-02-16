@@ -1,4 +1,9 @@
-"""Estimate and apply offset+drift synchronization between IMU streams."""
+"""
+LIDA-style (Linear Interpolation Data Alignment) refined synchronization model.
+
+This module implements refined time synchronization using windowed correlation
+and linear drift estimation, improving upon SDA's discrete alignment precision.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +28,13 @@ DEFAULT_USE_MAG = False
 
 @dataclass(frozen=True)
 class SyncModel:
+    """
+    Complete synchronization model with offset, drift, and quality metrics.
+
+    Combines SDA coarse alignment with LIDA-style refined drift estimation
+    for sub-sample precision alignment.
+    """
+
     reference_csv: str
     target_csv: str
     target_time_origin_seconds: float
@@ -43,20 +55,26 @@ class SyncModel:
 
 
 def _windowed_lag_refinement(
-    ref_signal: np.ndarray,
-    tgt_signal: np.ndarray,
+    reference_signal: np.ndarray,
+    target_signal: np.ndarray,
     *,
-    ref_start_sec: float,
-    tgt_start_sec: float,
+    reference_start_sec: float,
+    target_start_sec: float,
     sample_rate_hz: float,
     coarse_lag_samples: int,
     window_seconds: float,
     window_step_seconds: float,
     local_search_seconds: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Refine coarse lag estimate using windowed correlation (LIDA-style refinement).
+
+    Slides windows over the reference signal and searches locally around the
+    coarse lag to estimate time-varying offset, enabling drift estimation.
+    """
     dt = 1.0 / sample_rate_hz
-    n_ref = len(ref_signal)
-    n_tgt = len(tgt_signal)
+    n_ref = len(reference_signal)
+    n_tgt = len(target_signal)
 
     window_n = max(20, int(round(window_seconds * sample_rate_hz)))
     step_n = max(5, int(round(window_step_seconds * sample_rate_hz)))
@@ -70,7 +88,7 @@ def _windowed_lag_refinement(
     for center in range(half, n_ref - half, step_n):
         left = center - half
         right = center + half
-        ref_win = ref_signal[left:right]
+        ref_win = reference_signal[left:right]
 
         best_lag: int | None = None
         best_score = -np.inf
@@ -82,7 +100,7 @@ def _windowed_lag_refinement(
             if t_left < 0 or t_right > n_tgt:
                 continue
 
-            tgt_win = tgt_signal[t_left:t_right]
+            tgt_win = target_signal[t_left:t_right]
             if len(tgt_win) != len(ref_win):
                 continue
 
@@ -94,8 +112,8 @@ def _windowed_lag_refinement(
         if best_lag is None:
             continue
 
-        ref_center_sec = ref_start_sec + center * dt
-        tgt_center_sec = tgt_start_sec + (center - best_lag) * dt
+        ref_center_sec = reference_start_sec + center * dt
+        tgt_center_sec = target_start_sec + (center - best_lag) * dt
         offset_sec = ref_center_sec - tgt_center_sec
 
         target_times.append(tgt_center_sec)
@@ -109,6 +127,7 @@ def _fit_offset_drift(
     target_times_rel: np.ndarray,
     offsets: np.ndarray,
 ) -> tuple[float, float, float]:
+    """Fit linear drift model (offset + drift_rate * time) via least squares."""
     if len(target_times_rel) < 2:
         return float(offsets[0]) if len(offsets) == 1 else 0.0, 0.0, 0.0
 
@@ -132,12 +151,10 @@ def estimate_sync_model(
     max_lag_seconds: float = 20.0,
 ) -> SyncModel:
     """
-    Estimate a synchronization model for a target stream relative to a reference stream.
+    Estimate complete synchronization model (SDA coarse + LIDA refined drift).
 
-    The model contains:
-    - a coarse correlation-based lag estimate
-    - a refined linear drift fit over time windows
-    - quality metadata for diagnostics
+    Combines SDA-style discrete lag estimation with windowed correlation refinement
+    to estimate both time offset and clock drift for sub-sample precision alignment.
     """
     coarse: OffsetEstimate = estimate_offset(
         reference_df,
@@ -170,10 +187,10 @@ def estimate_sync_model(
     target_time_origin_seconds = tgt_start_sec
 
     target_times, offsets, scores = _windowed_lag_refinement(
-        ref_signal,
-        tgt_signal,
-        ref_start_sec=ref_start_sec,
-        tgt_start_sec=tgt_start_sec,
+        reference_signal=ref_signal,
+        target_signal=tgt_signal,
+        reference_start_sec=ref_start_sec,
+        target_start_sec=tgt_start_sec,
         sample_rate_hz=sample_rate_hz,
         coarse_lag_samples=coarse.lag_samples,
         window_seconds=DEFAULT_WINDOW_SECONDS,
@@ -217,9 +234,14 @@ def estimate_sync_model(
     )
 
 
-def apply_sync_model(df: pd.DataFrame, model: SyncModel, *, replace_timestamp: bool = True) -> pd.DataFrame:
-    """Apply a previously estimated sync model to a target stream dataframe."""
-    out = df.copy()
+def apply_sync_model(
+    target_df: pd.DataFrame,
+    model: SyncModel,
+    *,
+    replace_timestamp: bool = True,
+) -> pd.DataFrame:
+    """Apply synchronization model to transform target stream timestamps to reference clock."""
+    out = target_df.copy()
     out["timestamp_orig"] = pd.to_numeric(out["timestamp"], errors="coerce")
     aligned = apply_linear_time_transform(
         out["timestamp_orig"],
@@ -240,14 +262,14 @@ def apply_sync_model(df: pd.DataFrame, model: SyncModel, *, replace_timestamp: b
 
 
 def resample_aligned_stream(
-    df: pd.DataFrame,
+    aligned_df: pd.DataFrame,
     *,
     rate_hz: float,
     timestamp_col: str = "timestamp",
     round_timestamp_ms: bool = True,
 ) -> pd.DataFrame:
-    """Resample a synchronized stream to a fixed sample rate."""
-    out = resample_stream(df, rate_hz=rate_hz, timestamp_col=timestamp_col)
+    """Resample synchronized stream to uniform rate using linear interpolation (LIDA-style)."""
+    out = resample_stream(aligned_df, rate_hz=rate_hz, timestamp_col=timestamp_col)
     if round_timestamp_ms:
         for col in (timestamp_col, "timestamp_orig", "timestamp_aligned"):
             if col not in out.columns:
@@ -261,7 +283,7 @@ def resample_aligned_stream(
 
 
 def save_sync_model(model: SyncModel, path: Path | str) -> Path:
-    """Persist sync model metadata as JSON."""
+    """Save synchronization model to JSON file."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(asdict(model), indent=2), encoding="utf-8")
@@ -269,7 +291,7 @@ def save_sync_model(model: SyncModel, path: Path | str) -> Path:
 
 
 def load_sync_model(path: Path | str) -> SyncModel:
-    """Load a previously saved sync model JSON file."""
+    """Load synchronization model from JSON file."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return SyncModel(**data)
 
@@ -281,7 +303,7 @@ def fit_sync_from_paths(
     sample_rate_hz: float = 50.0,
     max_lag_seconds: float = 20.0,
 ) -> SyncModel:
-    """Load two CSV streams and estimate a synchronization model."""
+    """Load reference and target CSV streams and estimate synchronization model."""
     ref_path = Path(reference_csv)
     tgt_path = Path(target_csv)
 

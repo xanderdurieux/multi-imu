@@ -1,7 +1,4 @@
-"""
-Common CSV schema and IO helpers for IMU data.
-
-"""
+"""CSV schema and I/O utilities for processed IMU streams."""
 
 from __future__ import annotations
 
@@ -11,7 +8,7 @@ from typing import Dict, Iterable, List, TYPE_CHECKING
 
 from .model import IMUSample
 
-if TYPE_CHECKING:  # for type-checkers only
+if TYPE_CHECKING:
     import pandas as pd
 
 
@@ -30,13 +27,7 @@ CSV_COLUMNS: List[str] = [
 
 
 def write_csv(samples: Iterable[IMUSample], csv_path: Path) -> None:
-    """
-    Write IMU samples to CSV with the fixed schema.
-
-    Notes:
-    - Missing values (None) are written as empty fields.
-    - Output uses newline='' so CSV is correct on all platforms.
-    """
+    """Write IMU samples to CSV with standardized schema."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
@@ -58,11 +49,7 @@ def write_csv(samples: Iterable[IMUSample], csv_path: Path) -> None:
 
 
 def load_dataframe(csv_path: Path) -> "pd.DataFrame":
-    """
-    Load a processed IMU CSV into a pandas DataFrame.
-
-    Ensures the standard columns exist and are numeric where possible.
-    """
+    """Load processed IMU CSV into DataFrame with standardized columns."""
     import pandas as pd
 
     df = pd.read_csv(csv_path)

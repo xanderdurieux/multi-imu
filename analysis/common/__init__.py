@@ -1,7 +1,4 @@
-"""
-Shared IMU models, CSV schema utilities, and path helpers.
-
-"""
+"""Shared IMU data models, CSV schema, and path utilities."""
 
 from .model import IMUSample
 from .csv_schema import CSV_COLUMNS, write_csv, load_dataframe

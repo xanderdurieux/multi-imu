@@ -1,23 +1,21 @@
-"""Run a full synchronization-and-plot pipeline for one processed session."""
+"""End-to-end pipeline: synchronize IMU streams and generate comparison plots."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from common import processed_session_dir
-from common.csv_schema import load_dataframe
-from plot.compare_streams import plot_stream_comparison
-from plot.plot_device import plot_dataframe
-from sync.sync_streams import synchronize
+from common import load_dataframe, processed_session_dir
+from plot import plot_dataframe, plot_stream_comparison
+from sync import synchronize
 
-DEFAULT_SYNC_SAMPLE_RATE_HZ = 50.0
+DEFAULT_SYNC_SAMPLE_RATE_HZ = 100.0
 DEFAULT_MAX_LAG_SECONDS = 20.0
-DEFAULT_RESAMPLE_RATE_HZ = 100.0
+DEFAULT_RESAMPLE_RATE_HZ = -1
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Create the command-line parser for the session pipeline."""
+    """Create CLI argument parser for session pipeline."""
     parser = argparse.ArgumentParser(
         prog="python -m pipeline.session_pipeline",
         description=(
@@ -60,13 +58,10 @@ def run_session_pipeline(
     resample_rate_hz: float = DEFAULT_RESAMPLE_RATE_HZ,
 ) -> dict[str, Path]:
     """
-    Execute synchronization and plot generation for one session.
+    Run complete synchronization and visualization pipeline for a session.
 
-    Expected inputs in `data/processed/<session_name>/`:
-    - `sporsa.csv` (reference)
-    - `arduino.csv` (target)
-
-    Generated artifacts are written into the same folder.
+    Synchronizes target stream to reference using SDA + LIDA, then generates
+    comparison plots to evaluate alignment quality.
     """
     session_dir = processed_session_dir(session_name)
     if not session_dir.is_dir():

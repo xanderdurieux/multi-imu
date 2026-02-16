@@ -1,7 +1,4 @@
-"""
-Convert a raw Arduino BLE IMU log to a normalized CSV.
-
-"""
+"""Parser for raw Arduino BLE IMU log files."""
 
 from __future__ import annotations
 

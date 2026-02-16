@@ -1,3 +1,5 @@
+"""Plotting utilities for comparing two IMU streams side-by-side."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,14 +10,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.csv_schema import load_dataframe
+from common import load_dataframe
 
 if TYPE_CHECKING:
     pass
 
 
 def _prepare_time(df: "pd.DataFrame", *, relative: bool) -> "pd.Series":
-    """Return either absolute timestamps or timestamps relative to stream start."""
+    """Return absolute timestamps or relative timestamps (zero at stream start)."""
     t = df["timestamp"].copy()
     if relative and not t.empty:
         t = t - float(t.iloc[0])

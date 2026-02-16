@@ -1,7 +1,4 @@
-"""
-Helpers for locating data folders within the analysis project.
-
-"""
+"""Path utilities for locating data directories."""
 
 from __future__ import annotations
 
@@ -9,23 +6,22 @@ from pathlib import Path
 
 
 def analysis_root() -> Path:
-    """Return the root folder of the analysis project."""
-    # This file lives in analysis/common/, so the parent of its parent is analysis/
+    """Return the analysis project root directory."""
     return Path(__file__).resolve().parents[1]
 
 
 def data_root() -> Path:
-    """Return the root folder containing raw/ and processed/ data."""
+    """Return the data directory containing raw/ and processed/ subdirectories."""
     return analysis_root() / "data"
 
 
 def raw_session_dir(session_name: str) -> Path:
-    """Folder where raw logs for a given session are stored."""
+    """Return path to raw log files directory for a session."""
     return data_root() / "raw" / session_name
 
 
 def processed_session_dir(session_name: str) -> Path:
-    """Folder where processed CSVs for a given session are written."""
+    """Return path to processed CSV files directory for a session."""
     return data_root() / "processed" / session_name
 
 

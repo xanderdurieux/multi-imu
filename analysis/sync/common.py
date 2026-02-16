@@ -1,4 +1,4 @@
-"""Shared helpers for IMU stream synchronization and resampling."""
+"""Shared utilities for IMU stream synchronization and resampling."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ VECTOR_AXES = {
 
 
 def load_stream(csv_path: Path | str) -> pd.DataFrame:
-    """Load a processed IMU stream and return rows sorted by timestamp."""
+    """Load a processed IMU stream CSV and return rows sorted by timestamp."""
     path = Path(csv_path)
     df = load_dataframe(path).copy()
     df = df.dropna(subset=["timestamp"])
@@ -27,7 +27,7 @@ def load_stream(csv_path: Path | str) -> pd.DataFrame:
 
 
 def add_vector_norms(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy of ``df`` with orientation-invariant vector norms."""
+    """Add orientation-invariant vector magnitude columns (|acc|, |gyro|, |mag|)."""
     out = df.copy()
     for name, axes in VECTOR_AXES.items():
         if all(col in out.columns for col in axes):
@@ -60,7 +60,7 @@ def resample_stream(
     start_ms: float | None = None,
     end_ms: float | None = None,
 ) -> pd.DataFrame:
-    """Resample ``df`` to a uniform sampling rate using linear interpolation."""
+    """Resample IMU stream to uniform sampling rate using linear interpolation (LIDA-style)."""
     if rate_hz <= 0:
         raise ValueError("rate_hz must be > 0")
     if timestamp_col not in df.columns:
@@ -108,7 +108,7 @@ def apply_linear_time_transform(
     drift_seconds_per_second: float,
     target_origin_seconds: float,
 ) -> np.ndarray:
-    """Map target timestamps to reference clock with a linear offset+drift model."""
+    """Apply linear time transformation (offset + drift) to map target timestamps to reference clock."""
     ts_sec = np.asarray(timestamp_ms, dtype=float) / 1000.0
     aligned_sec = (
         ts_sec

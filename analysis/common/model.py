@@ -1,7 +1,4 @@
-"""
-Core IMU data models used across the analysis tools.
-
-"""
+"""Core IMU data models for processed sensor streams."""
 
 from __future__ import annotations
 
@@ -11,11 +8,7 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class IMUSample:
-    """
-    A single, normalized IMU sample.
-
-    Use None for values that are not present in a given source.
-    """
+    """Single normalized IMU sample with timestamp and sensor readings."""
 
     timestamp: int
     ax: Optional[float] = None

@@ -1,3 +1,5 @@
+"""Plotting utilities for single IMU stream visualization."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,14 +10,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.csv_schema import load_dataframe
+from common import load_dataframe
 
 if TYPE_CHECKING:
     pass
 
 
 def _vector_magnitude(df: "pd.DataFrame", cols: tuple[str, str, str]) -> "pd.Series":
-    """Compute vector magnitude and keep NaN when any component is missing."""
+    """Compute orientation-invariant vector magnitude from x/y/z components."""
     valid = (~df[cols[0]].isna()) & (~df[cols[1]].isna()) & (~df[cols[2]].isna())
     mag = np.full(len(df), np.nan, dtype=float)
     xyz = df.loc[valid, list(cols)].to_numpy(dtype=float)
@@ -30,7 +32,7 @@ def plot_dataframe(
     *,
     magnitudes: bool = False,
 ) -> None:
-    """Plot one processed IMU stream using components or vector magnitudes."""
+    """Plot single IMU stream showing sensor components or vector magnitudes."""
     t = df["timestamp"]
 
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), constrained_layout=True)

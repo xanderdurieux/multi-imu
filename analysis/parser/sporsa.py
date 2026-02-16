@@ -1,7 +1,4 @@
-"""
-Convert a raw Sporsa IMU log to a normalized CSV.
-
-"""
+"""Parser for raw Sporsa IMU log files."""
 
 from __future__ import annotations
 

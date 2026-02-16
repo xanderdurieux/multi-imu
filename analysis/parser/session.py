@@ -1,12 +1,4 @@
-"""
-High-level parser for IMU sessions in the data folder.
-
-This file orchestrates the conversion of all raw IMU log files in a given session folder
-(under data/raw/<session_name>/) into normalized CSV files (under data/processed/<session_name>/).
-It detects each log file type, selects the appropriate parser, and writes standardized CSVs
-for further analysis.
-
-"""
+"""High-level parser for converting raw IMU logs to processed CSV streams."""
 
 from __future__ import annotations
 
@@ -14,7 +6,8 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-from common import write_csv, raw_session_dir, processed_session_dir
+from common import processed_session_dir, raw_session_dir, write_csv
+
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
 
@@ -45,9 +38,7 @@ def _process_file(sensor_type: str, src: Path, dst: Path) -> None:
 
 
 def process_session(session_name: str) -> None:
-    """
-    Parse all known sensor logs for a given session and write CSVs.
-    """
+    """Parse all raw sensor logs for a session and write processed CSV streams."""
     raw_dir = raw_session_dir(session_name)
     out_dir = processed_session_dir(session_name)
 

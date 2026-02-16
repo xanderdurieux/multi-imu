@@ -1,4 +1,9 @@
-"""CLI entrypoint to synchronize two processed IMU streams."""
+"""
+CLI entrypoint for synchronizing two processed IMU streams.
+
+Implements SDA + LIDA synchronization pipeline: coarse alignment followed by
+refined drift estimation for sub-sample precision time synchronization.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from common import processed_session_dir
+
 from .common import load_stream
 from .drift_estimator import (
     apply_sync_model,
@@ -105,12 +111,13 @@ def synchronize(
     write_resampled_hz: float | None = None,
 ) -> tuple[Path, Path, Path | None]:
     """
-    Estimate synchronization and write artifacts next to the target CSV.
+    Synchronize target stream to reference using SDA + LIDA pipeline.
 
-    Outputs:
-    - `<target>_to_<reference>_sync.json`
-    - `<target>_synced.csv`
-    - optional resampled CSV
+    Estimates synchronization model and writes aligned target stream CSV.
+    Optionally outputs uniformly resampled synchronized stream.
+
+    Returns:
+        Tuple of (sync_json_path, synced_csv_path, resampled_csv_path or None).
     """
     ref_df = load_stream(reference_csv)
     tgt_df = load_stream(target_csv)
@@ -130,7 +137,7 @@ def synchronize(
 
     save_sync_model(model, sync_json)
 
-    synced_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
+    synced_df = apply_sync_model(target_df=tgt_df, model=model, replace_timestamp=True)
     synced_df.to_csv(synced_csv, index=False)
 
     resampled_csv: Path | None = None
