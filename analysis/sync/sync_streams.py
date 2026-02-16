@@ -1,13 +1,9 @@
-"""Synchronize two processed IMU streams (manual or session mode).
-
-No argparse is used intentionally; options are passed as key=value pairs.
-"""
+"""CLI entrypoint to synchronize two processed IMU streams."""
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
@@ -20,8 +16,12 @@ from .drift_estimator import (
     save_sync_model,
 )
 
+DEFAULT_SAMPLE_RATE_HZ = 50.0
+DEFAULT_MAX_LAG_SECONDS = 20.0
+
 
 def _split_combined_sensor_csv(session_dir: Path) -> tuple[Path, Path] | None:
+    """Split `sensor.csv` into reference/target files when both devices are mixed."""
     combined = session_dir / "sensor.csv"
     if not combined.is_file():
         return None
@@ -61,34 +61,8 @@ def _split_combined_sensor_csv(session_dir: Path) -> tuple[Path, Path] | None:
     return ref_csv, tgt_csv
 
 
-def _parse_kv_args(items: list[str]) -> dict[str, Any]:
-    options: dict[str, Any] = {}
-    for item in items:
-        if "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-
-        if value.lower() in {"true", "false"}:
-            options[key] = value.lower() == "true"
-            continue
-
-        try:
-            if "." in value:
-                options[key] = float(value)
-            else:
-                options[key] = int(value)
-            continue
-        except ValueError:
-            pass
-
-        options[key] = value
-
-    return options
-
-
 def _pick_session_streams(session_name: str) -> tuple[Path, Path]:
+    """Resolve reference and target CSV files for a processed session."""
     session_dir = processed_session_dir(session_name)
     if not session_dir.is_dir():
         raise FileNotFoundError(f"processed session not found: {session_dir}")
@@ -126,14 +100,18 @@ def synchronize(
     reference_csv: Path,
     target_csv: Path,
     *,
-    sample_rate_hz: float = 50.0,
-    max_lag_seconds: float = 20.0,
-    window_seconds: float = 20.0,
-    window_step_seconds: float = 10.0,
-    local_search_seconds: float = 2.0,
+    sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
+    max_lag_seconds: float = DEFAULT_MAX_LAG_SECONDS,
     write_resampled_hz: float | None = None,
 ) -> tuple[Path, Path, Path | None]:
-    """Estimate sync, write model JSON, and write synchronized CSV."""
+    """
+    Estimate synchronization and write artifacts next to the target CSV.
+
+    Outputs:
+    - `<target>_to_<reference>_sync.json`
+    - `<target>_synced.csv`
+    - optional resampled CSV
+    """
     ref_df = load_stream(reference_csv)
     tgt_df = load_stream(target_csv)
 
@@ -144,9 +122,6 @@ def synchronize(
         target_name=str(target_csv),
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=max_lag_seconds,
-        window_seconds=window_seconds,
-        window_step_seconds=window_step_seconds,
-        local_search_seconds=local_search_seconds,
     )
 
     base = target_csv.parent
@@ -186,38 +161,66 @@ def synchronize(
     return sync_json, synced_csv, resampled_csv
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the command-line argument parser for stream synchronization."""
+    parser = argparse.ArgumentParser(
+        prog="python -m sync.sync_streams",
+        description="Synchronize Arduino (target) to Sporsa (reference).",
+    )
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+
+    session_parser = subparsers.add_parser(
+        "session",
+        help="Automatic mode: infer sporsa/arduino files from a session name.",
+    )
+    session_parser.add_argument("session_name", help="Session folder under data/processed.")
+
+    pair_parser = subparsers.add_parser(
+        "pair",
+        help="Manual mode: provide explicit reference and target CSV paths.",
+    )
+    pair_parser.add_argument("reference_csv", type=Path, help="Reference stream CSV (Sporsa).")
+    pair_parser.add_argument("target_csv", type=Path, help="Target stream CSV (Arduino).")
+
+    for sub in (session_parser, pair_parser):
+        sub.add_argument(
+            "--sample-rate-hz",
+            type=float,
+            default=DEFAULT_SAMPLE_RATE_HZ,
+            help=f"Resampling rate used during alignment (default: {DEFAULT_SAMPLE_RATE_HZ}).",
+        )
+        sub.add_argument(
+            "--max-lag-seconds",
+            type=float,
+            default=DEFAULT_MAX_LAG_SECONDS,
+            help=f"Maximum absolute lag to search (default: {DEFAULT_MAX_LAG_SECONDS}).",
+        )
+        sub.add_argument(
+            "--resample-rate-hz",
+            type=float,
+            default=None,
+            help="Optional output rate for a uniformly resampled synced CSV.",
+        )
+
+    return parser
+
+
 def main(argv: list[str] | None = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
 
-    if not argv:
-        print("Usage:")
-        print("  python -m sync.sync_streams <session_name> [key=value ...]")
-        print("  python -m sync.sync_streams <reference_csv> <target_csv> [key=value ...]")
-        return
-
-    options = _parse_kv_args(argv)
-
-    if len(argv) >= 2 and "=" not in argv[0] and "=" not in argv[1]:
-        reference_csv = Path(argv[0])
-        target_csv = Path(argv[1])
-    elif "=" not in argv[0]:
-        session_name = argv[0]
-        reference_csv, target_csv = _pick_session_streams(session_name)
+    if args.mode == "session":
+        reference_csv, target_csv = _pick_session_streams(args.session_name)
     else:
-        raise ValueError("invalid arguments; provide session name or <reference_csv> <target_csv>")
+        reference_csv = args.reference_csv
+        target_csv = args.target_csv
 
     synchronize(
         reference_csv=reference_csv,
         target_csv=target_csv,
-        sample_rate_hz=float(options.get("rate_hz", 50.0)),
-        max_lag_seconds=float(options.get("max_lag_s", 20.0)),
-        window_seconds=float(options.get("window_s", 20.0)),
-        window_step_seconds=float(options.get("step_s", 10.0)),
-        local_search_seconds=float(options.get("search_s", 2.0)),
-        write_resampled_hz=(
-            float(options["resample_hz"]) if "resample_hz" in options else None
-        ),
+        sample_rate_hz=args.sample_rate_hz,
+        max_lag_seconds=args.max_lag_seconds,
+        write_resampled_hz=args.resample_rate_hz,
     )
 
 

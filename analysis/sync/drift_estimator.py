@@ -1,4 +1,4 @@
-"""Drift-aware synchronization model estimation and application."""
+"""Estimate and apply offset+drift synchronization between IMU streams."""
 
 from __future__ import annotations
 
@@ -12,6 +12,13 @@ import pandas as pd
 
 from .align_df import OffsetEstimate, build_alignment_signal, estimate_offset
 from .common import apply_linear_time_transform, load_stream, resample_stream
+
+DEFAULT_WINDOW_SECONDS = 20.0
+DEFAULT_WINDOW_STEP_SECONDS = 10.0
+DEFAULT_LOCAL_SEARCH_SECONDS = 2.0
+DEFAULT_USE_ACC = True
+DEFAULT_USE_GYRO = True
+DEFAULT_USE_MAG = False
 
 
 @dataclass(frozen=True)
@@ -123,22 +130,23 @@ def estimate_sync_model(
     target_name: str,
     sample_rate_hz: float = 50.0,
     max_lag_seconds: float = 20.0,
-    window_seconds: float = 20.0,
-    window_step_seconds: float = 10.0,
-    local_search_seconds: float = 2.0,
-    use_acc: bool = True,
-    use_gyro: bool = True,
-    use_mag: bool = False,
 ) -> SyncModel:
-    """Estimate offset and linear drift from correlated IMU streams."""
+    """
+    Estimate a synchronization model for a target stream relative to a reference stream.
+
+    The model contains:
+    - a coarse correlation-based lag estimate
+    - a refined linear drift fit over time windows
+    - quality metadata for diagnostics
+    """
     coarse: OffsetEstimate = estimate_offset(
         reference_df,
         target_df,
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=max_lag_seconds,
-        use_acc=use_acc,
-        use_gyro=use_gyro,
-        use_mag=use_mag,
+        use_acc=DEFAULT_USE_ACC,
+        use_gyro=DEFAULT_USE_GYRO,
+        use_mag=DEFAULT_USE_MAG,
     )
 
     ref_rs = resample_stream(reference_df, sample_rate_hz)
@@ -146,15 +154,15 @@ def estimate_sync_model(
 
     ref_signal = build_alignment_signal(
         ref_rs,
-        use_acc=use_acc,
-        use_gyro=use_gyro,
-        use_mag=use_mag,
+        use_acc=DEFAULT_USE_ACC,
+        use_gyro=DEFAULT_USE_GYRO,
+        use_mag=DEFAULT_USE_MAG,
     )
     tgt_signal = build_alignment_signal(
         tgt_rs,
-        use_acc=use_acc,
-        use_gyro=use_gyro,
-        use_mag=use_mag,
+        use_acc=DEFAULT_USE_ACC,
+        use_gyro=DEFAULT_USE_GYRO,
+        use_mag=DEFAULT_USE_MAG,
     )
 
     ref_start_sec = float(ref_rs["timestamp"].iloc[0]) / 1000.0
@@ -168,9 +176,9 @@ def estimate_sync_model(
         tgt_start_sec=tgt_start_sec,
         sample_rate_hz=sample_rate_hz,
         coarse_lag_samples=coarse.lag_samples,
-        window_seconds=window_seconds,
-        window_step_seconds=window_step_seconds,
-        local_search_seconds=local_search_seconds,
+        window_seconds=DEFAULT_WINDOW_SECONDS,
+        window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
+        local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
     )
 
     if len(offsets) == 0:
@@ -199,9 +207,9 @@ def estimate_sync_model(
         coarse_lag_samples=coarse.lag_samples,
         coarse_offset_seconds=coarse.offset_seconds,
         coarse_score=coarse.score,
-        window_seconds=window_seconds,
-        window_step_seconds=window_step_seconds,
-        local_search_seconds=local_search_seconds,
+        window_seconds=DEFAULT_WINDOW_SECONDS,
+        window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
+        local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
         num_windows=int(len(offsets)),
         fit_r2=fit_r2,
         median_window_score=median_score,
@@ -210,7 +218,7 @@ def estimate_sync_model(
 
 
 def apply_sync_model(df: pd.DataFrame, model: SyncModel, *, replace_timestamp: bool = True) -> pd.DataFrame:
-    """Apply a sync model to a target stream dataframe."""
+    """Apply a previously estimated sync model to a target stream dataframe."""
     out = df.copy()
     out["timestamp_orig"] = pd.to_numeric(out["timestamp"], errors="coerce")
     aligned = apply_linear_time_transform(
@@ -272,9 +280,6 @@ def fit_sync_from_paths(
     *,
     sample_rate_hz: float = 50.0,
     max_lag_seconds: float = 20.0,
-    window_seconds: float = 20.0,
-    window_step_seconds: float = 10.0,
-    local_search_seconds: float = 2.0,
 ) -> SyncModel:
     """Load two CSV streams and estimate a synchronization model."""
     ref_path = Path(reference_csv)
@@ -290,7 +295,4 @@ def fit_sync_from_paths(
         target_name=str(tgt_path),
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=max_lag_seconds,
-        window_seconds=window_seconds,
-        window_step_seconds=window_step_seconds,
-        local_search_seconds=local_search_seconds,
     )
