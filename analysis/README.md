@@ -75,7 +75,7 @@ uv run -m plot.plot_device data/processed/<session_name>/<filename>
 uv run -m plot.plot_device data/processed/<session_name>/<filename> --magnitudes
 ```
 
-- **Compare two streams in one plot** (for raw vs raw, synced vs reference, or other processed files):
+- **Compare two streams in one plot**:
 
 ```bash
 uv run -m plot.compare_streams data/processed/<session_name>/sporsa.csv data/processed/<session_name>/arduino_synced.csv
@@ -83,9 +83,6 @@ uv run -m plot.compare_streams data/processed/<session_name>/sporsa.csv data/pro
 
 Useful comparison options:
 
-- `--label-a sporsa` (label for first stream)
-- `--label-b arduino_synced` (label for second stream)
-- `--output data/processed/<session_name>/comparison.png` (custom output path)
-- `--relative-time` (x-axis starts at 0 for each stream)
-- `--split-axes` (plots `x`, `y`, `z` in separate panels to avoid overlap)
+- `--split-axes` (separate x/y/z panels)
 - `--magnitudes` (plot magnitudes instead of x/y/z)
+- `--relative-time`
