@@ -9,7 +9,7 @@ This toolkit processes raw IMU logs from multiple devices (e.g., Sporsa handleba
 ## Modules
 
 - **`common/`**
-  - Shared data models (`IMUSample`), CSV schema utilities, and path helpers for locating raw/processed data directories.
+  - CSV schema utilities and path helpers for locating raw/processed data directories.
 
 - **`parser/`**
   - Converts raw device-specific IMU log files into standardized CSV format.

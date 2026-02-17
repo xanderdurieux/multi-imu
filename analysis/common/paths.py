@@ -17,11 +17,14 @@ def data_root() -> Path:
 
 def raw_session_dir(session_name: str) -> Path:
     """Return path to raw log files directory for a session."""
-    return data_root() / "raw" / session_name
+    return data_root() / session_name / "raw"
 
 
-def processed_session_dir(session_name: str) -> Path:
+def parsed_session_dir(session_name: str) -> Path:
     """Return path to processed CSV files directory for a session."""
-    return data_root() / "processed" / session_name
+    return data_root() / session_name / "parsed"
 
 
+def synced_session_dir(session_name: str) -> Path:
+    """Return path to synced CSV files directory for a session."""
+    return data_root() / session_name / "synced"
