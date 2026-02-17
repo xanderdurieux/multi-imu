@@ -4,3 +4,6 @@ docs/
 # Python 
 **/__pycache__/
 **/.venv/
+
+# Arduino
+arduino/libraries/*
