@@ -21,10 +21,65 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import copy
 import numpy as np
 import pandas as pd
 
-from common import parsed_session_dir, load_dataframe
+from common import data_root, parsed_session_dir, raw_session_dir, load_dataframe
+
+
+# Default expectations and scoring weights live in a JSON file at:
+#   <analysis_root>/session_meta_default.json
+# and can be overridden per session by an optional JSON file in the RAW folder:
+#   <raw_session_dir>/<session_name>_meta.json   or
+#   <raw_session_dir>/session_meta.json
+
+
+def _load_default_meta() -> dict[str, Any]:
+    """Load global default meta from the project root JSON file."""
+    default_path = data_root() / "session_meta_default.json"
+    base: dict[str, Any] = {}
+    if default_path.is_file():
+        try:
+            data = json.loads(default_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                base = data
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback minimal defaults if the JSON file is missing or invalid.
+    if not base:
+        base = {
+            "expected": {},
+            "weights": {},
+            "thresholds": {},
+            "drift": {},
+        }
+    return base
+
+
+def _load_session_meta(session_name: str) -> dict[str, Any]:
+    """Load scoring meta: global defaults + optional per-session overrides from the raw folder."""
+    base_meta = copy.deepcopy(_load_default_meta())
+
+    raw_base = raw_session_dir(session_name)
+    candidates = [
+        raw_base / f"{session_name}_meta.json",
+        raw_base / "session_meta.json",
+    ]
+
+    for meta_path in candidates:
+        if not meta_path.is_file():
+            continue
+        try:
+            user_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(user_meta, dict):
+                base_meta.update(user_meta)
+            break
+        except json.JSONDecodeError:
+            continue
+
+    return base_meta
 
 
 def _series_percentile(x: pd.Series, q: float) -> float | None:
@@ -173,6 +228,62 @@ def estimate_clock_drift(
     }
 
 
+def _score_rate(
+    *,
+    actual_hz: float | None,
+    expected_hz: float | None,
+    good_frac: float,
+    bad_frac: float,
+) -> float | None:
+    if actual_hz is None or expected_hz is None or expected_hz <= 0:
+        return None
+    frac_err = abs(actual_hz - expected_hz) / expected_hz
+    if frac_err <= good_frac:
+        return 1.0
+    if frac_err >= bad_frac:
+        return 0.0
+    return float((bad_frac - frac_err) / (bad_frac - good_frac))
+
+
+def _score_low_is_good(value: float | None, *, good: float, bad: float) -> float | None:
+    """Generic score where lower values are better (loss, jitter, etc.)."""
+    if value is None:
+        return None
+    if value <= good:
+        return 1.0
+    if value >= bad:
+        return 0.0
+    return float((bad - float(value)) / (bad - good))
+
+
+def _score_duration(actual_s: float | None, *, min_duration_s: float | None) -> float | None:
+    if actual_s is None or min_duration_s is None or min_duration_s <= 0:
+        return None
+    if actual_s >= min_duration_s:
+        return 1.0
+    return max(0.0, float(actual_s / min_duration_s))
+
+
+def _score_drift(
+    *,
+    drift_ppm: float | None,
+    fit_r2: float | None,
+    good_ppm: float,
+    bad_ppm: float,
+    min_fit_r2: float,
+) -> float | None:
+    if drift_ppm is None or fit_r2 is None:
+        return None
+    if fit_r2 < min_fit_r2:
+        return 0.0
+    d = abs(float(drift_ppm))
+    if d <= good_ppm:
+        return 1.0
+    if d >= bad_ppm:
+        return 0.0
+    return float((bad_ppm - d) / (bad_ppm - good_ppm))
+
+
 def compute_file_stats(csv_path: Path) -> dict[str, Any]:
     df = load_dataframe(csv_path)
     out: dict[str, Any] = {
@@ -200,6 +311,7 @@ class SessionStats:
     generated_at_utc: str
     session_dir: str
     streams: dict[str, dict[str, Any]]
+    session_quality: dict[str, Any] | None
 
 
 def compute_session_stats(session_name: str) -> SessionStats:
@@ -207,15 +319,104 @@ def compute_session_stats(session_name: str) -> SessionStats:
     if not session_dir.is_dir():
         raise FileNotFoundError(f"session extracted folder not found: {session_dir}")
 
+    meta = _load_session_meta(session_name)
+
     streams: dict[str, dict[str, Any]] = {}
     for csv_path in sorted(session_dir.glob("*.csv")):
         streams[csv_path.stem] = compute_file_stats(csv_path)
+
+    # Per-stream quality scores.
+    stream_scores: dict[str, float] = {}
+    for name, st in streams.items():
+        timing = st.get("timing", {})
+        received = st.get("received") if name == "arduino" else None
+
+        exp = (meta.get("expected") or {}).get(name, {})
+        expected_rate = exp.get("rate_hz")
+        min_duration_s = exp.get("min_duration_s")
+
+        thr_rate = (meta.get("thresholds") or {}).get("rate", {})
+        thr_loss = (meta.get("thresholds") or {}).get("loss", {})
+        thr_jit = (meta.get("thresholds") or {}).get("jitter_ms", {})
+
+        w = meta.get("weights") or {}
+
+        rate_score = _score_rate(
+            actual_hz=timing.get("rate_hz"),
+            expected_hz=expected_rate,
+            good_frac=float(thr_rate.get("good_frac", 0.05)),
+            bad_frac=float(thr_rate.get("bad_frac", 0.2)),
+        )
+        jitter_score = _score_low_is_good(
+            value=(timing.get("interval_ms") or {}).get("std_ms"),
+            good=float(thr_jit.get("good", 1.0)),
+            bad=float(thr_jit.get("bad", 10.0)),
+        )
+        loss_score = _score_low_is_good(
+            value=(timing.get("gaps") or {}).get("loss_rate"),
+            good=float(thr_loss.get("good", 0.01)),
+            bad=float(thr_loss.get("bad", 0.10)),
+        )
+        duration_score = _score_duration(
+            actual_s=timing.get("duration_s"),
+            min_duration_s=float(min_duration_s) if min_duration_s is not None else None,
+        )
+
+        drift_score = None
+        if received is not None and "device_to_received_clock" in st:
+            drift_cfg = meta.get("drift") or {}
+            drift_info = st["device_to_received_clock"]
+            drift_score = _score_drift(
+                drift_ppm=drift_info.get("drift_ppm"),
+                fit_r2=drift_info.get("fit_r2"),
+                good_ppm=float(drift_cfg.get("good_ppm", 50.0)),
+                bad_ppm=float(drift_cfg.get("bad_ppm", 500.0)),
+                min_fit_r2=float(drift_cfg.get("min_fit_r2", 0.99)),
+            )
+
+        components = {
+            "rate": rate_score,
+            "jitter": jitter_score,
+            "loss": loss_score,
+            "duration": duration_score,
+        }
+        if drift_score is not None:
+            components["drift"] = drift_score
+
+        # Weighted average over available components.
+        total_weight = 0.0
+        weighted_sum = 0.0
+        for key, score in components.items():
+            if score is None:
+                continue
+            weight = float(w.get(key, 0.0))
+            if weight <= 0:
+                continue
+            weighted_sum += weight * score
+            total_weight += weight
+
+        stream_score = None
+        if total_weight > 0:
+            stream_score = weighted_sum / total_weight
+            stream_scores[name] = stream_score
+
+        # Expose only the aggregate score in the JSON to keep stats compact.
+        st["quality"] = {"score": stream_score}
+
+    session_quality: dict[str, Any] | None = None
+    if stream_scores:
+        session_quality = {
+            "score_mean": float(sum(stream_scores.values()) / len(stream_scores)),
+            "score_min": float(min(stream_scores.values())),
+            "per_stream": stream_scores,
+        }
 
     return SessionStats(
         session_name=session_name,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         session_dir=str(session_dir),
         streams=streams,
+        session_quality=session_quality,
     )
 
 
