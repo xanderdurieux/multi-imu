@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
-from common import IMUSample, write_csv
+import pandas as pd
+
+from common import CSV_COLUMNS, write_dataframe
 
 ACCEL_SENS = {
     "4G": 0.122,
@@ -23,7 +25,7 @@ GYRO_SENS = {
 }
 
 
-def _parse_sporsa_line(line: str) -> Optional[IMUSample]:
+def _parse_sporsa_line(line: str) -> Optional[dict]:
     """
     Parse a single line from a Sporsa log file.
 
@@ -59,24 +61,39 @@ def _parse_sporsa_line(line: str) -> Optional[IMUSample]:
     gyro_y = gyro_y_raw * GYRO_SENS["2000DPS"] / 1000
     gyro_z = gyro_z_raw * GYRO_SENS["2000DPS"] / 1000
 
-    return IMUSample(
-        timestamp=device_time_ms,
-        ax=acc_x,
-        ay=acc_y,
-        az=acc_z,
-        gx=gyro_x,
-        gy=gyro_y,
-        gz=gyro_z,
-    )
+    row = {col: pd.NA for col in CSV_COLUMNS}
+    row["timestamp"] = device_time_ms
+    row["ax"] = acc_x
+    row["ay"] = acc_y
+    row["az"] = acc_z
+    row["gx"] = gyro_x
+    row["gy"] = gyro_y
+    row["gz"] = gyro_z
+    return row
 
 
-def parse_sporsa_log(txt_path: Path) -> Iterator[IMUSample]:
-    """Yield IMUSample objects parsed from a raw Sporsa log file."""
+def parse_sporsa_log(txt_path: Path) -> pd.DataFrame:
+    """Parse a raw Sporsa log file into a standardized IMU DataFrame."""
+    rows: list[dict] = []
     with txt_path.open("r", encoding="utf-8", errors="replace") as f:
         for raw_line in f:
-            sample = _parse_sporsa_line(raw_line)
-            if sample is not None:
-                yield sample
+            row = _parse_sporsa_line(raw_line)
+            if row is not None:
+                rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(columns=CSV_COLUMNS)
+
+    df = pd.DataFrame(rows)
+    for col in CSV_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    df = df[CSV_COLUMNS]
+    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+    for col in CSV_COLUMNS[1:]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    return df
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -94,8 +111,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
-    samples = parse_sporsa_log(args.source_txt)
-    write_csv(samples, args.destination_csv)
+    df = parse_sporsa_log(args.source_txt)
+    write_dataframe(df, args.destination_csv)
 
 
 if __name__ == "__main__":

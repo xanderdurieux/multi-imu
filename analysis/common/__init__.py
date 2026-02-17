@@ -1,18 +1,23 @@
-"""Shared IMU data models, CSV schema, and path utilities."""
+"""Shared CSV schema utilities and path helpers for locating data directories."""
 
-from .model import IMUSample
-from .csv_schema import CSV_COLUMNS, write_csv, load_dataframe
-from .paths import analysis_root, data_root, raw_session_dir, processed_session_dir
+from .csv_schema import CSV_COLUMNS, load_dataframe, write_dataframe
+from .paths import (
+    analysis_root,
+    data_root,
+    parsed_session_dir,
+    raw_session_dir,
+    synced_session_dir,
+)
 
 __all__ = [
-    "IMUSample",
     "CSV_COLUMNS",
-    "write_csv",
     "load_dataframe",
+    "write_dataframe",
     "analysis_root",
     "data_root",
     "raw_session_dir",
-    "processed_session_dir",
+    "parsed_session_dir",
+    "synced_session_dir",
 ]
 
 

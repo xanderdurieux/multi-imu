@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import csv
+import pandas as pd
 from pathlib import Path
-from typing import Dict, Iterable, List, TYPE_CHECKING
-
-from .model import IMUSample
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 
-CSV_COLUMNS: List[str] = [
+CSV_COLUMNS: list[str] = [
     "timestamp",
     "ax",
     "ay",
@@ -26,31 +20,23 @@ CSV_COLUMNS: List[str] = [
 ]
 
 
-def write_csv(samples: Iterable[IMUSample], csv_path: Path) -> None:
-    """Write IMU samples to CSV with standardized schema."""
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writeheader()
-        for s in samples:
-            row: Dict[str, object] = {
-                "timestamp": s.timestamp,
-                "ax": s.ax,
-                "ay": s.ay,
-                "az": s.az,
-                "gx": s.gx,
-                "gy": s.gy,
-                "gz": s.gz,
-                "mx": s.mx,
-                "my": s.my,
-                "mz": s.mz,
-            }
-            writer.writerow(row)
+def write_dataframe(df: pd.DataFrame, csv_path: Path) -> None:
+    """Write processed IMU DataFrame to CSV with standardized columns."""
+    out = df.copy()
 
+    # Ensure all expected columns exist; missing ones are filled with NA.
+    for col in CSV_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
 
-def load_dataframe(csv_path: Path) -> "pd.DataFrame":
+    # Reorder with schema columns first, then keep any extra columns at the end.
+    extra = [c for c in out.columns if c not in CSV_COLUMNS]
+    out = out[CSV_COLUMNS + extra]
+
+    out.to_csv(csv_path, index=False)
+
+def load_dataframe(csv_path: Path) -> pd.DataFrame:
     """Load processed IMU CSV into DataFrame with standardized columns."""
-    import pandas as pd
 
     df = pd.read_csv(csv_path)
 

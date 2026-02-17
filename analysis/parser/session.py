@@ -6,10 +6,12 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-from common import processed_session_dir, raw_session_dir, write_csv
+from common import parsed_session_dir, raw_session_dir, write_dataframe
+from plot import plot_dataframe
 
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
+from .stats import write_session_stats
 
 
 def _classify_file(path: Path) -> Optional[str]:
@@ -25,22 +27,26 @@ def _classify_file(path: Path) -> Optional[str]:
     return None
 
 
-def _process_file(sensor_type: str, src: Path, dst: Path) -> None:
-    """Dispatch one raw log file to the matching parser and write CSV output."""
-    if sensor_type == "arduino":
-        samples = parse_arduino_log(src)
-    elif sensor_type == "sporsa":
-        samples = parse_sporsa_log(src)
-    else:
-        return
+def _process_file(sensor_type: str, src: Path, dst: Path):
+    """Dispatch one raw log file to the matching parser and write CSV output.
 
-    write_csv(samples, dst)
+    Returns the parsed DataFrame on success, or None if the file is skipped.
+    """
+    if sensor_type == "arduino":
+        df = parse_arduino_log(src)
+    elif sensor_type == "sporsa":
+        df = parse_sporsa_log(src)
+    else:
+        return None
+
+    write_dataframe(df, dst)
+    return df
 
 
 def process_session(session_name: str) -> None:
-    """Parse all raw sensor logs for a session and write processed CSV streams."""
+    """Parse all raw sensor logs for a session and write processed CSV streams + stats."""
     raw_dir = raw_session_dir(session_name)
-    out_dir = processed_session_dir(session_name)
+    out_dir = parsed_session_dir(session_name)
 
     if not raw_dir.is_dir():
         print(f"Raw session folder not found: {raw_dir}")
@@ -58,7 +64,17 @@ def process_session(session_name: str) -> None:
 
         dst = out_dir / f"{src.stem}.csv"
         print(f"[{session_name}] {sensor_type}: {src.name} -> {dst.name}")
-        _process_file(sensor_type, src, dst)
+        df = _process_file(sensor_type, src, dst)
+        if df is None:
+            continue
+
+        # Per-stream overview plot (x/y/z components).
+        png_path = dst.with_suffix(".png")
+        title = f"{session_name} – {sensor_type}"
+        plot_dataframe(df, title=title, output=png_path, magnitudes=False)
+
+    stats_path = write_session_stats(session_name)
+    print(f"[{session_name}] stats: {stats_path.name}")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
