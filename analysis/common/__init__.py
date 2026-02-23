@@ -6,6 +6,7 @@ from .paths import (
     data_root,
     parsed_session_dir,
     raw_session_dir,
+    session_stage_dir,
     synced_session_dir,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "raw_session_dir",
     "parsed_session_dir",
     "synced_session_dir",
+    "session_stage_dir",
 ]
 
 

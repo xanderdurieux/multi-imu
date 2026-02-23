@@ -15,16 +15,23 @@ def data_root() -> Path:
     return analysis_root() / "data"
 
 
+def session_stage_dir(session_name: str, stage: str) -> Path:
+    """Return path to a specific stage directory for a session (e.g., parsed, synced)."""
+    return data_root() / session_name / stage
+
+
 def raw_session_dir(session_name: str) -> Path:
     """Return path to raw log files directory for a session."""
-    return data_root() / session_name / "raw"
+    return session_stage_dir(session_name, "raw")
 
 
 def parsed_session_dir(session_name: str) -> Path:
     """Return path to processed CSV files directory for a session."""
-    return data_root() / session_name / "parsed"
+    return session_stage_dir(session_name, "parsed")
 
 
 def synced_session_dir(session_name: str) -> Path:
     """Return path to synced CSV files directory for a session."""
-    return data_root() / session_name / "synced"
+    return session_stage_dir(session_name, "synced")
+
+

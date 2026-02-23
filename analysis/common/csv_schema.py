@@ -35,6 +35,7 @@ def write_dataframe(df: pd.DataFrame, csv_path: Path) -> None:
 
     out.to_csv(csv_path, index=False)
 
+
 def load_dataframe(csv_path: Path) -> pd.DataFrame:
     """Load processed IMU CSV into DataFrame with standardized columns."""
 
@@ -50,5 +51,3 @@ def load_dataframe(csv_path: Path) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
-
-
