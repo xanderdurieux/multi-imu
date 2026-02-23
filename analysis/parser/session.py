@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 from common import parsed_session_dir, raw_session_dir, write_dataframe
-from plot import plot_dataframe
 
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
@@ -20,7 +19,7 @@ def _classify_file(path: Path) -> Optional[str]:
     or None if the file should be ignored.
     """
     name = path.stem.lower()
-    if "arduino" in name:
+    if "arduino" or "Log" in name:
         return "arduino"
     if "sporsa" in name:
         return "sporsa"
@@ -67,11 +66,6 @@ def process_session(session_name: str) -> None:
         df = _process_file(sensor_type, src, dst)
         if df is None:
             continue
-
-        # Per-stream overview plot (x/y/z components).
-        png_path = dst.with_suffix(".png")
-        title = f"{session_name} – {sensor_type}"
-        plot_dataframe(df, title=title, output=png_path, magnitudes=False)
 
     stats_path = write_session_stats(session_name)
     print(f"[{session_name}] stats: {stats_path.name}")

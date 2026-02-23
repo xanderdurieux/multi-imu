@@ -171,7 +171,7 @@ def parse_arduino_log(txt_path: Path) -> pd.DataFrame:
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Create the command-line parser for Arduino log conversion."""
     parser = argparse.ArgumentParser(
-        prog="python -m parser.arduino",
+        prog="python -m parser.arduino_legacy",
         description="Convert a raw Arduino BLE log to processed IMU CSV format.",
     )
     parser.add_argument("source_txt", type=Path, help="Path to raw Arduino text log.")
