@@ -22,6 +22,10 @@ This toolkit processes raw IMU logs from multiple devices (e.g., Sporsa handleba
   - **LIDA (Linear Interpolation Data Alignment)**: Refined sub-sample precision alignment using windowed correlation and linear drift estimation.
   - Provides functions for alignment signal construction, offset/drift estimation, model persistence, and stream resampling.
 
+- **`orientation/`**
+  - Orientation estimation from IMU CSV streams: quaternion math, sensor-level bias calibration, and lightweight fusion filters (complementary and Madgwick).
+  - Produces body→world quaternions and Euler angles so all sensors can be expressed in a common world frame.
+
 - **`plot/`**
   - Visualization tools for single-stream analysis and multi-stream comparison.
   - Supports plotting sensor components (x/y/z) or orientation-invariant vector magnitudes.
@@ -53,6 +57,58 @@ uv run -m parser.session <session_name>
 ```
 
 Detects and parses Arduino and Sporsa log files automatically, writing normalized CSV streams with standardized column names and units.
+
+### Orientation estimation
+
+Estimate body→world orientation from a parsed IMU CSV (columns `timestamp`, `ax`–`az`, `gx`–`gz`). The pipeline runs a complementary or Madgwick filter and appends quaternion and Euler columns so data can be expressed in a common world frame. **Units**: acceleration in m/s², gyroscope in rad/s (convert from deg/s with `× π/180` if needed).
+
+**From the command line** (run from the `analysis/` directory):
+
+```bash
+uv run -m orientation.pipeline <input.csv> [output.csv]
+```
+
+- **Input**: Path to a parsed IMU CSV (e.g. `data/<session>/parsed/sporsa.csv`).
+- **Output**: If omitted, writes to `<input_stem>_orientation.csv` in the same directory. The output CSV contains all original columns plus `qw`, `qx`, `qy`, `qz` and (in degrees) `yaw_deg`, `pitch_deg`, `roll_deg`.
+
+**Optional arguments:**
+
+- `--filter {complementary,madgwick}` (default: `complementary`)
+- `--calibration`: estimate constant accel+gyro bias from the first 5 seconds and apply before filtering
+
+By default no calibration is applied. If you pass `--calibration`, the pipeline estimates constant accel+gyro bias from the first 5 seconds and applies it before filtering. For full control (custom static window, saved calibration, etc.), use the Python API and pass a `BiasCalibration` (see below).
+
+**From Python** (with optional calibration):
+
+```python
+from pathlib import Path
+from common import load_dataframe, write_dataframe
+from orientation import (
+    run_complementary_on_dataframe,
+    run_madgwick_on_dataframe,
+    estimate_bias_from_dataframe_static_segment,
+)
+
+# Load parsed IMU CSV
+df = load_dataframe(Path("data/<session>/parsed/sporsa.csv"))
+
+# Optional: estimate bias from a static segment (sensor at rest)
+calib = estimate_bias_from_dataframe_static_segment(
+    df,
+    start_time=df["timestamp"].iloc[0],
+    end_time=df["timestamp"].iloc[0] + 5_000,  # first 5 seconds, same units as timestamp
+    expected_gravity_body=[0, 0, -9.81],
+)
+
+# Run complementary or Madgwick filter
+df_orient = run_complementary_on_dataframe(df, calibration=calib)
+# or: df_orient = run_madgwick_on_dataframe(df, calibration=calib)
+
+# Save result
+write_dataframe(df_orient, Path("data/<session>/parsed/sporsa_orientation.csv"))
+```
+
+To choose the Madgwick filter from the command line, use the pipeline programmatically with `OrientationPipelineConfig(filter_type="madgwick")` and `run_orientation_pipeline_on_csv(..., config=cfg)`.
 
 ### Synchronize IMU streams
 
