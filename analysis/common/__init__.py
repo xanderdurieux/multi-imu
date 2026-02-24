@@ -8,6 +8,7 @@ from .paths import (
     raw_session_dir,
     session_stage_dir,
     synced_session_dir,
+    find_sensor_csv,
 )
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "parsed_session_dir",
     "synced_session_dir",
     "session_stage_dir",
+    "find_sensor_csv",
 ]
 
 

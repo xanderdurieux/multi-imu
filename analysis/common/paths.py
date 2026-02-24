@@ -35,3 +35,32 @@ def synced_session_dir(session_name: str) -> Path:
     return session_stage_dir(session_name, "synced")
 
 
+def find_sensor_csv(
+    session_name: str,
+    stage: str,
+    sensor_name: str,
+) -> Path:
+    """
+    Find a single CSV file for a given sensor within a session stage.
+
+    Looks for ``*.csv`` files under ``data/<session_name>/<stage>/`` whose
+    filename contains ``sensor_name`` (case-insensitive). Raises if none or
+    more than one match is found.
+    """
+    session_dir = session_stage_dir(session_name, stage)
+    if not session_dir.exists():
+        raise FileNotFoundError(f"Session directory not found: {session_dir}")
+
+    csv_files = list(session_dir.glob("*.csv"))
+    matching_files = [f for f in csv_files if sensor_name.lower() in f.name.lower()]
+
+    if not matching_files:
+        raise FileNotFoundError(f"No CSV file found containing '{sensor_name}' in {session_dir}")
+
+    if len(matching_files) > 1:
+        names = ", ".join(sorted(f.name for f in matching_files))
+        raise ValueError(f"Multiple files found matching '{sensor_name}' in {session_dir}: {names}")
+
+    return matching_files[0]
+
+

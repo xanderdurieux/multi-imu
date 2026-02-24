@@ -40,15 +40,9 @@ class SyncModel:
     target_time_origin_seconds: float
     offset_seconds: float
     drift_seconds_per_second: float
-    scale: float
-    sample_rate_hz: float
     coarse_lag_samples: int
     coarse_offset_seconds: float
     coarse_score: float
-    window_seconds: float
-    window_step_seconds: float
-    local_search_seconds: float
-    num_windows: int
     fit_r2: float
     median_window_score: float
     created_at_utc: str
@@ -58,9 +52,8 @@ def _windowed_lag_refinement(
     reference_signal: np.ndarray,
     target_signal: np.ndarray,
     *,
-    reference_start_sec: float,
-    target_start_sec: float,
-    sample_rate_hz: float,
+    reference_ts_sec: np.ndarray,
+    target_ts_sec: np.ndarray,
     coarse_lag_samples: int,
     window_seconds: float,
     window_step_seconds: float,
@@ -72,13 +65,27 @@ def _windowed_lag_refinement(
     Slides windows over the reference signal and searches locally around the
     coarse lag to estimate time-varying offset, enabling drift estimation.
     """
-    dt = 1.0 / sample_rate_hz
     n_ref = len(reference_signal)
     n_tgt = len(target_signal)
-
-    window_n = max(20, int(round(window_seconds * sample_rate_hz)))
-    step_n = max(5, int(round(window_step_seconds * sample_rate_hz)))
-    search_n = max(1, int(round(local_search_seconds * sample_rate_hz)))
+    if n_ref == 0 or n_tgt == 0:
+        return (
+            np.asarray([], dtype=float),
+            np.asarray([], dtype=float),
+            np.asarray([], dtype=float),
+        )
+ 
+    # Estimate effective sampling rate from reference timestamps to size windows
+    ref_ts = np.asarray(reference_ts_sec, dtype=float)
+    if ref_ts.size >= 2:
+        duration = ref_ts[-1] - ref_ts[0]
+        dt_est = duration / max(1, ref_ts.size - 1)
+        sample_rate_est = 1.0 / dt_est if dt_est > 0 else 50.0
+    else:
+        sample_rate_est = 50.0
+ 
+    window_n = max(20, int(round(window_seconds * sample_rate_est)))
+    step_n = max(5, int(round(window_step_seconds * sample_rate_est)))
+    search_n = max(1, int(round(local_search_seconds * sample_rate_est)))
     half = window_n // 2
 
     target_times: list[float] = []
@@ -112,8 +119,11 @@ def _windowed_lag_refinement(
         if best_lag is None:
             continue
 
-        ref_center_sec = reference_start_sec + center * dt
-        tgt_center_sec = target_start_sec + (center - best_lag) * dt
+        ref_center_sec = float(ref_ts[center])
+        tgt_center_idx = center - best_lag
+        if tgt_center_idx < 0 or tgt_center_idx >= len(target_ts_sec):
+            continue
+        tgt_center_sec = float(target_ts_sec[tgt_center_idx])
         offset_sec = ref_center_sec - tgt_center_sec
 
         target_times.append(tgt_center_sec)
@@ -165,33 +175,31 @@ def estimate_sync_model(
         use_gyro=DEFAULT_USE_GYRO,
         use_mag=DEFAULT_USE_MAG,
     )
-
-    ref_rs = resample_stream(reference_df, sample_rate_hz)
-    tgt_rs = resample_stream(target_df, sample_rate_hz)
-
+ 
     ref_signal = build_alignment_signal(
-        ref_rs,
+        reference_df,
         use_acc=DEFAULT_USE_ACC,
         use_gyro=DEFAULT_USE_GYRO,
         use_mag=DEFAULT_USE_MAG,
     )
     tgt_signal = build_alignment_signal(
-        tgt_rs,
+        target_df,
         use_acc=DEFAULT_USE_ACC,
         use_gyro=DEFAULT_USE_GYRO,
         use_mag=DEFAULT_USE_MAG,
     )
-
-    ref_start_sec = float(ref_rs["timestamp"].iloc[0]) / 1000.0
-    tgt_start_sec = float(tgt_rs["timestamp"].iloc[0]) / 1000.0
-    target_time_origin_seconds = tgt_start_sec
+ 
+    ref_ts_sec = pd.to_numeric(reference_df["timestamp"], errors="coerce").to_numpy(dtype=float) / 1000.0
+    tgt_ts_sec = pd.to_numeric(target_df["timestamp"], errors="coerce").to_numpy(dtype=float) / 1000.0
+    if ref_ts_sec.size == 0 or tgt_ts_sec.size == 0:
+        raise ValueError("reference_df and target_df must contain non-empty 'timestamp' columns")
+    target_time_origin_seconds = float(tgt_ts_sec[0])
 
     target_times, offsets, scores = _windowed_lag_refinement(
         reference_signal=ref_signal,
         target_signal=tgt_signal,
-        reference_start_sec=ref_start_sec,
-        target_start_sec=tgt_start_sec,
-        sample_rate_hz=sample_rate_hz,
+        reference_ts_sec=ref_ts_sec,
+        target_ts_sec=tgt_ts_sec,
         coarse_lag_samples=coarse.lag_samples,
         window_seconds=DEFAULT_WINDOW_SECONDS,
         window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
@@ -211,23 +219,15 @@ def estimate_sync_model(
         )
         median_score = float(np.median(scores))
 
-    scale = 1.0 + drift_seconds_per_second
-
     return SyncModel(
         reference_csv=reference_name,
         target_csv=target_name,
         target_time_origin_seconds=target_time_origin_seconds,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift_seconds_per_second,
-        scale=scale,
-        sample_rate_hz=sample_rate_hz,
         coarse_lag_samples=coarse.lag_samples,
         coarse_offset_seconds=coarse.offset_seconds,
         coarse_score=coarse.score,
-        window_seconds=DEFAULT_WINDOW_SECONDS,
-        window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
-        local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
-        num_windows=int(len(offsets)),
         fit_r2=fit_r2,
         median_window_score=median_score,
         created_at_utc=datetime.now(UTC).isoformat(),
@@ -264,12 +264,12 @@ def apply_sync_model(
 def resample_aligned_stream(
     aligned_df: pd.DataFrame,
     *,
-    rate_hz: float,
+    resample_rate_hz: float,
     timestamp_col: str = "timestamp",
     round_timestamp_ms: bool = True,
 ) -> pd.DataFrame:
     """Resample synchronized stream to uniform rate using linear interpolation (LIDA-style)."""
-    out = resample_stream(aligned_df, rate_hz=rate_hz, timestamp_col=timestamp_col)
+    out = resample_stream(aligned_df, sample_rate_hz=resample_rate_hz, timestamp_col=timestamp_col)
     if round_timestamp_ms:
         for col in (timestamp_col, "timestamp_orig", "timestamp_aligned"):
             if col not in out.columns:

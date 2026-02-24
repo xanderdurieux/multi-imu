@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import load_dataframe, session_stage_dir
+from common import find_sensor_csv, load_dataframe, session_stage_dir
 from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
-from .plot_sensor import prepare_sensor_axes, find_sensor_csv, sensor_norm
+from .plot_sensor import prepare_sensor_axes, sensor_norm
 
 
 
@@ -39,8 +39,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 	session_dir = session_stage_dir(session_name, stage)
 
 	try:
-		csv_path_a = find_sensor_csv(session_dir, args.sensor_name_a)
-		csv_path_b = find_sensor_csv(session_dir, args.sensor_name_b)
+		csv_path_a = find_sensor_csv(session_name, stage, args.sensor_name_a)
+		csv_path_b = find_sensor_csv(session_name, stage, args.sensor_name_b)
 	except (FileNotFoundError, ValueError) as exc:
 		parser.error(str(exc))
 
@@ -94,9 +94,9 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 
 	filename = "".join([
-		f"{args.sensor_name_a}",
+		f"{csv_path_a.stem}",
 		f"_vs_",
-		f"{args.sensor_name_b}",
+		f"{csv_path_b.stem}",
 		f"_norm" if args.norm else "",
 		f".png",
 	])

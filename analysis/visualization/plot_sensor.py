@@ -10,26 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import load_dataframe, session_stage_dir
+from common import find_sensor_csv, load_dataframe, session_stage_dir
 from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
-
-def find_sensor_csv(session_dir: Path, sensor_name: str) -> Path:
-    """Find the sensor CSV file matching the sensor name."""
-    if not session_dir.exists():
-        raise FileNotFoundError(f"Session directory not found: {session_dir}")
-
-    # Find CSV files containing the sensor name
-    csv_files = list(session_dir.glob("*.csv"))
-    matching_files = [f for f in csv_files if sensor_name.lower() in f.name.lower()]
-
-    if not matching_files:
-        raise FileNotFoundError(f"No CSV file found containing '{sensor_name}' in {session_dir}")
-
-    if len(matching_files) > 1:
-        raise ValueError(f"Multiple files found matching '{sensor_name}': {[f.name for f in matching_files]}")
-
-    return matching_files[0]
-
 
 def prepare_sensor_axes(num_series: int, num_columns: int = 1, *, sharex: bool = True):
     """Create a grid of axes and normalize return type to a list."""
@@ -54,7 +36,6 @@ def prepare_sensor_axes(num_series: int, num_columns: int = 1, *, sharex: bool =
 def sensor_norm(df: pd.DataFrame, sensor_type: str) -> np.ndarray:
     """Compute vector norm for one sensor type."""
     cols = SENSOR_COMPONENTS[sensor_type]
-    print(cols)
     return np.sqrt(sum(df[col].values ** 2 for col in cols))
 
 
@@ -88,9 +69,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Plot vector norms instead of axes components.",
     )
     parser.add_argument(
-        "--split",
+        "--acc",
         action="store_true",
-        help="Create one output file per sensor type (acc, gyro, mag).",
+        help="Plot only the accelerometer data.",
+    )
+    parser.add_argument(
+        "--gyro",
+        action="store_true",
+        help="Plot only the gyroscope data.",
+    )
+    parser.add_argument(
+        "--mag",
+        action="store_true",
+        help="Plot only the magnetometer data.",
     )
     return parser
 
@@ -107,7 +98,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Find sensor CSV file
     try:
-        csv_path = find_sensor_csv(session_dir, args.sensor_name)
+        csv_path = find_sensor_csv(session_name, stage, args.sensor_name)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -120,7 +111,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     time_seconds = (df["timestamp"] - df["timestamp"].iloc[0]) / 1000.0
 
     # List of sensor types to plot on separate images
-    sensor_types = [["acc"], ["gyro"], ["mag"]] if args.split else [["acc", "gyro", "mag"]]
+    sensor_types = [["acc", "gyro", "mag"]]
+    if args.acc:
+        sensor_types = [["acc"]]
+    if args.gyro:
+        sensor_types = [["gyro"]]
+    if args.mag:
+        sensor_types = [["mag"]]
+
     for st in sensor_types:
         fig, ax_grid = prepare_sensor_axes(len(st))
 
@@ -135,7 +133,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         # Build output filename and save image
         filename = "".join([
             f"{csv_path.stem}",
-            f"_{st[0]}" if args.split else "",
+            f"_{st[0]}" if len(st) == 1 else "",
             f"_norm" if args.norm else "",
             f".png",
         ])

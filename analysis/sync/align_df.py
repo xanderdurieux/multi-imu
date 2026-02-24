@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .common import add_vector_norms, resample_stream
+from .common import add_vector_norms
 
 
 @dataclass(frozen=True)
@@ -159,47 +159,45 @@ def _corr_score_for_lag(
 def estimate_lag(
     reference_signal: np.ndarray,
     target_signal: np.ndarray,
-    *,
-    max_lag_samples: int,
 ) -> tuple[int, float]:
     """
     Estimate discrete lag (sample shift) between reference and target signals.
 
     Performs SDA-style discrete alignment by searching for the integer sample
-    shift that maximizes cross-correlation. This provides coarse alignment with
-    precision limited to one sample period.
-
+    shift that maximizes cross-correlation between the full reference and
+    target signals. This provides coarse alignment with precision limited to
+    one sample period.
+ 
     Args:
         reference_signal: Reference alignment signal (1D array).
         target_signal: Target alignment signal (1D array).
-        max_lag_samples: Maximum absolute lag to search (symmetric search window).
-
+ 
     Returns:
         Tuple of (best_lag_samples, best_score) where:
         - best_lag_samples: Integer sample shift that maximizes correlation.
         - best_score: Correlation score for the best lag.
-
-    Raises:
-        ValueError: If max_lag_samples is negative.
     """
-    if max_lag_samples < 0:
-        raise ValueError("max_lag_samples must be >= 0")
-
-    best_lag = 0
-    best_score = -np.inf
-
-    # Search symmetric lag window for maximum correlation
-    for lag in range(-max_lag_samples, max_lag_samples + 1):
-        score = _corr_score_for_lag(
-            reference_signal,
-            target_signal,
-            lag,
-        )
-        if score > best_score:
-            best_score = score
-            best_lag = lag
-
-    return best_lag, float(best_score)
+    ref = np.asarray(reference_signal, dtype=float)
+    tgt = np.asarray(target_signal, dtype=float)
+    if ref.size == 0 or tgt.size == 0:
+        return 0, float("-inf")
+ 
+    # Full cross-correlation between reference and target:
+    # corr[k] corresponds to lag = k - (len(tgt) - 1) in samples,
+    # where positive lag means the target is delayed.
+    corr = np.correlate(ref, tgt, mode="full")
+    best_idx = int(np.argmax(corr))
+    best_lag = best_idx - (tgt.size - 1)
+ 
+    # Normalize score by effective overlap length at this lag so scores are
+    # comparable across different signal lengths.
+    n_ref = ref.size
+    n_tgt = tgt.size
+    i0 = max(0, best_lag)
+    i1 = min(n_ref, n_tgt + best_lag)
+    overlap = max(1, i1 - i0)
+    best_score = float(corr[best_idx] / overlap)
+    return best_lag, best_score
 
 
 def estimate_offset(
@@ -207,7 +205,6 @@ def estimate_offset(
     target_df: pd.DataFrame,
     *,
     sample_rate_hz: float = 50.0,
-    max_lag_seconds: float = 20.0,
     use_acc: bool = True,
     use_gyro: bool = True,
     use_mag: bool = False,
@@ -216,11 +213,11 @@ def estimate_offset(
     Estimate SDA-style coarse time offset between reference and target IMU streams.
 
     This implements the Simple Data Alignment (SDA) algorithm approach for initial
-    time synchronization. The method:
-    1. Resamples both streams to a common rate
-    2. Builds orientation-invariant alignment signals from vector magnitudes
-    3. Uses cross-correlation to find the discrete sample lag
-    4. Computes total time offset including stream start time difference
+    time synchronization using direct correlation between the reference and target
+    alignment signals. The method:
+    1. Builds orientation-invariant alignment signals from vector magnitudes
+    2. Uses full cross-correlation to find the discrete sample lag
+    3. Computes total time offset including stream start time difference
 
     The alignment precision is limited to approximately one sample period (within
     one half sample period at best) due to discrete sample shifts. For sub-sample
@@ -229,8 +226,8 @@ def estimate_offset(
     Args:
         reference_df: Reference IMU stream dataframe.
         target_df: Target IMU stream dataframe to align to reference.
-        sample_rate_hz: Common sampling rate for alignment signal computation.
-        max_lag_seconds: Maximum absolute lag to search (symmetric window).
+        sample_rate_hz: Sampling rate of the input streams (used for conversion
+            between samples and seconds).
         use_acc: Include accelerometer in alignment signal.
         use_gyro: Include gyroscope in alignment signal.
         use_mag: Include magnetometer in alignment signal.
@@ -238,39 +235,33 @@ def estimate_offset(
     Returns:
         OffsetEstimate containing discrete lag, total offset, correlation score,
         and sampling rate used.
-
-    Reference:
-        Wang et al. (2023). Comparison between Two Time Synchronization and Data
-        Alignment Methods for Multi-Channel Wearable Biosensor Systems Using BLE
-        Protocol. Sensors, 23(5), 2465.
     """
-    # Resample both streams to common rate for alignment
-    ref_rs = resample_stream(reference_df, sample_rate_hz)
-    tgt_rs = resample_stream(target_df, sample_rate_hz)
-
-    # Build orientation-invariant alignment signals
+    if "timestamp" not in reference_df.columns or "timestamp" not in target_df.columns:
+        raise ValueError("both reference_df and target_df must contain a 'timestamp' column")
+ 
+    # Build orientation-invariant alignment signals directly from the input streams
     ref_signal = build_alignment_signal(
-        ref_rs,
+        reference_df,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
     )
     tgt_signal = build_alignment_signal(
-        tgt_rs,
+        target_df,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
     )
-
-    # SDA: discrete lag estimation via cross-correlation
-    max_lag_samples = max(1, int(round(max_lag_seconds * sample_rate_hz)))
-    lag_samples, score = estimate_lag(ref_signal, tgt_signal, max_lag_samples=max_lag_samples)
-
+ 
+    # SDA: discrete lag estimation via cross-correlation over the full signals.
+    # We intentionally do not restrict the search by a maximum lag here to keep
+    # the implementation simple and purely correlation-driven.
+    lag_samples, score = estimate_lag(ref_signal, tgt_signal)
     lag_seconds = lag_samples / sample_rate_hz
-
+ 
     # Compute total time offset (stream start difference + discrete lag)
-    ref_start_sec = float(ref_rs["timestamp"].iloc[0]) / 1000.0
-    tgt_start_sec = float(tgt_rs["timestamp"].iloc[0]) / 1000.0
+    ref_start_sec = float(reference_df["timestamp"].iloc[0]) / 1000.0
+    tgt_start_sec = float(target_df["timestamp"].iloc[0]) / 1000.0
 
     # Total offset: ref_time ≈ target_time + offset_seconds
     offset_seconds = (ref_start_sec - tgt_start_sec) + lag_seconds
