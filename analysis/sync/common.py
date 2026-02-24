@@ -10,7 +10,7 @@ import pandas as pd
 
 from common import load_dataframe
 
-VECTOR_AXES = {
+VECTOR_AXES: dict[str, list[str]] = {
     "acc": ["ax", "ay", "az"],
     "gyro": ["gx", "gy", "gz"],
     "mag": ["mx", "my", "mz"],
@@ -18,7 +18,7 @@ VECTOR_AXES = {
 
 
 def load_stream(csv_path: Path | str) -> pd.DataFrame:
-    """Load a processed IMU stream CSV and return rows sorted by timestamp."""
+    """Load an IMU CSV, coerce numeric schema, and sort by timestamp."""
     path = Path(csv_path)
     df = load_dataframe(path).copy()
     df = df.dropna(subset=["timestamp"])
@@ -27,7 +27,7 @@ def load_stream(csv_path: Path | str) -> pd.DataFrame:
 
 
 def add_vector_norms(df: pd.DataFrame) -> pd.DataFrame:
-    """Add orientation-invariant vector magnitude columns (|acc|, |gyro|, |mag|)."""
+    """Add |acc|, |gyro|, and |mag| magnitude columns."""
     out = df.copy()
     for name, axes in VECTOR_AXES.items():
         if all(col in out.columns for col in axes):
@@ -40,7 +40,7 @@ def add_vector_norms(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def infer_numeric_columns(df: pd.DataFrame, skip: Iterable[str] = ("timestamp",)) -> list[str]:
-    """Infer numeric columns excluding ``skip``."""
+    """Infer numeric columns excluding the given names."""
     skip_set = set(skip)
     cols: list[str] = []
     for col in df.columns:
@@ -49,6 +49,13 @@ def infer_numeric_columns(df: pd.DataFrame, skip: Iterable[str] = ("timestamp",)
         if pd.api.types.is_numeric_dtype(df[col]):
             cols.append(col)
     return cols
+
+
+def _sorted_numeric_timestamp(df: pd.DataFrame, timestamp_col: str) -> pd.DataFrame:
+    out = df.copy()
+    out[timestamp_col] = pd.to_numeric(out[timestamp_col], errors="coerce")
+    out = out.dropna(subset=[timestamp_col]).sort_values(timestamp_col)
+    return out
 
 
 def resample_stream(
@@ -60,30 +67,26 @@ def resample_stream(
     start_ms: float | None = None,
     end_ms: float | None = None,
 ) -> pd.DataFrame:
-    """Resample IMU stream to uniform sampling rate using linear interpolation (LIDA-style)."""
+    """Resample stream to a uniform time grid with linear interpolation."""
     if sample_rate_hz <= 0:
         raise ValueError("sample_rate_hz must be > 0")
     if timestamp_col not in df.columns:
         raise ValueError(f"missing timestamp column: {timestamp_col}")
 
-    base = df.copy()
-    base[timestamp_col] = pd.to_numeric(base[timestamp_col], errors="coerce")
-    base = base.dropna(subset=[timestamp_col]).sort_values(timestamp_col)
+    base = _sorted_numeric_timestamp(df, timestamp_col)
     if base.empty:
-        return base
+        return pd.DataFrame(columns=[timestamp_col])
 
     ts = base[timestamp_col].to_numpy(dtype=float)
-    step_ms = 1000.0 / sample_rate_hz
-
+    step_ms = 1000.0 / float(sample_rate_hz)
     lo = float(ts[0] if start_ms is None else start_ms)
     hi = float(ts[-1] if end_ms is None else end_ms)
-    if hi <= lo:
-        one = base.iloc[[0]].copy()
-        one[timestamp_col] = lo
-        return one
 
-    grid = np.arange(lo, hi + 0.5 * step_ms, step_ms, dtype=float)
-    out = pd.DataFrame({timestamp_col: grid})
+    if hi <= lo:
+        out = pd.DataFrame({timestamp_col: np.asarray([lo], dtype=float)})
+    else:
+        grid = np.arange(lo, hi + 0.5 * step_ms, step_ms, dtype=float)
+        out = pd.DataFrame({timestamp_col: grid})
 
     if columns is None:
         columns = infer_numeric_columns(base, skip=[timestamp_col])
@@ -92,7 +95,7 @@ def resample_stream(
         values = pd.to_numeric(base[col], errors="coerce").to_numpy(dtype=float)
         valid = np.isfinite(ts) & np.isfinite(values)
         if valid.sum() >= 2:
-            out[col] = np.interp(grid, ts[valid], values[valid])
+            out[col] = np.interp(out[timestamp_col].to_numpy(dtype=float), ts[valid], values[valid])
         elif valid.sum() == 1:
             out[col] = values[valid][0]
         else:
@@ -107,49 +110,37 @@ def resample_to_reference_timestamps(
     *,
     timestamp_col: str = "timestamp",
 ) -> pd.DataFrame:
-    """
-    Resample a target stream onto the timestamp series of a reference stream.
-
-    Uses linear interpolation of the target values at the reference timestamps.
-    Values outside the temporal support of the target become NaN so that only
-    the overlapping region carries valid data.
-    """
+    """Resample target values at reference timestamps for sample-by-sample comparison."""
     if timestamp_col not in target_df.columns or timestamp_col not in reference_df.columns:
         raise ValueError(f"both dataframes must contain '{timestamp_col}'")
 
-    ref = reference_df.copy()
-    ref_ts = pd.to_numeric(ref[timestamp_col], errors="coerce").to_numpy(dtype=float)
-    tgt = target_df.copy()
-    tgt_ts = pd.to_numeric(tgt[timestamp_col], errors="coerce").to_numpy(dtype=float)
-
-    if ref_ts.size == 0 or tgt_ts.size == 0:
-        return pd.DataFrame({timestamp_col: ref_ts})
+    ref = _sorted_numeric_timestamp(reference_df, timestamp_col)
+    tgt = _sorted_numeric_timestamp(target_df, timestamp_col)
+    ref_ts = ref[timestamp_col].to_numpy(dtype=float)
+    tgt_ts = tgt[timestamp_col].to_numpy(dtype=float)
 
     out = pd.DataFrame({timestamp_col: ref_ts})
+    if ref_ts.size == 0 or tgt_ts.size == 0:
+        return out
 
-    columns = infer_numeric_columns(tgt, skip=[timestamp_col])
-    for col in columns:
+    cols = infer_numeric_columns(tgt, skip=[timestamp_col])
+    for col in cols:
         values = pd.to_numeric(tgt[col], errors="coerce").to_numpy(dtype=float)
         valid = np.isfinite(tgt_ts) & np.isfinite(values)
-        if valid.sum() >= 2:
-            ts_valid = tgt_ts[valid]
-            vals_valid = values[valid]
-            lo = float(ts_valid.min())
-            hi = float(ts_valid.max())
-            series = np.full(ref_ts.shape, np.nan, dtype=float)
-            inside = (ref_ts >= lo) & (ref_ts <= hi)
-            if inside.any():
-                series[inside] = np.interp(ref_ts[inside], ts_valid, vals_valid)
-            out[col] = series
-        elif valid.sum() == 1:
-            # Single valid point: propagate it only where reference is close to that time.
-            ts0 = float(tgt_ts[valid][0])
-            vals0 = float(values[valid][0])
-            series = np.full(ref_ts.shape, np.nan, dtype=float)
-            series[np.isclose(ref_ts, ts0)] = vals0
-            out[col] = series
-        else:
+        if valid.sum() < 2:
             out[col] = np.nan
+            continue
+
+        ts_valid = tgt_ts[valid]
+        val_valid = values[valid]
+        lo = float(ts_valid.min())
+        hi = float(ts_valid.max())
+
+        series = np.full(ref_ts.shape, np.nan, dtype=float)
+        inside = (ref_ts >= lo) & (ref_ts <= hi)
+        if inside.any():
+            series[inside] = np.interp(ref_ts[inside], ts_valid, val_valid)
+        out[col] = series
 
     return out
 
@@ -161,11 +152,11 @@ def apply_linear_time_transform(
     drift_seconds_per_second: float,
     target_origin_seconds: float,
 ) -> np.ndarray:
-    """Apply linear time transformation (offset + drift) to map target timestamps to reference clock."""
+    """Map target timestamps to reference time using offset + linear drift."""
     ts_sec = np.asarray(timestamp_ms, dtype=float) / 1000.0
     aligned_sec = (
         ts_sec
-        + offset_seconds
-        + drift_seconds_per_second * (ts_sec - target_origin_seconds)
+        + float(offset_seconds)
+        + float(drift_seconds_per_second) * (ts_sec - float(target_origin_seconds))
     )
     return aligned_sec * 1000.0

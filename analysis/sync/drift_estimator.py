@@ -1,13 +1,8 @@
-"""
-LIDA-style (Linear Interpolation Data Alignment) refined synchronization model.
-
-This module implements refined time synchronization using windowed correlation
-and linear drift estimation, improving upon SDA's discrete alignment precision.
-"""
+"""LIDA-style drift estimation built on top of SDA coarse alignment."""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -15,103 +10,89 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .align_df import OffsetEstimate, build_alignment_signal, estimate_offset
+from .align_df import (
+    AlignmentSeries,
+    OffsetEstimate,
+    build_alignment_series,
+    estimate_offset_from_series,
+)
 from .common import apply_linear_time_transform, load_stream, resample_stream
 
 DEFAULT_WINDOW_SECONDS = 20.0
 DEFAULT_WINDOW_STEP_SECONDS = 10.0
 DEFAULT_LOCAL_SEARCH_SECONDS = 2.0
-DEFAULT_USE_ACC = True
-DEFAULT_USE_GYRO = True
-DEFAULT_USE_MAG = False
 
 
 @dataclass(frozen=True)
 class SyncModel:
-    """
-    Complete synchronization model with offset, drift, and quality metrics.
-
-    Combines SDA coarse alignment with LIDA-style refined drift estimation
-    for sub-sample precision alignment.
-    """
+    """Global offset + drift model with minimal metadata."""
 
     reference_csv: str
     target_csv: str
     target_time_origin_seconds: float
     offset_seconds: float
     drift_seconds_per_second: float
-    coarse_lag_samples: int
-    coarse_offset_seconds: float
-    coarse_score: float
-    fit_r2: float
-    median_window_score: float
+    sample_rate_hz: float
+    max_lag_seconds: float
     created_at_utc: str
 
 
 def _windowed_lag_refinement(
-    reference_signal: np.ndarray,
-    target_signal: np.ndarray,
+    reference_series: AlignmentSeries,
+    target_series: AlignmentSeries,
     *,
-    reference_ts_sec: np.ndarray,
-    target_ts_sec: np.ndarray,
     coarse_lag_samples: int,
     window_seconds: float,
     window_step_seconds: float,
     local_search_seconds: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Refine coarse lag estimate using windowed correlation (LIDA-style refinement).
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ref_signal = reference_series.signal
+    tgt_signal = target_series.signal
+    ref_ts = reference_series.timestamps_seconds
+    tgt_ts = target_series.timestamps_seconds
+    sample_rate_hz = float(reference_series.sample_rate_hz)
 
-    Slides windows over the reference signal and searches locally around the
-    coarse lag to estimate time-varying offset, enabling drift estimation.
-    """
-    n_ref = len(reference_signal)
-    n_tgt = len(target_signal)
+    n_ref = ref_signal.size
+    n_tgt = tgt_signal.size
     if n_ref == 0 or n_tgt == 0:
-        return (
-            np.asarray([], dtype=float),
-            np.asarray([], dtype=float),
-            np.asarray([], dtype=float),
-        )
- 
-    # Estimate effective sampling rate from reference timestamps to size windows
-    ref_ts = np.asarray(reference_ts_sec, dtype=float)
-    if ref_ts.size >= 2:
-        duration = ref_ts[-1] - ref_ts[0]
-        dt_est = duration / max(1, ref_ts.size - 1)
-        sample_rate_est = 1.0 / dt_est if dt_est > 0 else 50.0
-    else:
-        sample_rate_est = 50.0
- 
-    window_n = max(20, int(round(window_seconds * sample_rate_est)))
-    step_n = max(5, int(round(window_step_seconds * sample_rate_est)))
-    search_n = max(1, int(round(local_search_seconds * sample_rate_est)))
+        empty = np.asarray([], dtype=float)
+        return empty, empty, empty, empty
+
+    window_n = max(20, int(round(float(window_seconds) * sample_rate_hz)))
+    step_n = max(5, int(round(float(window_step_seconds) * sample_rate_hz)))
+    search_n = max(1, int(round(float(local_search_seconds) * sample_rate_hz)))
     half = window_n // 2
+    if n_ref < window_n:
+        empty = np.asarray([], dtype=float)
+        return empty, empty, empty, empty
 
     target_times: list[float] = []
     offsets: list[float] = []
     scores: list[float] = []
+    lags: list[float] = []
 
     for center in range(half, n_ref - half, step_n):
         left = center - half
         right = center + half
-        ref_win = reference_signal[left:right]
+        ref_win = ref_signal[left:right]
+        if ref_win.size < 10:
+            continue
 
         best_lag: int | None = None
-        best_score = -np.inf
+        best_score = float("-inf")
 
         for delta in range(-search_n, search_n + 1):
-            lag = coarse_lag_samples + delta
+            lag = int(coarse_lag_samples + delta)
             t_left = left - lag
             t_right = right - lag
             if t_left < 0 or t_right > n_tgt:
                 continue
 
-            tgt_win = target_signal[t_left:t_right]
-            if len(tgt_win) != len(ref_win):
+            tgt_win = tgt_signal[t_left:t_right]
+            if tgt_win.size != ref_win.size:
                 continue
 
-            score = float(np.dot(ref_win, tgt_win) / len(ref_win))
+            score = float(np.dot(ref_win, tgt_win) / ref_win.size)
             if score > best_score:
                 best_score = score
                 best_lag = lag
@@ -119,35 +100,54 @@ def _windowed_lag_refinement(
         if best_lag is None:
             continue
 
-        ref_center_sec = float(ref_ts[center])
-        tgt_center_idx = center - best_lag
-        if tgt_center_idx < 0 or tgt_center_idx >= len(target_ts_sec):
+        tgt_idx = center - best_lag
+        if tgt_idx < 0 or tgt_idx >= tgt_ts.size:
             continue
-        tgt_center_sec = float(target_ts_sec[tgt_center_idx])
-        offset_sec = ref_center_sec - tgt_center_sec
 
-        target_times.append(tgt_center_sec)
-        offsets.append(offset_sec)
+        ref_time = float(ref_ts[center])
+        tgt_time = float(tgt_ts[tgt_idx])
+        target_times.append(tgt_time)
+        offsets.append(ref_time - tgt_time)
         scores.append(best_score)
+        lags.append(float(best_lag))
 
-    return np.asarray(target_times), np.asarray(offsets), np.asarray(scores)
+    return (
+        np.asarray(target_times, dtype=float),
+        np.asarray(offsets, dtype=float),
+        np.asarray(scores, dtype=float),
+        np.asarray(lags, dtype=float),
+    )
 
 
 def _fit_offset_drift(
-    target_times_rel: np.ndarray,
-    offsets: np.ndarray,
+    target_times_sec: np.ndarray,
+    offsets_sec: np.ndarray,
+    *,
+    target_origin_seconds: float,
+    weights: np.ndarray | None = None,
 ) -> tuple[float, float, float]:
-    """Fit linear drift model (offset + drift_rate * time) via least squares."""
-    if len(target_times_rel) < 2:
-        return float(offsets[0]) if len(offsets) == 1 else 0.0, 0.0, 0.0
+    if target_times_sec.size == 0:
+        return 0.0, 0.0, 0.0
+    if target_times_sec.size == 1:
+        return float(offsets_sec[0]), 0.0, 0.0
 
-    slope, intercept = np.polyfit(target_times_rel, offsets, 1)
-    predicted = slope * target_times_rel + intercept
+    x = np.asarray(target_times_sec, dtype=float) - float(target_origin_seconds)
+    y = np.asarray(offsets_sec, dtype=float)
 
-    ss_res = float(np.sum((offsets - predicted) ** 2))
-    ss_tot = float(np.sum((offsets - np.mean(offsets)) ** 2))
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        w = np.clip(w, a_min=0.0, a_max=None)
+        if np.any(w > 0):
+            slope, intercept = np.polyfit(x, y, 1, w=np.sqrt(w))
+        else:
+            slope, intercept = np.polyfit(x, y, 1)
+    else:
+        slope, intercept = np.polyfit(x, y, 1)
+
+    y_hat = intercept + slope * x
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-
     return float(intercept), float(slope), float(r2)
 
 
@@ -158,78 +158,71 @@ def estimate_sync_model(
     reference_name: str,
     target_name: str,
     sample_rate_hz: float = 50.0,
-    max_lag_seconds: float = 20.0,
+    max_lag_seconds: float = 30.0,
+    window_seconds: float = DEFAULT_WINDOW_SECONDS,
+    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
+    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    use_acc: bool = True,
+    use_gyro: bool = True,
+    use_mag: bool = False,
 ) -> SyncModel:
     """
-    Estimate complete synchronization model (SDA coarse + LIDA refined drift).
-
-    Combines SDA-style discrete lag estimation with windowed correlation refinement
-    to estimate both time offset and clock drift for sub-sample precision alignment.
+    Estimate complete synchronization model:
+    coarse SDA lag + LIDA-style linear drift fit.
     """
-    coarse: OffsetEstimate = estimate_offset(
+    ref_series = build_alignment_series(
         reference_df,
+        sample_rate_hz=sample_rate_hz,
+        use_acc=use_acc,
+        use_gyro=use_gyro,
+        use_mag=use_mag,
+    )
+    tgt_series = build_alignment_series(
         target_df,
         sample_rate_hz=sample_rate_hz,
+        use_acc=use_acc,
+        use_gyro=use_gyro,
+        use_mag=use_mag,
+    )
+    if ref_series.signal.size == 0 or tgt_series.signal.size == 0:
+        raise ValueError("Cannot estimate sync model from empty streams.")
+
+    coarse: OffsetEstimate = estimate_offset_from_series(
+        reference_series=ref_series,
+        target_series=tgt_series,
         max_lag_seconds=max_lag_seconds,
-        use_acc=DEFAULT_USE_ACC,
-        use_gyro=DEFAULT_USE_GYRO,
-        use_mag=DEFAULT_USE_MAG,
     )
- 
-    ref_signal = build_alignment_signal(
-        reference_df,
-        use_acc=DEFAULT_USE_ACC,
-        use_gyro=DEFAULT_USE_GYRO,
-        use_mag=DEFAULT_USE_MAG,
-    )
-    tgt_signal = build_alignment_signal(
-        target_df,
-        use_acc=DEFAULT_USE_ACC,
-        use_gyro=DEFAULT_USE_GYRO,
-        use_mag=DEFAULT_USE_MAG,
-    )
- 
-    ref_ts_sec = pd.to_numeric(reference_df["timestamp"], errors="coerce").to_numpy(dtype=float) / 1000.0
-    tgt_ts_sec = pd.to_numeric(target_df["timestamp"], errors="coerce").to_numpy(dtype=float) / 1000.0
-    if ref_ts_sec.size == 0 or tgt_ts_sec.size == 0:
-        raise ValueError("reference_df and target_df must contain non-empty 'timestamp' columns")
-    target_time_origin_seconds = float(tgt_ts_sec[0])
+    target_origin_seconds = float(tgt_series.timestamps_seconds[0])
 
-    target_times, offsets, scores = _windowed_lag_refinement(
-        reference_signal=ref_signal,
-        target_signal=tgt_signal,
-        reference_ts_sec=ref_ts_sec,
-        target_ts_sec=tgt_ts_sec,
+    target_times, offsets, scores, _lags = _windowed_lag_refinement(
+        reference_series=ref_series,
+        target_series=tgt_series,
         coarse_lag_samples=coarse.lag_samples,
-        window_seconds=DEFAULT_WINDOW_SECONDS,
-        window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
-        local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
+        window_seconds=window_seconds,
+        window_step_seconds=window_step_seconds,
+        local_search_seconds=local_search_seconds,
     )
 
-    if len(offsets) == 0:
-        offset_seconds = coarse.offset_seconds
+    if offsets.size == 0:
+        offset_seconds = float(coarse.offset_seconds)
         drift_seconds_per_second = 0.0
-        fit_r2 = 0.0
-        median_score = coarse.score
     else:
-        target_times_rel = target_times - target_time_origin_seconds
-        offset_seconds, drift_seconds_per_second, fit_r2 = _fit_offset_drift(
-            target_times_rel,
+        weights = np.clip(scores, a_min=0.0, a_max=None)
+        offset_seconds, drift_seconds_per_second, _fit_r2 = _fit_offset_drift(
+            target_times,
             offsets,
+            target_origin_seconds=target_origin_seconds,
+            weights=weights,
         )
-        median_score = float(np.median(scores))
 
     return SyncModel(
-        reference_csv=reference_name,
-        target_csv=target_name,
-        target_time_origin_seconds=target_time_origin_seconds,
-        offset_seconds=offset_seconds,
-        drift_seconds_per_second=drift_seconds_per_second,
-        coarse_lag_samples=coarse.lag_samples,
-        coarse_offset_seconds=coarse.offset_seconds,
-        coarse_score=coarse.score,
-        fit_r2=fit_r2,
-        median_window_score=median_score,
+        reference_csv=str(reference_name),
+        target_csv=str(target_name),
+        target_time_origin_seconds=target_origin_seconds,
+        offset_seconds=float(offset_seconds),
+        drift_seconds_per_second=float(drift_seconds_per_second),
+        sample_rate_hz=float(sample_rate_hz),
+        max_lag_seconds=float(max_lag_seconds),
         created_at_utc=datetime.now(UTC).isoformat(),
     )
 
@@ -240,7 +233,7 @@ def apply_sync_model(
     *,
     replace_timestamp: bool = True,
 ) -> pd.DataFrame:
-    """Apply synchronization model to transform target stream timestamps to reference clock."""
+    """Apply offset+drift model to target timestamps."""
     out = target_df.copy()
     out["timestamp_orig"] = pd.to_numeric(out["timestamp"], errors="coerce")
     aligned = apply_linear_time_transform(
@@ -249,15 +242,9 @@ def apply_sync_model(
         drift_seconds_per_second=model.drift_seconds_per_second,
         target_origin_seconds=model.target_time_origin_seconds,
     )
-    aligned_ms = np.rint(aligned)
-    if np.isfinite(aligned_ms).all():
-        out["timestamp_aligned"] = aligned_ms.astype(np.int64)
-    else:
-        out["timestamp_aligned"] = pd.Series(aligned_ms).astype("Int64")
-
+    out["timestamp_aligned"] = aligned
     if replace_timestamp:
         out["timestamp"] = out["timestamp_aligned"]
-
     return out
 
 
@@ -266,34 +253,30 @@ def resample_aligned_stream(
     *,
     resample_rate_hz: float,
     timestamp_col: str = "timestamp",
-    round_timestamp_ms: bool = True,
 ) -> pd.DataFrame:
-    """Resample synchronized stream to uniform rate using linear interpolation (LIDA-style)."""
-    out = resample_stream(aligned_df, sample_rate_hz=resample_rate_hz, timestamp_col=timestamp_col)
-    if round_timestamp_ms:
-        for col in (timestamp_col, "timestamp_orig", "timestamp_aligned"):
-            if col not in out.columns:
-                continue
-            ts = np.rint(pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float))
-            if np.isfinite(ts).all():
-                out[col] = ts.astype(np.int64)
-            else:
-                out[col] = pd.Series(ts).astype("Int64")
-    return out
+    """Uniformly resample an aligned stream."""
+    return resample_stream(
+        aligned_df,
+        sample_rate_hz=resample_rate_hz,
+        timestamp_col=timestamp_col,
+    )
 
 
 def save_sync_model(model: SyncModel, path: Path | str) -> Path:
-    """Save synchronization model to JSON file."""
+    """Serialize sync model JSON."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(asdict(model), indent=2), encoding="utf-8")
+    out.write_text(json.dumps(asdict(model), indent=2, sort_keys=False), encoding="utf-8")
     return out
 
 
 def load_sync_model(path: Path | str) -> SyncModel:
-    """Load synchronization model from JSON file."""
+    """Load sync model from JSON."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return SyncModel(**data)
+    # Ignore any unexpected keys from older, more detailed models.
+    allowed_keys = {f.name for f in fields(SyncModel)}
+    filtered = {k: v for k, v in data.items() if k in allowed_keys}
+    return SyncModel(**filtered)
 
 
 def fit_sync_from_paths(
@@ -301,20 +284,30 @@ def fit_sync_from_paths(
     target_csv: Path | str,
     *,
     sample_rate_hz: float = 50.0,
-    max_lag_seconds: float = 20.0,
+    max_lag_seconds: float = 30.0,
+    window_seconds: float = DEFAULT_WINDOW_SECONDS,
+    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
+    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    use_acc: bool = True,
+    use_gyro: bool = True,
+    use_mag: bool = False,
 ) -> SyncModel:
-    """Load reference and target CSV streams and estimate synchronization model."""
-    ref_path = Path(reference_csv)
-    tgt_path = Path(target_csv)
-
-    reference_df = load_stream(ref_path)
-    target_df = load_stream(tgt_path)
-
+    """Load two CSV paths and estimate a sync model."""
+    reference_path = Path(reference_csv)
+    target_path = Path(target_csv)
+    reference_df = load_stream(reference_path)
+    target_df = load_stream(target_path)
     return estimate_sync_model(
         reference_df,
         target_df,
-        reference_name=str(ref_path),
-        target_name=str(tgt_path),
+        reference_name=str(reference_path),
+        target_name=str(target_path),
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=max_lag_seconds,
+        window_seconds=window_seconds,
+        window_step_seconds=window_step_seconds,
+        local_search_seconds=local_search_seconds,
+        use_acc=use_acc,
+        use_gyro=use_gyro,
+        use_mag=use_mag,
     )
