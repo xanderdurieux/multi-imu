@@ -21,90 +21,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import copy
 import numpy as np
 import pandas as pd
 
-from common import data_root, parsed_session_dir, raw_session_dir, load_dataframe
-
-
-# Default expectations and scoring weights live in a JSON file at:
-#   <analysis_root>/session_meta_default.json
-# and can be overridden per session by an optional JSON file in the RAW folder:
-#   <raw_session_dir>/<session_name>_meta.json   or
-#   <raw_session_dir>/session_meta.json
-
-
-def _load_default_meta() -> dict[str, Any]:
-    """Load global default meta from the project root JSON file."""
-    default_path = data_root() / "session_meta_default.json"
-    base: dict[str, Any] = {}
-    if default_path.is_file():
-        try:
-            data = json.loads(default_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                base = data
-        except json.JSONDecodeError:
-            pass
-
-    # Fallback minimal defaults if the JSON file is missing or invalid.
-    if not base:
-        base = {
-            "expected": {},
-            "weights": {},
-            "thresholds": {},
-            "drift": {},
-        }
-    return base
-
-
-def _load_session_meta(session_name: str) -> dict[str, Any]:
-    """Load scoring meta: global defaults + optional per-session overrides from the raw folder."""
-    base_meta = copy.deepcopy(_load_default_meta())
-
-    raw_base = raw_session_dir(session_name)
-    candidates = [
-        raw_base / f"{session_name}_meta.json",
-        raw_base / "session_meta.json",
-    ]
-
-    for meta_path in candidates:
-        if not meta_path.is_file():
-            continue
-        try:
-            user_meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if isinstance(user_meta, dict):
-                base_meta.update(user_meta)
-            break
-        except json.JSONDecodeError:
-            continue
-
-    return base_meta
-
-
-def _series_percentile(x: pd.Series, q: float) -> float | None:
-    if x.empty:
-        return None
-    try:
-        return float(np.nanpercentile(x.to_numpy(dtype=float), q))
-    except Exception:
-        return None
+from common import recording_stage_dir, load_dataframe
 
 
 def _interval_summary(interval_ms: pd.Series) -> dict[str, Any]:
     """
     Compact interval summary focused on jitter/variability.
+
+    Kept intentionally simple so stream quality is easy to interpret
+    without exposing too many low-level statistics.
     """
     s = pd.to_numeric(interval_ms, errors="coerce").dropna()
     if s.empty:
         return {
             "median_ms": None,
-            "p95_ms": None,
             "std_ms": None,
         }
     return {
         "median_ms": float(s.median()),
-        "p95_ms": _series_percentile(s, 95.0),
         "std_ms": float(s.std(ddof=1)) if s.shape[0] >= 2 else 0.0,
     }
 
@@ -113,14 +50,14 @@ def _estimate_missing_samples(
     interval_ms: pd.Series, expected_ms: float, *, gap_factor: float = 1.5
 ) -> dict[str, Any]:
     """
-    Heuristic packet-loss estimate:
+    Heuristic packet-loss estimate, simplified:
     - choose expected interval as median inter-sample interval
     - count "gaps" when an interval exceeds gap_factor * expected
     - estimate missing samples by rounding interval/expected - 1 within those gaps
     """
     s = pd.to_numeric(interval_ms, errors="coerce").dropna()
     if s.empty or not np.isfinite(expected_ms) or expected_ms <= 0:
-        return {"gap_count": 0, "missing_samples": 0, "loss_rate": None, "threshold_ms": None}
+        return {"gap_count": 0, "missing_samples": 0, "threshold_ms": None}
 
     gap_threshold = gap_factor * expected_ms
     gaps = s[s > gap_threshold]
@@ -130,32 +67,51 @@ def _estimate_missing_samples(
         if k > 0:
             missing += k
 
-    # Approximate loss rate relative to observed + missing.
-    denom = int(s.shape[0]) + 1 + missing
-    loss_rate = (missing / denom) if denom > 0 else None
     return {
         "threshold_ms": float(gap_threshold),
         "gap_count": int(gaps.shape[0]),
         "missing_samples": int(missing),
-        "loss_rate": float(loss_rate) if loss_rate is not None else None,
     }
 
 
 def compute_stream_timing_stats(df: pd.DataFrame, *, timestamp_col: str = "timestamp") -> dict[str, Any]:
     """
     Compute compact timing stats (rate, interval jitter, gaps) for a single stream.
+
+    This returns:
+    - start_timestamp_ms / end_timestamp_ms
+    - duration_s
+    - interval_ms: median and std
+    - rate_hz: approximate sampling rate
+    - gaps: simple missing-sample estimate
     """
     if timestamp_col not in df.columns:
         return {"error": f"missing column: {timestamp_col}"}
 
     ts = pd.to_numeric(df[timestamp_col], errors="coerce").dropna()
     ts = ts.sort_values().reset_index(drop=True)
-    if ts.shape[0] < 2:
+
+    if ts.empty:
         return {
-            "duration_s": 0.0 if ts.shape[0] == 1 else None,
+            "start_timestamp_ms": None,
+            "end_timestamp_ms": None,
+            "duration_s": None,
             "interval_ms": _interval_summary(pd.Series([], dtype=float)),
             "rate_hz": None,
-            "gaps": {"gap_count": 0, "missing_samples": 0, "loss_rate": None, "threshold_ms": None},
+            "gaps": {"gap_count": 0, "missing_samples": 0, "threshold_ms": None},
+        }
+
+    start_ms = float(ts.iloc[0])
+    end_ms = float(ts.iloc[-1])
+
+    if ts.shape[0] < 2:
+        return {
+            "start_timestamp_ms": start_ms,
+            "end_timestamp_ms": end_ms,
+            "duration_s": 0.0,
+            "interval_ms": _interval_summary(pd.Series([], dtype=float)),
+            "rate_hz": None,
+            "gaps": {"gap_count": 0, "missing_samples": 0, "threshold_ms": None},
         }
 
     intervals = ts.diff().iloc[1:]
@@ -165,9 +121,11 @@ def compute_stream_timing_stats(df: pd.DataFrame, *, timestamp_col: str = "times
 
     gaps = _estimate_missing_samples(intervals, float(median_ms) if median_ms else float("nan"))
 
-    duration_s = float((float(ts.iloc[-1]) - float(ts.iloc[0])) / 1000.0)
+    duration_s = float((end_ms - start_ms) / 1000.0)
 
     return {
+        "start_timestamp_ms": start_ms,
+        "end_timestamp_ms": end_ms,
         "duration_s": duration_s,
         "interval_ms": interval_stats,
         "rate_hz": float(rate_hz) if rate_hz is not None else None,
@@ -228,60 +186,6 @@ def estimate_clock_drift(
     }
 
 
-def _score_rate(
-    *,
-    actual_hz: float | None,
-    expected_hz: float | None,
-    good_frac: float,
-    bad_frac: float,
-) -> float | None:
-    if actual_hz is None or expected_hz is None or expected_hz <= 0:
-        return None
-    frac_err = abs(actual_hz - expected_hz) / expected_hz
-    if frac_err <= good_frac:
-        return 1.0
-    if frac_err >= bad_frac:
-        return 0.0
-    return float((bad_frac - frac_err) / (bad_frac - good_frac))
-
-
-def _score_low_is_good(value: float | None, *, good: float, bad: float) -> float | None:
-    """Generic score where lower values are better (loss, jitter, etc.)."""
-    if value is None:
-        return None
-    if value <= good:
-        return 1.0
-    if value >= bad:
-        return 0.0
-    return float((bad - float(value)) / (bad - good))
-
-
-def _score_duration(actual_s: float | None, *, min_duration_s: float | None) -> float | None:
-    if actual_s is None or min_duration_s is None or min_duration_s <= 0:
-        return None
-    if actual_s >= min_duration_s:
-        return 1.0
-    return max(0.0, float(actual_s / min_duration_s))
-
-
-def _score_drift(
-    *,
-    drift_ppm: float | None,
-    fit_r2: float | None,
-    good_ppm: float,
-    bad_ppm: float,
-    min_fit_r2: float,
-) -> float | None:
-    if drift_ppm is None or fit_r2 is None:
-        return None
-    if fit_r2 < min_fit_r2:
-        return 0.0
-    d = abs(float(drift_ppm))
-    if d <= good_ppm:
-        return 1.0
-    if d >= bad_ppm:
-        return 0.0
-    return float((bad_ppm - d) / (bad_ppm - good_ppm))
 
 
 def compute_file_stats(csv_path: Path) -> dict[str, Any]:
@@ -293,7 +197,6 @@ def compute_file_stats(csv_path: Path) -> dict[str, Any]:
 
     # Optional Arduino-only received timestamp stats + drift mapping.
     if "timestamp_received" in df.columns:
-        out["received"] = compute_stream_timing_stats(df, timestamp_col="timestamp_received")
         drift = estimate_clock_drift(device_ts_ms=df["timestamp"], received_ts_ms=df["timestamp_received"])
         if drift is not None:
             # Keep only the least redundant drift info.
@@ -306,124 +209,34 @@ def compute_file_stats(csv_path: Path) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class SessionStats:
-    session_name: str
+class RecordingStats:
+    recording_name: str
     generated_at_utc: str
-    session_dir: str
+    stage_dir: str
     streams: dict[str, dict[str, Any]]
-    session_quality: dict[str, Any] | None
 
 
-def compute_session_stats(session_name: str) -> SessionStats:
-    session_dir = parsed_session_dir(session_name)
-    if not session_dir.is_dir():
-        raise FileNotFoundError(f"session extracted folder not found: {session_dir}")
-
-    meta = _load_session_meta(session_name)
+def compute_recording_stats(recording_name: str, stage: str = "parsed") -> RecordingStats:
+    stage_dir = recording_stage_dir(recording_name, stage)
+    if not stage_dir.is_dir():
+        raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
 
     streams: dict[str, dict[str, Any]] = {}
-    for csv_path in sorted(session_dir.glob("*.csv")):
+    for csv_path in sorted(stage_dir.glob("*.csv")):
         streams[csv_path.stem] = compute_file_stats(csv_path)
 
-    # Per-stream quality scores.
-    stream_scores: dict[str, float] = {}
-    for name, st in streams.items():
-        timing = st.get("timing", {})
-        received = st.get("received") if name == "arduino" else None
-
-        exp = (meta.get("expected") or {}).get(name, {})
-        expected_rate = exp.get("rate_hz")
-        min_duration_s = exp.get("min_duration_s")
-
-        thr_rate = (meta.get("thresholds") or {}).get("rate", {})
-        thr_loss = (meta.get("thresholds") or {}).get("loss", {})
-        thr_jit = (meta.get("thresholds") or {}).get("jitter_ms", {})
-
-        w = meta.get("weights") or {}
-
-        rate_score = _score_rate(
-            actual_hz=timing.get("rate_hz"),
-            expected_hz=expected_rate,
-            good_frac=float(thr_rate.get("good_frac", 0.05)),
-            bad_frac=float(thr_rate.get("bad_frac", 0.2)),
-        )
-        jitter_score = _score_low_is_good(
-            value=(timing.get("interval_ms") or {}).get("std_ms"),
-            good=float(thr_jit.get("good", 1.0)),
-            bad=float(thr_jit.get("bad", 10.0)),
-        )
-        loss_score = _score_low_is_good(
-            value=(timing.get("gaps") or {}).get("loss_rate"),
-            good=float(thr_loss.get("good", 0.01)),
-            bad=float(thr_loss.get("bad", 0.10)),
-        )
-        duration_score = _score_duration(
-            actual_s=timing.get("duration_s"),
-            min_duration_s=float(min_duration_s) if min_duration_s is not None else None,
-        )
-
-        drift_score = None
-        if received is not None and "device_to_received_clock" in st:
-            drift_cfg = meta.get("drift") or {}
-            drift_info = st["device_to_received_clock"]
-            drift_score = _score_drift(
-                drift_ppm=drift_info.get("drift_ppm"),
-                fit_r2=drift_info.get("fit_r2"),
-                good_ppm=float(drift_cfg.get("good_ppm", 50.0)),
-                bad_ppm=float(drift_cfg.get("bad_ppm", 500.0)),
-                min_fit_r2=float(drift_cfg.get("min_fit_r2", 0.99)),
-            )
-
-        components = {
-            "rate": rate_score,
-            "jitter": jitter_score,
-            "loss": loss_score,
-            "duration": duration_score,
-        }
-        if drift_score is not None:
-            components["drift"] = drift_score
-
-        # Weighted average over available components.
-        total_weight = 0.0
-        weighted_sum = 0.0
-        for key, score in components.items():
-            if score is None:
-                continue
-            weight = float(w.get(key, 0.0))
-            if weight <= 0:
-                continue
-            weighted_sum += weight * score
-            total_weight += weight
-
-        stream_score = None
-        if total_weight > 0:
-            stream_score = weighted_sum / total_weight
-            stream_scores[name] = stream_score
-
-        # Expose only the aggregate score in the JSON to keep stats compact.
-        st["quality"] = {"score": stream_score}
-
-    session_quality: dict[str, Any] | None = None
-    if stream_scores:
-        session_quality = {
-            "score_mean": float(sum(stream_scores.values()) / len(stream_scores)),
-            "score_min": float(min(stream_scores.values())),
-            "per_stream": stream_scores,
-        }
-
-    return SessionStats(
-        session_name=session_name,
+    return RecordingStats(
+        recording_name=recording_name,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
-        session_dir=str(session_dir),
+        stage_dir=str(stage_dir),
         streams=streams,
-        session_quality=session_quality,
     )
 
 
-def write_session_stats(session_name: str, *, out_path: Path | None = None) -> Path:
-    session_dir = parsed_session_dir(session_name)
-    stats = compute_session_stats(session_name)
-    path = out_path or (session_dir / "session_stats.json")
+def write_recording_stats(recording_name: str, stage: str = "parsed") -> Path:
+    stats = compute_recording_stats(recording_name, stage)
+    stage_dir = recording_stage_dir(recording_name, stage)
+    path = stage_dir / "session_stats.json"
     path.write_text(json.dumps(asdict(stats), indent=2, sort_keys=True), encoding="utf-8")
     return path
 
@@ -431,16 +244,23 @@ def write_session_stats(session_name: str, *, out_path: Path | None = None) -> P
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m parser.stats",
-        description="Compute session CSV timing statistics and write session_stats.json.",
+        description="Compute IMU CSV timing statistics and write session_stats.json.",
     )
-    parser.add_argument("session_name", help="Session folder under data/<session>/parsed.")
-    parser.add_argument("--out", type=Path, default=None, help="Optional output JSON path.")
+    parser.add_argument(
+        "recording_name",
+        help="Recording name under data/recordings/ (e.g. 2026-02-26_5).",
+    )
+    parser.add_argument(
+        "--stage",
+        default="parsed",
+        help="Stage to compute stats for (default: parsed).",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_arg_parser().parse_args(argv)
-    out = write_session_stats(args.session_name, out_path=args.out)
+    out = write_recording_stats(args.recording_name, args.stage)
     print(out)
 
 

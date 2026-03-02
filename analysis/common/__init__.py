@@ -3,11 +3,11 @@
 from .csv_schema import CSV_COLUMNS, load_dataframe, write_dataframe
 from .paths import (
     analysis_root,
-    data_root,
-    parsed_session_dir,
-    raw_session_dir,
-    session_stage_dir,
-    synced_session_dir,
+    sessions_root,
+    recordings_root,
+    session_input_dir,
+    recording_dir,
+    recording_stage_dir,
     find_sensor_csv,
 )
 
@@ -16,12 +16,10 @@ __all__ = [
     "load_dataframe",
     "write_dataframe",
     "analysis_root",
-    "data_root",
-    "raw_session_dir",
-    "parsed_session_dir",
-    "synced_session_dir",
-    "session_stage_dir",
+    "sessions_root",
+    "recordings_root",
+    "session_input_dir",
+    "recording_dir",
+    "recording_stage_dir",
     "find_sensor_csv",
 ]
-
-

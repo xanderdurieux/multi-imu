@@ -1,96 +1,104 @@
 """Session-level plotting utilities.
 
-For a given session, this module:
+For a given session (date), iterates all matching recording directories
+under ``data/recordings/`` and generates plots for each stage found.
 
-- Iterates over all stage directories under ``data/<session_name>/`` except ``full/``.
-- For each stage, generates:
-  - Comparison plots between Sporsa and Arduino IMUs (axes and norm/magnitude).
-  - Per-sensor plots for Sporsa and Arduino.
-  - A dedicated comparison plot of the accelerometer norm.
+Stage directories plotted per recording:
+- ``parsed``, ``synced``: sensor + comparison plots.
+- ``orientation``: orientation plots.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import argparse
 from typing import Iterable, Optional
 
-import argparse
-
-from common import data_root
-from visualization import plot_comparison, plot_sensor
+from common import recording_stage_dir, recordings_root
+from visualization import plot_comparison, plot_orientation, plot_sensor
 
 
 SENSOR_NAMES: tuple[str, str] = ("sporsa", "arduino")
+SKIP_STAGES: frozenset[str] = frozenset({"sections"})
 
 
-def _iter_session_stages(session_name: str) -> Iterable[str]:
-    """Yield stage names for a session, skipping ``full/``."""
-    session_dir = data_root() / session_name
-    if not session_dir.exists():
-        raise FileNotFoundError(f"Session directory not found: {session_dir}")
-
-    for child in sorted(session_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        if child.name == "raw" or child.name == "full":
-            continue
-        yield child.name
+def _iter_session_recordings(session_name: str) -> Iterable[str]:
+    """Yield recording names that belong to ``session_name`` (prefix match)."""
+    root = recordings_root()
+    if not root.exists():
+        raise FileNotFoundError(f"Recordings root not found: {root}")
+    prefix = f"{session_name}_"
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir() and entry.name.startswith(prefix):
+            yield entry.name
 
 
-def plot_session(session_name: str, stage_filter: Optional[str] = None) -> None:
-    """Generate all requested plots for a single session across its stages."""
-    for stage in _iter_session_stages(session_name):
+def _iter_recording_stages(recording_name: str) -> Iterable[str]:
+    """Yield stage names (subdirectory names) for a recording."""
+    rec_dir = recordings_root() / recording_name
+    for child in sorted(rec_dir.iterdir()):
+        if child.is_dir() and child.name not in SKIP_STAGES:
+            yield child.name
+
+
+def plot_recording(recording_name: str, stage_filter: Optional[str] = None) -> None:
+    """Generate all plots for a single recording across its stages."""
+    for stage in _iter_recording_stages(recording_name):
         if stage_filter is not None and stage != stage_filter:
             continue
 
-        session_name_stage = f"{session_name}/{stage}"
-        print(f"[plot_session] Processing {session_name_stage} ...")
+        print(f"[{recording_name}/{stage}]")
 
-        # Comparison plots: axes and norm/magnitude.
-        plot_comparison.main(
-            [session_name_stage],
-        )
-        plot_comparison.main(
-            [session_name_stage, "--norm"],
-        )
+        if stage == "orientation":
+            plot_orientation.plot_orientation_stage(recording_name, stage)
+            continue
 
-        # Per-sensor plots (axes) for Sporsa and Arduino.
+        stage_ref = f"{recording_name}/{stage}"
+
         for sensor_name in SENSOR_NAMES:
-            # Per-sensor axes plots.
-            plot_sensor.main([session_name_stage, sensor_name])
+            try:
+                plot_sensor.main([stage_ref, sensor_name])
+                plot_sensor.main([stage_ref, sensor_name, "--norm", "--acc"])
+            except SystemExit:
+                pass
 
-            # Accelerometer norm comparison using plot_sensor, then keep only the 'acc' subplot.
-            plot_sensor.main([session_name_stage, sensor_name, "--norm", "--acc"])
+        try:
+            plot_comparison.main([stage_ref])
+            plot_comparison.main([stage_ref, "--norm"])
+        except SystemExit:
+            pass
+
+
+def plot_session(session_name: str, stage_filter: Optional[str] = None) -> None:
+    """Generate plots for all recordings belonging to ``session_name``."""
+    for recording_name in _iter_session_recordings(session_name):
+        plot_recording(recording_name, stage_filter=stage_filter)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build argument parser for session-level plotting."""
     parser = argparse.ArgumentParser(
         prog="python -m visualization.plot_session",
-        description="Generate plots for one or more sessions (optionally for a single stage).",
+        description="Generate plots for all recordings of a session (date).",
     )
     parser.add_argument(
         "session_names",
         nargs="+",
-        help="One or more session names under data/<session_name>/",
+        help="One or more session names (dates) whose recordings will be plotted.",
     )
     parser.add_argument(
         "--stage",
         dest="stage",
-        help="Only plot this stage (e.g. parsed, synced, parsed_orientation).",
+        default=None,
+        help="Only plot this stage (e.g. parsed, synced, orientation).",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point using argparse, with optional stage filter."""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-
     for session_name in args.session_names:
         plot_session(session_name, stage_filter=args.stage)
 
 
 if __name__ == "__main__":
     main()
-

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import re
 
 from common import CSV_COLUMNS, write_dataframe
 
@@ -25,32 +26,73 @@ GYRO_SENS = {
 }
 
 
+_SPORSA_LINE_RE_FULL = re.compile(
+    r"""^\s*
+    (?:uart:~\$\s*)?              # optional REPL-style prefix
+    (?P<ts>-?\d+)\s*,\s*          # device timestamp (ms)
+    (?P<ax>-?\d+)\s*,\s*
+    (?P<ay>-?\d+)\s*,\s*
+    (?P<az>-?\d+)\s*,\s*
+    (?P<gx>-?\d+)\s*,\s*
+    (?P<gy>-?\d+)\s*,\s*
+    (?P<gz>-?\d+)\s*,\s*
+    (?P<mx>-?\d+)\s*,\s*
+    (?P<my>-?\d+)\s*,\s*
+    (?P<mz>-?\d+)\s*              # magnetometer z
+    \s*$                          # allow trailing whitespace but no extra fields
+    """,
+    re.VERBOSE,
+)
+
+_SPORSA_LINE_RE_NO_MAG = re.compile(
+    r"""^\s*
+    (?:uart:~\$\s*)?              # optional REPL-style prefix
+    (?P<ts>-?\d+)\s*,\s*          # device timestamp (ms)
+    (?P<ax>-?\d+)\s*,\s*
+    (?P<ay>-?\d+)\s*,\s*
+    (?P<az>-?\d+)\s*,\s*
+    (?P<gx>-?\d+)\s*,\s*
+    (?P<gy>-?\d+)\s*,\s*
+    (?P<gz>-?\d+)\s*              # no magnetometer fields in this format
+    \s*$
+    """,
+    re.VERBOSE,
+)
+
+
 def _parse_sporsa_line(line: str) -> Optional[dict]:
     """
     Parse a single line from a Sporsa log file.
 
     Expected format (txt):
-        <timestamp_ms>,<acc_x>,<acc_y>,<acc_z>,<gyro_x>,<gyro_y>,<gyro_z>
+        <timestamp_ms>,<acc_x>,<acc_y>,<acc_z>,<gyro_x>,<gyro_y>,<gyro_z>,<mag_x>,<mag_y>,<mag_z>
+    Optionally prefixed with "uart:~$ ".
+    Any line that does not match this pattern is ignored.
     """
-    parts = line.strip().split(",")
-    if len(parts) != 7:
+    if not line:
         return None
 
-    ts_str = parts[0].replace("uart:~$ ", "")
-    try:
-        device_time_ms = int(ts_str)
-    except ValueError:
-        return None
+    m = _SPORSA_LINE_RE_FULL.match(line)
+    has_mag = True
+    if not m:
+        m = _SPORSA_LINE_RE_NO_MAG.match(line)
+        has_mag = False
+        if not m:
+            return None
 
     try:
-        acc_x_raw = int(parts[1])
-        acc_y_raw = int(parts[2])
-        acc_z_raw = int(parts[3])
-
-        gyro_x_raw = int(parts[4])
-        gyro_y_raw = int(parts[5])
-        gyro_z_raw = int(parts[6])
-    except ValueError:
+        device_time_ms = int(m.group("ts"))
+        acc_x_raw = int(m.group("ax"))
+        acc_y_raw = int(m.group("ay"))
+        acc_z_raw = int(m.group("az"))
+        gyro_x_raw = int(m.group("gx"))
+        gyro_y_raw = int(m.group("gy"))
+        gyro_z_raw = int(m.group("gz"))
+        mag_x_raw = int(m.group("mx")) if has_mag else None
+        mag_y_raw = int(m.group("my")) if has_mag else None
+        mag_z_raw = int(m.group("mz")) if has_mag else None
+    except (ValueError, OverflowError):
+        # If any numeric field is malformed, skip this line.
         return None
 
     acc_x = acc_x_raw * ACCEL_SENS["16G"] * 9.81 / 1000
@@ -61,6 +103,10 @@ def _parse_sporsa_line(line: str) -> Optional[dict]:
     gyro_y = gyro_y_raw * GYRO_SENS["2000DPS"] / 1000
     gyro_z = gyro_z_raw * GYRO_SENS["2000DPS"] / 1000
 
+    mag_x = mag_x_raw if mag_x_raw is not None else pd.NA
+    mag_y = mag_y_raw if mag_y_raw is not None else pd.NA
+    mag_z = mag_z_raw if mag_z_raw is not None else pd.NA
+
     row = {col: pd.NA for col in CSV_COLUMNS}
     row["timestamp"] = device_time_ms
     row["ax"] = acc_x
@@ -69,6 +115,9 @@ def _parse_sporsa_line(line: str) -> Optional[dict]:
     row["gx"] = gyro_x
     row["gy"] = gyro_y
     row["gz"] = gyro_z
+    row["mx"] = mag_x
+    row["my"] = mag_y
+    row["mz"] = mag_z
     return row
 
 
@@ -85,6 +134,33 @@ def parse_sporsa_log(txt_path: Path) -> pd.DataFrame:
         return pd.DataFrame(columns=CSV_COLUMNS)
 
     df = pd.DataFrame(rows)
+
+    # Heuristic: Drop all rows whose timestamps do not fall within the expected epoch
+    # window for the specific recording, based on the folder name (date).
+    # We expect timestamp (ms since 1970) to be within ±1 day of the folder date.
+    import datetime
+
+    # Extract the recording date from the folder (requires txt_path or a provided recording date).
+    # Assume txt_path: <...>/<recording_name>/<stage>/sporsa.txt
+    # And <recording_name>: YYYY-MM-DD_X
+    try:
+        recording_folder = txt_path.parent.parent.name
+        date_str = recording_folder.split('_')[0]
+        rec_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        # Epoch (ms) for midnight UTC of that recording day
+        date_start_ms = int(rec_date.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        date_end_ms = date_start_ms + 24 * 60 * 60 * 1000
+        ts_numeric = pd.to_numeric(df["timestamp"], errors="coerce")
+        # Accept timestamps within ±1 day (2 days window—sometimes logs deviate a bit)
+        # (Strict matching: date_start_ms to date_end_ms, or lenient: ±1 day)
+        window_start = date_start_ms - 24 * 60 * 60 * 1000
+        window_end = date_end_ms + 24 * 60 * 60 * 1000
+        if ((ts_numeric >= window_start) & (ts_numeric <= window_end)).any():
+            df = df[(ts_numeric >= window_start) & (ts_numeric <= window_end)].copy()
+    except Exception:
+        # If any error, skip heuristic and do not filter
+        pass
+
     for col in CSV_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA

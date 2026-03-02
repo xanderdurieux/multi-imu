@@ -87,6 +87,23 @@ uv run -m orientation.pipeline <input.csv> [output.csv]
 
 By default no calibration is applied. If you pass `--calibration`, the pipeline estimates constant accel+gyro bias from the first 5 seconds and applies it before filtering.
 
+### Session-wide orientation over a stage
+
+Run orientation estimation for **all** CSVs in one session stage (e.g. `parsed`, `synced`) and collect basic quality metrics for each filter/variant.
+
+```bash
+uv run -m orientation.session <session_name>/<stage>
+```
+
+- **Input**: All CSV files in `data/<session_name>/<stage>/` (for example `data/session_7/synced/`).
+- **Behavior**:
+  - For each CSV, runs both filters (`complementary`, `madgwick`) with and without simple static calibration based on the first few seconds.
+  - Writes one output CSV per (sensor, filter, calibration) variant into a new stage directory `data/<session_name>/<stage>_orientation/`.
+  - Computes per-stream orientation quality metrics (e.g. gravity consistency and static tilt stability) and writes summary JSON `orientation_stats.json` into the same output directory.
+- **Key options**:
+  - `--static-window-ms`: duration (in ms) of the initial static window used to estimate accel/gyro bias for the calibrated variants (default: `5000`).
+  - `--gravity`: assumed gravity magnitude in m/s² for the quality metrics (default: `9.81`).
+
 
 ### Synchronize IMU streams
 

@@ -1,7 +1,12 @@
-"""Session-stage synchronization CLI.
+"""Recording-level synchronization CLI.
 
-Usage:
-    uv run -m sync.sync_session <session_name>/<stage>
+Usage::
+
+    uv run -m sync.session <recording_name>/<stage_in>
+
+Example::
+
+    uv run -m sync.session 2026-02-26_5/parsed
 """
 
 from __future__ import annotations
@@ -11,17 +16,17 @@ import json
 from pathlib import Path
 import shutil
 
-from common import session_stage_dir
+from common import recording_stage_dir
 
 from .drift_estimator import DEFAULT_LOCAL_SEARCH_SECONDS, DEFAULT_WINDOW_SECONDS, DEFAULT_WINDOW_STEP_SECONDS
 from .sync_streams import DEFAULT_MAX_LAG_SECONDS, DEFAULT_SAMPLE_RATE_HZ, synchronize
 
 
-def _load_stats_stream_scores(session_name: str, stage_in: str) -> dict[str, float]:
+def _load_stats_stream_scores(recording_name: str, stage_in: str) -> dict[str, float]:
     """Load per-stream quality scores from session_stats.json when available."""
     candidates = [
-        session_stage_dir(session_name, stage_in) / "session_stats.json",
-        session_stage_dir(session_name, "parsed") / "session_stats.json",
+        recording_stage_dir(recording_name, stage_in) / "session_stats.json",
+        recording_stage_dir(recording_name, "parsed") / "session_stats.json",
     ]
     for path in candidates:
         if not path.is_file():
@@ -94,9 +99,9 @@ def _pick_target_csv(csv_files: list[Path], reference_csv: Path, score_by_stem: 
     raise ValueError("Could not determine target stream.")
 
 
-def synchronize_session_stage(
-    session_name: str,
-    stage_in: str,
+def synchronize_recording(
+    recording_name: str,
+    stage_in: str = "parsed",
     *,
     reference_sensor: str | None = None,
     target_sensor: str | None = None,
@@ -110,16 +115,16 @@ def synchronize_session_stage(
     use_gyro: bool = True,
     use_mag: bool = False,
 ) -> tuple[Path, Path, Path, Path | None]:
-    """Synchronize one stage: choose reference/target streams and write outputs under synced/."""
-    in_dir = session_stage_dir(session_name, stage_in)
+    """Synchronize streams for one recording and write outputs to ``synced/``."""
+    in_dir = recording_stage_dir(recording_name, stage_in)
     if not in_dir.is_dir():
         raise FileNotFoundError(f"Input stage directory not found: {in_dir}")
 
     csv_files = sorted(p for p in in_dir.glob("*.csv") if p.is_file())
     if len(csv_files) < 2:
-        raise ValueError(f"Need at least two CSV files in {in_dir} to synchronize streams.")
+        raise ValueError(f"Need at least two CSV files in {in_dir} to synchronize.")
 
-    score_by_stem = _load_stats_stream_scores(session_name, stage_in)
+    score_by_stem = _load_stats_stream_scores(recording_name, stage_in)
 
     if reference_sensor:
         reference_csv = _find_single_csv_by_token(csv_files, reference_sensor)
@@ -134,7 +139,7 @@ def synchronize_session_stage(
     if reference_csv == target_csv:
         raise ValueError("Reference and target streams must be different files.")
 
-    out_dir = session_stage_dir(session_name, "synced")
+    out_dir = recording_stage_dir(recording_name, "synced")
     out_dir.mkdir(parents=True, exist_ok=True)
     copied_reference_csv = out_dir / reference_csv.name
     shutil.copy2(reference_csv, copied_reference_csv)
@@ -158,16 +163,16 @@ def synchronize_session_stage(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m sync.sync_session",
+        prog="python -m sync.session",
         description=(
-            "Synchronize two IMU streams for one session stage using the default configuration. "
-            "Default reference is the highest-quality stream from session stats "
-            "(usually sporsa), and default target prefers arduino."
+            "Synchronize two IMU streams for one recording. "
+            "Default reference is sporsa (or highest-quality stream from stats); "
+            "default target is arduino."
         ),
     )
     parser.add_argument(
-        "session_name_stage",
-        help="Session and stage as '<session_name>/<stage>' (example: 'session_6/parsed').",
+        "recording_name_stage",
+        help="Recording name and input stage as '<recording_name>/<stage>' (e.g. '2026-02-26_5/parsed').",
     )
     parser.add_argument(
         "--reference-sensor",
@@ -184,13 +189,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_arg_parser().parse_args(argv)
-    parts = args.session_name_stage.split("/", 1)
+    parts = args.recording_name_stage.split("/", 1)
     if len(parts) != 2:
-        raise SystemExit("session_name_stage must be in format '<session_name>/<stage>'")
+        raise SystemExit("recording_name_stage must be in format '<recording_name>/<stage>'")
 
-    session_name, stage_in = parts
-    ref_csv, tgt_synced_csv, sync_json, uniform_csv = synchronize_session_stage(
-        session_name=session_name,
+    recording_name, stage_in = parts
+    ref_csv, tgt_synced_csv, sync_json, uniform_csv = synchronize_recording(
+        recording_name=recording_name,
         stage_in=stage_in,
         reference_sensor=args.reference_sensor,
         target_sensor=args.target_sensor,

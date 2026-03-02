@@ -1,28 +1,35 @@
-"""Session-level orientation pipeline.
+"""Recording-level orientation pipeline.
 
-CLI:
-    uv run -m orientation.session <session_name>/<stage>
+CLI::
+
+    uv run -m orientation.session <recording_name>/<stage_in>
+
+Example::
+
+    uv run -m orientation.session 2026-02-26_5/parsed
 
 This command:
-- Loads all CSV files in the given session + stage (e.g. parsed, synced).
+
+- Loads all CSV files in the given recording stage (e.g. ``parsed``, ``synced``).
 - For each CSV, estimates orientation using both filters
   (complementary and Madgwick), with and without simple static calibration.
-- Writes the resulting orientation CSVs to a new stage directory
-  ``<stage>_orientation`` for the same session.
-- Computes basic quality statistics for each method and writes a summary CSV.
+- Writes the resulting orientation CSVs to ``data/recordings/<recording_name>/orientation/``.
+- Computes basic quality statistics for each method and writes
+  ``orientation_stats.json`` to the same output directory.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from common import load_dataframe, session_stage_dir, write_dataframe
+from common import load_dataframe, recording_stage_dir, write_dataframe
 from .calibration import BiasCalibration, estimate_bias_from_dataframe_static_segment
 from .pipeline import (
     run_complementary_on_dataframe,
@@ -35,9 +42,8 @@ from .quaternion import quat_rotate
 class OrientationMethodResult:
     """Metadata and quality metrics for one (filter, calibration) run on one CSV."""
 
-    session: str
+    recording: str
     stage_in: str
-    stage_out: str
     sensor_file: str
     filter_type: str  # "complementary" or "madgwick"
     calibrated: bool
@@ -53,13 +59,7 @@ class OrientationMethodResult:
 
 
 def _compute_orientation_stats(df: pd.DataFrame, gravity: float = 9.81) -> dict:
-    """Compute basic internal-consistency metrics for an oriented IMU DataFrame.
-
-    Assumes:
-    - Body-frame acceleration columns: ax, ay, az
-    - Body→world quaternion columns: qw, qx, qy, qz
-    - Optional Euler columns in degrees: yaw_deg, pitch_deg, roll_deg
-    """
+    """Compute basic internal-consistency metrics for an oriented IMU DataFrame."""
     required_cols = {"ax", "ay", "az", "qw", "qx", "qy", "qz"}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"DataFrame missing required columns: {required_cols - set(df.columns)}")
@@ -67,7 +67,6 @@ def _compute_orientation_stats(df: pd.DataFrame, gravity: float = 9.81) -> dict:
     acc_body = df[["ax", "ay", "az"]].to_numpy(dtype=float)
     quats = df[["qw", "qx", "qy", "qz"]].to_numpy(dtype=float)
 
-    # Rotate body acceleration into world frame.
     acc_world = np.zeros_like(acc_body)
     for k in range(len(df)):
         acc_world[k] = quat_rotate(quats[k], acc_body[k])
@@ -75,7 +74,6 @@ def _compute_orientation_stats(df: pd.DataFrame, gravity: float = 9.81) -> dict:
     acc_world_norm = np.linalg.norm(acc_world, axis=1)
     g_err = acc_world_norm - float(gravity)
 
-    # Simple static detector: |a| ≈ g and |ω| small.
     acc_norm_body = np.linalg.norm(acc_body, axis=1)
     gyro_cols = [c for c in ("gx", "gy", "gz") if c in df.columns]
     if gyro_cols:
@@ -91,7 +89,6 @@ def _compute_orientation_stats(df: pd.DataFrame, gravity: float = 9.81) -> dict:
         & (gyro_norm < 0.1)
     )
 
-    # Prepare metrics.
     def _safe(fn, arr, default=np.nan):
         arr = np.asarray(arr, dtype=float)
         if arr.size == 0 or not np.any(np.isfinite(arr)):
@@ -106,7 +103,6 @@ def _compute_orientation_stats(df: pd.DataFrame, gravity: float = 9.81) -> dict:
         "static_fraction": float(static_mask.mean() if len(static_mask) else 0.0),
     }
 
-    # Static tilt stability (pitch/roll) if Euler angles are available.
     if {"pitch_deg", "roll_deg"}.issubset(df.columns):
         pitch = df["pitch_deg"].to_numpy(dtype=float)
         roll = df["roll_deg"].to_numpy(dtype=float)
@@ -124,9 +120,8 @@ def _compute_orientation_stats(df: pd.DataFrame, gravity: float = 9.81) -> dict:
 
 
 def _process_sensor_csv(
-    session_name: str,
+    recording_name: str,
     stage_in: str,
-    stage_out: str,
     csv_path: Path,
     static_window_ms: float = 5000.0,
     gravity: float = 9.81,
@@ -136,7 +131,6 @@ def _process_sensor_csv(
     if df.empty:
         return []
 
-    # Estimate simple static-segment calibration (first N ms assumed static).
     t0 = float(df["timestamp"].iloc[0])
     calib: Optional[BiasCalibration]
     try:
@@ -149,17 +143,16 @@ def _process_sensor_csv(
     except Exception:
         calib = None
 
+    out_dir = recording_stage_dir(recording_name, "orientation")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     results: list[OrientationMethodResult] = []
-    # (filter_type, calibrated_flag)
     variants = [
         ("complementary", False),
         ("complementary", True),
         ("madgwick", False),
         ("madgwick", True),
     ]
-
-    out_dir = session_stage_dir(session_name, stage_out)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     for filter_type, use_calib in variants:
         current_calib = calib if (use_calib and calib is not None) else None
@@ -177,9 +170,8 @@ def _process_sensor_csv(
 
         stats = _compute_orientation_stats(df_orient, gravity=gravity)
         result = OrientationMethodResult(
-            session=session_name,
+            recording=recording_name,
             stage_in=stage_in,
-            stage_out=stage_out,
             sensor_file=csv_path.name,
             filter_type=filter_type,
             calibrated=bool(current_calib is not None),
@@ -199,18 +191,18 @@ def _process_sensor_csv(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build CLI argument parser for session-level orientation."""
     parser = argparse.ArgumentParser(
         prog="python -m orientation.session",
         description=(
-            "Estimate orientation for all CSVs in a session stage using multiple "
-            "filters (complementary, Madgwick), with and without calibration."
+            "Estimate orientation for all CSVs in a recording stage using multiple "
+            "filters (complementary, Madgwick), with and without calibration. "
+            "Output always goes to the 'orientation' stage directory."
         ),
     )
     parser.add_argument(
-        "session_name_stage",
+        "recording_name_stage",
         type=str,
-        help="Session and stage as '<session_name>/<stage>' (e.g. 'test_data_rate/parsed').",
+        help="Recording name and input stage as '<recording_name>/<stage>' (e.g. '2026-02-26_5/parsed').",
     )
     parser.add_argument(
         "--static-window-ms",
@@ -231,13 +223,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
-    parts = args.session_name_stage.split("/", 1)
+    parts = args.recording_name_stage.split("/", 1)
     if len(parts) != 2:
-        parser.error("session_name_stage must be in format '<session_name>/<stage>'")
-    session_name, stage_in = parts
+        parser.error("recording_name_stage must be in format '<recording_name>/<stage>'")
+    recording_name, stage_in = parts
 
-    stage_out = f"{stage_in}_orientation"
-    in_dir = session_stage_dir(session_name, stage_in)
+    in_dir = recording_stage_dir(recording_name, stage_in)
     if not in_dir.is_dir():
         parser.error(f"Input stage directory not found: {in_dir}")
 
@@ -247,12 +238,11 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     all_results: list[OrientationMethodResult] = []
     for csv_path in csv_files:
-        print(f"[{session_name}/{stage_in}] processing {csv_path.name}")
+        print(f"[{recording_name}/{stage_in}] processing {csv_path.name}")
         all_results.extend(
             _process_sensor_csv(
-                session_name=session_name,
+                recording_name=recording_name,
                 stage_in=stage_in,
-                stage_out=stage_out,
                 csv_path=csv_path,
                 static_window_ms=float(args.static_window_ms),
                 gravity=float(args.gravity),
@@ -263,14 +253,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("No orientation results produced (empty inputs?).")
         return
 
-    # Export summary stats table to the output stage directory.
-    out_dir = session_stage_dir(session_name, stage_out)
-    stats_df = pd.DataFrame([r.__dict__ for r in all_results])
-    stats_path = out_dir / "orientation_stats.csv"
-    stats_df.to_csv(stats_path, index=False)
-    print(f"Wrote orientation stats to {stats_path}")
+    out_dir = recording_stage_dir(recording_name, "orientation")
+    json_path = out_dir / "orientation_stats.json"
+    json_path.write_text(
+        json.dumps([r.__dict__ for r in all_results], indent=2),
+        encoding="utf-8",
+    )
+    print(f"Orientation stats written to {json_path}")
 
 
 if __name__ == "__main__":
     main()
-

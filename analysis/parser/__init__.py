@@ -3,13 +3,12 @@
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
 from .session import process_session
-from .stats import compute_session_stats, write_session_stats
+from .stats import compute_recording_stats, write_recording_stats
 
 __all__ = [
     "parse_arduino_log",
     "parse_sporsa_log",
     "process_session",
-    "compute_session_stats",
-    "write_session_stats",
+    "compute_recording_stats",
+    "write_recording_stats",
 ]
-
