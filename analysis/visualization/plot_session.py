@@ -14,7 +14,7 @@ import argparse
 from typing import Iterable, Optional
 
 from common import recording_stage_dir, recordings_root
-from visualization import plot_comparison, plot_orientation, plot_sensor
+from visualization import plot_calibration, plot_comparison, plot_orientation, plot_sensor
 
 
 SENSOR_NAMES: tuple[str, str] = ("sporsa", "arduino")
@@ -62,6 +62,10 @@ def plot_recording(recording_name: str, stage_filter: Optional[str] = None) -> N
 
         if stage == "orientation":
             plot_orientation.plot_orientation_stage(recording_name, stage)
+            continue
+
+        if stage == "calibrated":
+            plot_calibration.plot_calibration_stage(recording_name)
             continue
 
         stage_ref = f"{recording_name}/{stage}"

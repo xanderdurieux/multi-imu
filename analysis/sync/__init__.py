@@ -40,6 +40,11 @@ from .compare_sync import (
     compare_all_recordings,
     plot_sync_comparison,
 )
+from .online_sync import (
+    estimate_sync_from_opening_anchor,
+    synchronize_recording_online,
+    load_characterised_drift,
+)
 
 __all__ = [
     "CalibrationWindowResult",
@@ -67,4 +72,7 @@ __all__ = [
     "resample_stream",
     "resample_to_reference_timestamps",
     "save_sync_model",
+    "estimate_sync_from_opening_anchor",
+    "synchronize_recording_online",
+    "load_characterised_drift",
 ]
