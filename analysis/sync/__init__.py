@@ -1,4 +1,9 @@
-"""Synchronization package implementing SDA + LIDA stream alignment."""
+"""Synchronization package implementing SDA + LIDA stream alignment.
+
+Also provides a calibration-sequence based sync variant via
+:mod:`sync.calibration_sync`, and a comparison utility for evaluating
+both approaches side-by-side via :mod:`sync.compare_sync`.
+"""
 
 from .align_df import (
     AlignmentSeries,
@@ -24,8 +29,26 @@ from .drift_estimator import (
     resample_aligned_stream,
     save_sync_model,
 )
+from .calibration_sync import (
+    CalibrationWindowResult,
+    estimate_sync_from_calibration,
+    synchronize_from_calibration,
+    synchronize_recording_from_calibration,
+)
+from .compare_sync import (
+    compare_sync_models,
+    compare_all_recordings,
+    plot_sync_comparison,
+)
 
 __all__ = [
+    "CalibrationWindowResult",
+    "estimate_sync_from_calibration",
+    "synchronize_from_calibration",
+    "synchronize_recording_from_calibration",
+    "compare_sync_models",
+    "compare_all_recordings",
+    "plot_sync_comparison",
     "AlignmentSeries",
     "OffsetEstimate",
     "SyncModel",

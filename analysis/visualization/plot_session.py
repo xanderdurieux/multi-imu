@@ -4,7 +4,7 @@ For a given session (date), iterates all matching recording directories
 under ``data/recordings/`` and generates plots for each stage found.
 
 Stage directories plotted per recording:
-- ``parsed``, ``synced``: sensor + comparison plots.
+- ``parsed``, ``synced_lida``, ``synced_cal``: sensor + comparison plots.
 - ``orientation``: orientation plots.
 """
 
@@ -18,7 +18,7 @@ from visualization import plot_comparison, plot_orientation, plot_sensor
 
 
 SENSOR_NAMES: tuple[str, str] = ("sporsa", "arduino")
-SKIP_STAGES: frozenset[str] = frozenset({"sections"})
+SKIP_STAGES: frozenset[str] = frozenset()
 
 
 def _iter_session_recordings(session_name: str) -> Iterable[str]:
@@ -33,10 +33,22 @@ def _iter_session_recordings(session_name: str) -> Iterable[str]:
 
 
 def _iter_recording_stages(recording_name: str) -> Iterable[str]:
-    """Yield stage names (subdirectory names) for a recording."""
+    """Yield stage identifiers for a recording.
+
+    For most stages (``parsed``, ``synced_lida``, ``synced_cal``, ``orientation``) the stage name
+    is returned directly.  The ``sections`` directory is treated specially:
+    each of its subdirectories (``section_1``, ``section_2``, …) is yielded as
+    the virtual stage ``sections/section_N``.
+    """
     rec_dir = recordings_root() / recording_name
     for child in sorted(rec_dir.iterdir()):
-        if child.is_dir() and child.name not in SKIP_STAGES:
+        if not child.is_dir() or child.name in SKIP_STAGES:
+            continue
+        if child.name == "sections":
+            for section_dir in sorted(child.iterdir()):
+                if section_dir.is_dir():
+                    yield f"sections/{section_dir.name}"
+        else:
             yield child.name
 
 

@@ -53,8 +53,19 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"[{recording_name}/{stage}] skipping comparison: one or both CSVs are empty")
         return
 
-    time_seconds_a = (df_a["timestamp"].astype(float) - df_a["timestamp"].min()) / 1000.0
-    time_seconds_b = (df_b["timestamp"].astype(float) - df_b["timestamp"].min()) / 1000.0
+    # Use a shared time reference if both streams overlap on the same clock
+    # (e.g. after sync), otherwise normalize each stream to its own start
+    # (e.g. parsed, where arduino has boot-time and sporsa has epoch-time).
+    ts_a = df_a["timestamp"].astype(float)
+    ts_b = df_b["timestamp"].astype(float)
+    overlap = min(ts_a.max(), ts_b.max()) - max(ts_a.min(), ts_b.min())
+    if overlap > 0:
+        t_ref = min(ts_a.min(), ts_b.min())
+        time_seconds_a = (ts_a - t_ref) / 1000.0
+        time_seconds_b = (ts_b - t_ref) / 1000.0
+    else:
+        time_seconds_a = (ts_a - ts_a.min()) / 1000.0
+        time_seconds_b = (ts_b - ts_b.min()) / 1000.0
 
     num_cols = 1 if args.norm else 3
     sensor_types = ["acc", "gyro", "mag"]

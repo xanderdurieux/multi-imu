@@ -25,6 +25,10 @@ GYRO_SENS = {
     "2000DPS": 70.000,
 }
 
+MAG_SENS = {
+    "DEFAULT": 1.5
+}
+
 
 _SPORSA_LINE_RE_FULL = re.compile(
     r"""^\s*
@@ -103,9 +107,9 @@ def _parse_sporsa_line(line: str) -> Optional[dict]:
     gyro_y = gyro_y_raw * GYRO_SENS["2000DPS"] / 1000
     gyro_z = gyro_z_raw * GYRO_SENS["2000DPS"] / 1000
 
-    mag_x = mag_x_raw if mag_x_raw is not None else pd.NA
-    mag_y = mag_y_raw if mag_y_raw is not None else pd.NA
-    mag_z = mag_z_raw if mag_z_raw is not None else pd.NA
+    mag_x = mag_x_raw * MAG_SENS["DEFAULT"] if mag_x_raw is not None else pd.NA
+    mag_y = mag_y_raw * MAG_SENS["DEFAULT"] if mag_y_raw is not None else pd.NA
+    mag_z = mag_z_raw * MAG_SENS["DEFAULT"] if mag_z_raw is not None else pd.NA
 
     row = {col: pd.NA for col in CSV_COLUMNS}
     row["timestamp"] = device_time_ms

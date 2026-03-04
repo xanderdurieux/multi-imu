@@ -37,7 +37,7 @@ def recording_dir(recording_name: str) -> Path:
 def recording_stage_dir(recording_name: str, stage: str) -> Path:
     """Return path to a stage directory within a recording.
 
-    Example stages: ``parsed``, ``synced``, ``orientation``.
+    Example stages: ``parsed``, ``synced_lida``, ``synced_cal``, ``orientation``.
     """
     return recording_dir(recording_name) / stage
 
