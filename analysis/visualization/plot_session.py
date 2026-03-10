@@ -2,15 +2,29 @@
 
 For a given session (date), this module iterates all matching recording
 directories under ``data/recordings/`` and regenerates plots for each
-available processing stage. The resulting figures are used to visually
-assess data quality (dropouts, clipping, sync errors, calibration quality)
-before including recordings or sections in motion / incident analysis.
+relevant processing stage.  The resulting figures are used to visually
+assess data quality, synchronisation, calibration, and orientation before
+including recordings in motion or incident analysis.
 
-Stage directories plotted per recording:
-- ``parsed``, ``synced_lida``, ``synced_cal``, ``sections/section_*``:
-  sensor + comparison plots.
-- ``calibrated``: calibration diagnostics.
-- ``orientation``: orientation and gravity-compensated acceleration plots.
+Stages plotted per recording
+------------------------------
+- ``parsed``:
+  Sensor + comparison plots, timing quality (interval histograms,
+  interval timeline, Arduino clock drift).
+- ``synced``:
+  Sync method comparison bar chart and pre/post-sync alignment overlay.
+  Sensor + comparison plots for the selected (best) sync output.
+- ``sections/section_*``:
+  Sensor + comparison plots for each section.
+- ``calibrated``:
+  World-frame calibration diagnostics.
+- ``orientation``:
+  Euler angles, gravity-compensated acceleration, sensor comparison, and
+  relative (head vs handlebar) orientation.
+
+Intermediate sync stages (``synced_lida``, ``synced_cal``, ``synced_sda``,
+``synced_online``) are intentionally skipped here — they are compared via
+the sync method comparison plot rather than plotted individually.
 """
 
 from __future__ import annotations
@@ -19,11 +33,23 @@ import argparse
 from typing import Iterable, Optional
 
 from common import recording_stage_dir, recordings_root
-from visualization import plot_calibration, plot_comparison, plot_orientation, plot_sensor
+from visualization import (
+    plot_calibration,
+    plot_comparison,
+    plot_orientation,
+    plot_sensor,
+    plot_sync,
+    plot_timing,
+)
 
 
 SENSOR_NAMES: tuple[str, str] = ("sporsa", "arduino")
-SKIP_STAGES: frozenset[str] = frozenset()
+
+# Stages that receive only their sync-quality plot (not individual sensor plots).
+_SYNC_ONLY_STAGES = frozenset({"synced_lida", "synced_cal", "synced_sda", "synced_online"})
+
+# Stages to skip entirely during session plotting.
+_SKIP_STAGES: frozenset[str] = frozenset()
 
 
 def _iter_session_recordings(session_name: str) -> Iterable[str]:
@@ -40,14 +66,13 @@ def _iter_session_recordings(session_name: str) -> Iterable[str]:
 def _iter_recording_stages(recording_name: str) -> Iterable[str]:
     """Yield stage identifiers for a recording.
 
-    For most stages (``parsed``, ``synced_lida``, ``synced_cal``, ``orientation``) the stage name
-    is returned directly.  The ``sections`` directory is treated specially:
-    each of its subdirectories (``section_1``, ``section_2``, …) is yielded as
-    the virtual stage ``sections/section_N``.
+    The ``sections`` directory is expanded into virtual stages
+    ``sections/section_N``.  Intermediate sync stages are included in the
+    iteration so callers can dispatch them appropriately.
     """
     rec_dir = recordings_root() / recording_name
     for child in sorted(rec_dir.iterdir()):
-        if not child.is_dir() or child.name in SKIP_STAGES:
+        if not child.is_dir() or child.name in _SKIP_STAGES:
             continue
         if child.name == "sections":
             for section_dir in sorted(child.iterdir()):
@@ -57,36 +82,57 @@ def _iter_recording_stages(recording_name: str) -> Iterable[str]:
             yield child.name
 
 
+def _plot_sensor_and_comparison(recording_name: str, stage: str) -> None:
+    """Run sensor + comparison plots for a given ``<recording_name>/<stage>``."""
+    stage_ref = f"{recording_name}/{stage}"
+    for sensor_name in SENSOR_NAMES:
+        try:
+            plot_sensor.main([stage_ref, sensor_name])
+            plot_sensor.main([stage_ref, sensor_name, "--norm", "--acc"])
+        except SystemExit:
+            pass
+
+    try:
+        plot_comparison.main([stage_ref])
+        plot_comparison.main([stage_ref, "--norm"])
+    except SystemExit:
+        pass
+
+
 def plot_recording(recording_name: str, stage_filter: Optional[str] = None) -> None:
     """Generate all plots for a single recording across its stages."""
     for stage in _iter_recording_stages(recording_name):
         if stage_filter is not None and stage != stage_filter:
             continue
 
-        print(f"[{recording_name}/{stage}]")
-
+        # --- Orientation stage ---
         if stage == "orientation":
             plot_orientation.plot_orientation_stage(recording_name, stage)
             continue
 
+        # --- Calibration stage ---
         if stage == "calibrated":
             plot_calibration.plot_calibration_stage(recording_name)
             continue
 
-        stage_ref = f"{recording_name}/{stage}"
+        # --- Parsed stage: sensor plots + timing quality ---
+        if stage == "parsed":
+            _plot_sensor_and_comparison(recording_name, stage)
+            plot_timing.plot_timing_stage(recording_name)
+            continue
 
-        for sensor_name in SENSOR_NAMES:
-            try:
-                plot_sensor.main([stage_ref, sensor_name])
-                plot_sensor.main([stage_ref, sensor_name, "--norm", "--acc"])
-            except SystemExit:
-                pass
+        # --- Best selected sync stage: sensor plots + sync quality ---
+        if stage == "synced":
+            _plot_sensor_and_comparison(recording_name, stage)
+            plot_sync.plot_sync_stage(recording_name)
+            continue
 
-        try:
-            plot_comparison.main([stage_ref])
-            plot_comparison.main([stage_ref, "--norm"])
-        except SystemExit:
-            pass
+        # --- Intermediate sync stages: skip individual sensor plots ---
+        if stage in _SYNC_ONLY_STAGES:
+            continue
+
+        # --- Sections: sensor + comparison plots ---
+        _plot_sensor_and_comparison(recording_name, stage)
 
 
 def plot_session(session_name: str, stage_filter: Optional[str] = None) -> None:

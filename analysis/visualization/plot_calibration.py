@@ -5,7 +5,7 @@ Produces two figure types per recording:
 1. **Per-sensor world-frame plot** (``<sensor>_world.png``):
    Accelerometer, gyroscope and magnetometer signals after rotation to the
    ENU world frame.  Axis labels are annotated as East / North / Up.
-   A dashed reference line at -9.81 m/s² is drawn on the vertical (Up / Z)
+   A dashed reference line at +9.81 m/s² is drawn on the vertical (Up / Z)
    accelerometer panel to visualise gravity alignment quality.
    A text-box summary of the calibration quality metrics is included.
 
@@ -48,7 +48,7 @@ _WORLD_LABELS = {
     "mag":  {"cols": ("mx", "my", "mz"),  "axis_names": ("M_X",      "M_Y",       "M_Z"),      "unit": "µT"},
 }
 
-_GRAVITY_MS2 = -9.81   # expected az in ENU after calibration (gravity points down = -Z_up)
+_GRAVITY_MS2 = 9.81    # expected az in ENU after calibration (specific force points up = +Z)
 
 
 # ---------------------------------------------------------------------------
