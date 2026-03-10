@@ -65,10 +65,17 @@ definitions.
   - See [`sync/README.md`](sync/README.md) for full algorithm and API documentation.
 
 - **`orientation/`**
-  - Quaternion math and fusion filters (complementary and Madgwick).
+  - Quaternion math utilities including rotation-matrix → quaternion conversion
+    (`orientation.quaternion`).
+  - Bridge to the calibration stage: `orientation.calibration` loads gyro bias
+    and the static sensor-to-world rotation from `calibrated/calibration.json`
+    and applies them before running filters.
+  - Complementary and Madgwick fusion filters initialized with the calibration
+    rotation (`orientation.complementary`, `orientation.madgwick`).
   - Single-file orientation pipeline (`orientation.pipeline`).
-  - Recording-level orientation sweep (`orientation.session`) that runs
-    multiple filter / calibration variants and produces `orientation_stats.json`.
+  - Recording-level orchestrator (`orientation.session`) that reads body-frame
+    `parsed/` CSVs, seeds each filter with calibration parameters, and writes
+    two output CSVs per sensor to `orientation/`.
 
 - **`features/`**
   - Low-level windowed IMU feature computation (`features.window_features`):
@@ -333,12 +340,22 @@ Recordings where calibration fails or yields large residuals should not be
 used for features that rely on absolute orientation; they may still be used
 for magnitude-only features.
 
+See [`calibration/README.md`](calibration/README.md) for algorithm details,
+`calibration.json` schema, and quality thresholds.
+
 ---
 
 ## Stage 5 – Orientation estimation and quality metrics (`orientation/`)
 
-Orientation filters turn world-frame IMU data into quaternions and
-gravity-compensated linear acceleration, which are key for incident features.
+Orientation filters estimate continuous body→world quaternions from body-frame
+IMU data (gyroscope integration + accelerometer correction). The static
+calibration rotation from Stage 4 is used to seed each filter with the correct
+starting pose rather than identity.
+
+**Important:** orientation estimation uses `parsed/` (body-frame) data, not
+`calibrated/`. The `calibrated/` world-frame CSVs are for static analysis;
+feeding world-frame data to an orientation filter is incorrect because the
+filters need body-frame sensor readings to track rotation.
 
 ### Single-file pipeline (`orientation.pipeline`)
 
@@ -346,29 +363,36 @@ gravity-compensated linear acceleration, which are key for incident features.
 uv run -m orientation.pipeline <input.csv> [output.csv]
 ```
 
-- **Input**: Any IMU CSV with `timestamp`, `ax`–`az`, `gx`–`gz` (e.g.
-  `calibrated/sporsa.csv`).
-- **Output**: `<input_stem>_orientation.csv` with:
-  - `qw, qx, qy, qz`
-  - `yaw_deg, pitch_deg, roll_deg` (optional)
+- **Input**: Any body-frame IMU CSV with `timestamp`, `ax`–`az`, `gx`–`gz`.
+- **Output**: `<input_stem>_orientation.csv` with `qw, qx, qy, qz` and
+  optionally `yaw_deg, pitch_deg, roll_deg`.
+- Note: no calibration is applied at this level — for calibrated initialization
+  use `orientation.session`.
 
-### Recording-level sweep (`orientation.session`)
+### Recording-level pipeline (`orientation.session`)
 
 ```bash
-uv run -m orientation.session <recording_name>/calibrated
-# e.g. uv run -m orientation.session 2026-02-26_5/calibrated
+uv run -m orientation.session <recording_name>
+# e.g. uv run -m orientation.session 2026-02-26_5
+# Optionally specify the body-frame input stage (default: parsed):
+uv run -m orientation.session 2026-02-26_5 --stage parsed
 ```
 
+**Requires** `calibrated/calibration.json` to exist (run Stage 4 first).
+
+- **Input**: `data/recordings/<recording_name>/parsed/` (body-frame)
+- **Calibration**: `data/recordings/<recording_name>/calibrated/calibration.json`
 - **Output**: `data/recordings/<recording_name>/orientation/`
-  - One CSV per (sensor, filter, calibration) variant:
-    - `__complementary_raw_orientation.csv`
-    - `__complementary_calib_orientation.csv`
-    - `__madgwick_raw_orientation.csv`
-    - `__madgwick_calib_orientation.csv`
+  - Two CSVs per sensor (one per filter):
+    - `<sensor>__complementary_orientation.csv`
+    - `<sensor>__madgwick_orientation.csv`
   - `orientation_stats.json` with metrics such as:
     - Deviation of world-frame acceleration norm from gravity.
     - Fraction of samples classified as static.
     - Static pitch and roll variability.
+
+See [`orientation/README.md`](orientation/README.md) for algorithm details and
+quality metric interpretation.
 
 Combined with plots from `visualization.plot_orientation`, these metrics
 indicate which recordings (and which filters) produce reliable orientation
@@ -442,8 +466,8 @@ For each recording:
     - Residual > 0.5 or calibration fails.
 
 - **`orientation_quality`**:
-  - Based on `orientation_stats.json` for the
-    `__complementary_calib_orientation` variant:
+  - Based on `orientation_stats.json` for the `__complementary_orientation`
+    variant:
     - `g_err_abs_mean ≤ 0.3` and static pitch/roll std ≤ 2° → **good**.
     - up to 5° std → **marginal**.
     - larger deviations → **poor**.
@@ -534,8 +558,9 @@ flowchart TD
   syncedBest --> splitSections["parser.split_sections"]
   splitSections --> sectionsStage["sections/section_*/"]
   sectionsStage --> calibrationStage["calibration.session"]
-  calibrationStage --> calibratedStage["calibrated/"]
-  calibratedStage --> orientationStage["orientation.session"]
+  calibrationStage --> calibratedStage["calibrated/\n(calibration.json + world-frame CSVs)"]
+  parsedStage --> orientationStage["orientation.session\n(reads parsed/ + calibration.json)"]
+  calibratedStage -. calibration params .-> orientationStage
   orientationStage --> orientationOut["orientation/"]
   orientationOut --> featuresRec["features.extract_recording_features → features/recording_features.csv"]
   sectionsStage --> featuresSec["features.extract_section_features → features/section_features.csv"]
