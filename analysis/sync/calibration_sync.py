@@ -37,7 +37,7 @@ import argparse
 import json
 import logging
 import shutil
-from dataclasses import dataclass, replace as dc_replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -48,14 +48,15 @@ from common import write_dataframe
 from common.paths import find_sensor_csv, recording_stage_dir
 
 from .align_df import estimate_offset
-from .common import add_vector_norms, load_stream, resample_stream
+from .common import add_vector_norms, load_stream, lowpass_filter, remove_dropouts, resample_stream
 from .drift_estimator import (
     SyncModel,
     apply_sync_model,
     resample_aligned_stream,
     save_sync_model,
 )
-from parser.split_sections import find_calibration_segments
+from .metrics import compute_sync_correlations
+from calibration.segments import find_calibration_segments, _acc_norm, _smooth, _find_peaks
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +102,6 @@ def _coarse_offset_from_opening_calibration(
 
     Raises ``ValueError`` if no calibration-like cluster is found.
     """
-    from parser.split_sections import _acc_norm, _smooth, _find_peaks
 
     ts = tgt_df_clean["timestamp"].to_numpy(dtype=float)
     if len(ts) < 2:
@@ -180,53 +180,36 @@ def _maybe_add(
             clusters.append(list(current))
 
 
-def _remove_dropouts(df: pd.DataFrame, *, epsilon_fraction: float = 0.1) -> pd.DataFrame:
-    """Remove rows where the acceleration norm is near-zero (sensor dropout packets).
 
-    Some sensors (e.g. arduino) intermittently emit zero-valued packets.
-    These corrupt cross-correlation and should be excluded before SDA.
-    """
-    df_norm = add_vector_norms(df.copy())
-    g_approx = float(df_norm["acc_norm"].median())
-    if g_approx <= 0:
-        return df
-    threshold = epsilon_fraction * g_approx
-    valid = df_norm["acc_norm"] >= threshold
-    return df.loc[valid.values].reset_index(drop=True)
-
-
-def _acc_norm_correlation(
+def _estimate_drift_from_duration(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
-    *,
-    sample_rate_hz: float,
-) -> float | None:
-    """Pearson r of acc_norm over the overlapping time window."""
-    ref_r = add_vector_norms(resample_stream(ref_df, sample_rate_hz))
-    tgt_r = add_vector_norms(resample_stream(tgt_df, sample_rate_hz))
+) -> float:
+    """Estimate clock drift from the ratio of total recording durations.
 
-    ref_ts = ref_r["timestamp"].to_numpy(dtype=float)
-    tgt_ts = tgt_r["timestamp"].to_numpy(dtype=float)
-    if ref_ts.size == 0 or tgt_ts.size == 0:
-        return None
+    Implements the spec's Step 4::
 
-    lo = max(float(ref_ts[0]), float(tgt_ts[0]))
-    hi = min(float(ref_ts[-1]), float(tgt_ts[-1]))
-    if lo >= hi:
-        return None
+        alpha = (t_ref_end - t_ref_start) / (t_tgt_end - t_tgt_start)
+        drift  = alpha - 1.0
 
-    ref_acc = ref_r.loc[(ref_ts >= lo) & (ref_ts <= hi), "acc_norm"].to_numpy(dtype=float)
-    tgt_acc = tgt_r.loc[(tgt_ts >= lo) & (tgt_ts <= hi), "acc_norm"].to_numpy(dtype=float)
+    This is a robust fallback when the closing-calibration cross-correlation
+    is unreliable.  It requires no feature detection in the target stream —
+    only the raw timestamp extents of both recordings.
 
-    n = min(len(ref_acc), len(tgt_acc))
-    if n < 10:
-        return None
-    x, y = ref_acc[:n], tgt_acc[:n]
-    valid = np.isfinite(x) & np.isfinite(y)
-    if valid.sum() < 10:
-        return None
-
-    return float(np.corrcoef(x[valid], y[valid])[0, 1])
+    Returns drift in seconds per second (positive means the target clock runs
+    slower than the reference clock).
+    """
+    ref_dur_s = (
+        float(ref_df["timestamp"].iloc[-1]) - float(ref_df["timestamp"].iloc[0])
+    ) / 1000.0
+    tgt_dur_s = (
+        float(tgt_df["timestamp"].iloc[-1]) - float(tgt_df["timestamp"].iloc[0])
+    ) / 1000.0
+    if tgt_dur_s <= 0.0:
+        log.warning("Target recording has zero or negative duration; returning drift = 0.")
+        return 0.0
+    alpha = ref_dur_s / tgt_dur_s
+    return alpha - 1.0
 
 
 def _refine_offset_at_calibration(
@@ -238,6 +221,7 @@ def _refine_offset_at_calibration(
     sample_rate_hz: float = 100.0,
     peak_buffer_s: float = 1.0,
     search_s: float = 3.0,
+    lowpass_cutoff_hz: float | None = None,
 ) -> CalibrationWindowResult:
     """Cross-correlate a calibration peak window to get a precise offset.
 
@@ -253,6 +237,11 @@ def _refine_offset_at_calibration(
     search_s:
         The target window is extracted as ±``search_s`` around the expected
         target position, and the internal SDA search range is also ``search_s``.
+    lowpass_cutoff_hz:
+        If set, apply a zero-phase Butterworth low-pass filter at this cutoff
+        (in Hz) to both windows after resampling, before cross-correlation.
+        Recommended range: 20–30 Hz.  Reduces high-frequency noise that can
+        shift the correlation peak.
     """
     buf = int(sample_rate_hz * peak_buffer_s)
     p_start = max(0, seg.peak_indices[0] - buf)
@@ -301,10 +290,23 @@ def _refine_offset_at_calibration(
     # blends zero-norm dropout values with their neighbours – much better than
     # removing rows (which breaks timestamp continuity) or differentiating
     # (which amplifies the zero → real → zero spike).
+    sr = min(sample_rate_hz, 100.0)
+    ref_window_filtered = ref_window
+    tgt_window_filtered = tgt_window_raw
+    if lowpass_cutoff_hz is not None:
+        # Resample to uniform grid first so the filter sees a constant dt,
+        # then hand the filtered windows to estimate_offset (which will
+        # re-interpolate internally, but the signal is already smooth).
+        from .common import resample_stream
+        ref_uniform = resample_stream(ref_window, sr)
+        tgt_uniform = resample_stream(tgt_window_raw, sr)
+        ref_window_filtered = lowpass_filter(ref_uniform, lowpass_cutoff_hz, sr)
+        tgt_window_filtered = lowpass_filter(tgt_uniform, lowpass_cutoff_hz, sr)
+
     refined = estimate_offset(
-        ref_window,
-        tgt_window_raw,
-        sample_rate_hz=min(sample_rate_hz, 100.0),
+        ref_window_filtered,
+        tgt_window_filtered,
+        sample_rate_hz=sr,
         max_lag_seconds=search_s + 1.0,
         use_acc=True,
         use_gyro=False,
@@ -348,15 +350,28 @@ def estimate_sync_from_calibration(
     coarse_sample_rate_hz: float = 5.0,
     cal_search_s: float = 5.0,
     peak_buffer_s: float = 1.0,
-) -> tuple[SyncModel, CalibrationWindowResult, CalibrationWindowResult]:
+    lowpass_cutoff_hz: float | None = None,
+) -> tuple[SyncModel, CalibrationWindowResult, CalibrationWindowResult, str]:
     """Estimate a linear sync model using calibration-sequence windows.
 
-    Calibration segments are detected in the **reference** sensor only.
-    A coarse SDA offset is computed first (at a low sample rate for robustness
-    against irregular sampling and sensor dropouts), then each calibration's
-    peak window is cross-correlated against the corresponding target window
-    to obtain a precise, independent offset measurement at the opening and
-    closing calibrations.  Drift is fitted from these two measurements.
+    Pipeline (matches spec Steps 1–5)
+    ----------------------------------
+    1. Detect calibration segments in the **reference** sensor only.
+    2. Estimate a coarse offset from the opening calibration cluster in the
+       target (peak-matching, Method B from spec Step 3); falls back to a
+       low-rate SDA cross-correlation (Method A) if no cluster is found.
+    3. For each calibration (opening and closing): cross-correlate a narrow
+       peak window between reference and target → precise independent offset
+       measurement at that calibration time (refined Method A).
+    4. Estimate drift (spec Step 4):
+       - **Primary**: linear fit from the two calibration-window offsets
+         (``drift = Δoffset / Δt``), equivalent to comparing calibration
+         event timestamps across both clocks.
+       - **Fallback** (when primary drift exceeds 1 % plausibility threshold,
+         indicating a false-peak match in the closing calibration):
+         recording-duration ratio ``alpha = ref_duration / tgt_duration``,
+         so ``drift = alpha − 1``.
+    5. Apply the linear model: ``t_ref = t_tgt + offset + drift × (t_tgt − t₀)``.
 
     Returns
     -------
@@ -366,6 +381,10 @@ def estimate_sync_from_calibration(
         Calibration window result for the opening calibration.
     cal_close:
         Calibration window result for the closing calibration.
+    drift_source:
+        ``"calibration_windows"`` when drift was estimated from the two
+        calibration-window cross-correlations; ``"duration_ratio"`` when the
+        fallback recording-duration ratio was used.
 
     Raises
     ------
@@ -398,7 +417,7 @@ def estimate_sync_from_calibration(
     # directly match the reference's opening calibration.  This is more
     # robust than full-recording SDA when the target has irregular sampling
     # or frequent dropout packets.
-    tgt_clean = _remove_dropouts(tgt_df)
+    tgt_clean = remove_dropouts(tgt_df)
     try:
         coarse_offset_s = _coarse_offset_from_opening_calibration(
             ref_df,
@@ -461,6 +480,7 @@ def estimate_sync_from_calibration(
         sample_rate_hz=sample_rate_hz,
         peak_buffer_s=peak_buffer_s,
         search_s=cal_search_s,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
     cal_close = _refine_offset_at_calibration(
         ref_df, tgt_df, in_range_cals[-1],
@@ -468,6 +488,7 @@ def estimate_sync_from_calibration(
         sample_rate_hz=sample_rate_hz,
         peak_buffer_s=peak_buffer_s,
         search_s=cal_search_s,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
 
     log.info(
@@ -492,21 +513,27 @@ def estimate_sync_from_calibration(
     # Sanity-check: a drift exceeding ~1% is physically implausible for typical
     # embedded clocks (Arduino crystals are usually within 1000 ppm).  If the
     # estimate is beyond this, the closing-calibration cross-correlation likely
-    # landed on a false peak — fall back to drift = 0 with a warning.
+    # landed on a false peak.  Fall back to the recording-duration ratio
+    # (spec Step 4: alpha = ref_duration / tgt_duration) rather than zeroing
+    # out drift, which would leave systematic time error uncorrected.
     MAX_PLAUSIBLE_DRIFT = 0.01  # 1 % = 10 000 ppm
     if abs(drift_raw) > MAX_PLAUSIBLE_DRIFT:
+        drift = _estimate_drift_from_duration(ref_df, tgt_df)
+        drift_source = "duration_ratio"
         log.warning(
             "Computed drift (%.4f s/s = %.0f ppm) exceeds plausibility threshold "
             "(%.0f ppm).  The closing-calibration refinement likely failed "
-            "(score=%.3f).  Falling back to drift = 0.",
+            "(score=%.3f).  Falling back to duration-ratio drift (%.3e s/s = %.0f ppm).",
             drift_raw,
             drift_raw * 1e6,
             MAX_PLAUSIBLE_DRIFT * 1e6,
             cal_close.correlation_score,
+            drift,
+            drift * 1e6,
         )
-        drift = 0.0
     else:
         drift = drift_raw
+        drift_source = "calibration_windows"
 
     tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
     offset_at_origin_s = (
@@ -514,8 +541,8 @@ def estimate_sync_from_calibration(
     )
 
     log.info(
-        "Sync model: offset=%.6f s, drift=%.3e s/s (span=%.1f s)",
-        offset_at_origin_s, drift, dt_tgt_s,
+        "Sync model: offset=%.6f s, drift=%.3e s/s (span=%.1f s, source=%s)",
+        offset_at_origin_s, drift, dt_tgt_s, drift_source,
     )
 
     model = SyncModel(
@@ -528,7 +555,7 @@ def estimate_sync_from_calibration(
         max_lag_seconds=float(coarse_max_lag_s),
         created_at_utc=datetime.now(UTC).isoformat(),
     )
-    return model, cal_open, cal_close
+    return model, cal_open, cal_close, drift_source
 
 
 def synchronize_from_calibration(
@@ -547,11 +574,12 @@ def synchronize_from_calibration(
     coarse_sample_rate_hz: float = 5.0,
     cal_search_s: float = 5.0,
     peak_buffer_s: float = 1.0,
+    lowpass_cutoff_hz: float | None = None,
     resample_rate_hz: float | None = None,
 ) -> tuple[Path, Path, Path | None]:
     """Synchronize *target_csv* to *reference_csv* using calibration windows.
 
-    Mirrors :func:`sync.sync_streams.synchronize` but derives the sync model
+    Mirrors :func:`sync.lida_sync.synchronize` but derives the sync model
     from calibration-window cross-correlation rather than full-signal LIDA.
 
     Returns ``(sync_info_json, target_synced_csv, uniform_csv_or_None)``.
@@ -566,7 +594,7 @@ def synchronize_from_calibration(
     if ref_df.empty or tgt_df.empty:
         raise ValueError("Reference and target streams must both be non-empty.")
 
-    model, cal_open, cal_close = estimate_sync_from_calibration(
+    model, cal_open, cal_close, drift_source = estimate_sync_from_calibration(
         ref_df,
         tgt_df,
         reference_name=str(ref_path),
@@ -582,6 +610,7 @@ def synchronize_from_calibration(
         coarse_sample_rate_hz=coarse_sample_rate_hz,
         cal_search_s=cal_search_s,
         peak_buffer_s=peak_buffer_s,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
 
     # Save model JSON annotated with calibration details and correlation stats
@@ -590,6 +619,7 @@ def synchronize_from_calibration(
 
     sync_data = json.loads(sync_json_path.read_text(encoding="utf-8"))
     sync_data["sync_method"] = "calibration_windows"
+    sync_data["drift_source"] = drift_source
     sync_data["calibration"] = {
         "opening": {
             "offset_s": round(cal_open.offset_seconds, 6),
@@ -615,15 +645,9 @@ def synchronize_from_calibration(
         aligned_df = aligned_df.drop(columns=drop_cols)
 
     # Compute correlation quality metric (offset-only vs full offset+drift)
-    offset_only_df = apply_sync_model(tgt_df, dc_replace(model, drift_seconds_per_second=0.0))
-    corr_before = _acc_norm_correlation(ref_df, offset_only_df, sample_rate_hz=sample_rate_hz)
-    corr_after = _acc_norm_correlation(ref_df, aligned_df, sample_rate_hz=sample_rate_hz)
-    sync_data["correlation"] = {
-        "offset_only": round(corr_before, 4) if corr_before is not None else None,
-        "offset_and_drift": round(corr_after, 4) if corr_after is not None else None,
-        "signal": "acc_norm",
-        "sample_rate_hz": sample_rate_hz,
-    }
+    sync_data["correlation"] = compute_sync_correlations(
+        ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz
+    )
 
     sync_json_path.write_text(json.dumps(sync_data, indent=2), encoding="utf-8")
 
@@ -658,12 +682,13 @@ def synchronize_recording_from_calibration(
     coarse_sample_rate_hz: float = 5.0,
     cal_search_s: float = 5.0,
     peak_buffer_s: float = 1.0,
+    lowpass_cutoff_hz: float | None = None,
     resample_rate_hz: float | None = None,
     plot: bool = True,
 ) -> tuple[Path, Path, Path]:
     """Synchronize a recording using calibration windows, writing to ``synced_cal/``.
 
-    Mirrors :func:`sync.session.synchronize_recording` but uses
+    Mirrors :func:`sync.lida_sync.synchronize_recording` but uses
     :func:`synchronize_from_calibration` instead of SDA + LIDA.
 
     Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
@@ -694,6 +719,7 @@ def synchronize_recording_from_calibration(
             coarse_sample_rate_hz=coarse_sample_rate_hz,
             cal_search_s=cal_search_s,
             peak_buffer_s=peak_buffer_s,
+            lowpass_cutoff_hz=lowpass_cutoff_hz,
             resample_rate_hz=resample_rate_hz,
         )
 
@@ -719,8 +745,13 @@ def synchronize_recording_from_calibration(
     print(f"[{recording_name}/synced_cal] {sync_json_out.name}")
 
     if plot:
-        from visualization.plot_session import plot_recording
-        plot_recording(recording_name, stage_filter="synced_cal")
+        from visualization import plot_comparison
+        stage_ref = f"{recording_name}/synced_cal"
+        try:
+            plot_comparison.main([stage_ref])
+            plot_comparison.main([stage_ref, "--norm"])
+        except SystemExit:
+            pass
 
     return ref_out, tgt_out, sync_json_out
 
@@ -800,6 +831,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Seconds of buffer around first/last peak in reference window (default: 1.0).",
     )
     parser.add_argument(
+        "--lowpass-cutoff-hz", type=float, default=None,
+        help=(
+            "If set, apply a zero-phase Butterworth low-pass filter at this "
+            "cutoff (Hz) to calibration windows before cross-correlation "
+            "(spec Step 1 optional; recommended: 20–30 Hz)."
+        ),
+    )
+    parser.add_argument(
         "--resample-rate-hz", type=float, default=None,
         help="If set, also write a uniformly resampled synced target CSV.",
     )
@@ -835,6 +874,7 @@ def main(argv: list[str] | None = None) -> None:
         coarse_sample_rate_hz=args.coarse_sample_rate_hz,
         cal_search_s=args.cal_search_s,
         peak_buffer_s=args.peak_buffer_s,
+        lowpass_cutoff_hz=args.lowpass_cutoff_hz,
         resample_rate_hz=args.resample_rate_hz,
         plot=not args.no_plot,
     )

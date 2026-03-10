@@ -6,14 +6,25 @@ import argparse
 from pathlib import Path
 import re
 from typing import Optional
+import json
 
-from common import recording_stage_dir, session_input_dir, write_dataframe
+from common import (
+    load_dataframe,
+    recording_dir,
+    recording_stage_dir,
+    recordings_root,
+    session_input_dir,
+    write_dataframe,
+)
 
 from visualization.plot_session import plot_recording
+from visualization.plot_calibration_segments import (
+    plot_calibration_segments_from_detection,
+)
 
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
-from .stats import write_recording_stats
+from .stats import compute_stream_timing_stats, write_recording_stats
 
 
 def _process_file(sensor_type: str, src: Path, dst: Path):
@@ -65,7 +76,15 @@ def process_session(session_name: str) -> None:
             sporsa.csv
             arduino.csv
             session_stats.json
-            *.png
+            *.png                              # per-recording sensor/comparison plots
+            <sensor>_calibration_segments.png  # calibration-segment diagnostics
+
+    Additionally, a session-wide summary JSON without file paths is written to::
+
+        data/recordings/<session_name>_session_stats.json
+
+    This aggregates per-recording parsed durations, section statistics, and
+    calibration-segment summaries for each sensor.
     """
     in_root = session_input_dir(session_name)
     if not in_root.is_dir():
@@ -96,6 +115,8 @@ def process_session(session_name: str) -> None:
         print(f"[{session_name}] No recordings found under {in_root}")
         return
 
+    session_summaries: list[dict] = []
+
     for n in sorted(recordings.keys()):
         recording_name = f"{session_name}_{n}"
         out_dir = recording_stage_dir(recording_name, "parsed")
@@ -112,10 +133,155 @@ def process_session(session_name: str) -> None:
             df = _process_file(sensor, src, dst)
             parsed_nonempty[sensor] = bool(df is not None and not df.empty)
 
+        # Per-recording parsed timing stats (written to parsed/session_stats.json).
         stats_path = write_recording_stats(recording_name)
         print(f"[{recording_name}/parsed] stats: {stats_path.name}")
 
+        # Per-recording sensor/comparison plots for the parsed stage.
         plot_recording(recording_name, stage_filter="parsed")
+
+        # Calibration-segment diagnostic plots per sensor (sporsa, arduino) and
+        # compact, path-free summaries for the session stats JSON.
+        calibration_segments_summary: dict[str, dict] = {}
+        for sensor_name in ("sporsa", "arduino"):
+            csv_path = out_dir / f"{sensor_name}.csv"
+            if not csv_path.exists():
+                continue
+            df_sensor = load_dataframe(csv_path)
+            if df_sensor.empty:
+                continue
+
+            # Use slightly more permissive defaults for the diagnostic plots so
+            # that short or early calibration sequences (e.g. at the very start
+            # of the recording) are still visualised.
+            _, info_df, _ = plot_calibration_segments_from_detection(
+                df_sensor,
+                sample_rate_hz=100.0,
+                static_min_s=2.0,
+                static_threshold=1.5,
+                peak_min_height=2.5,
+                peak_min_count=5,
+                peak_max_count=20,
+                peak_max_gap_s=3.0,
+                static_gap_max_s=8.0,
+                out_path=out_dir / f"{sensor_name}_calibration_segments.png",
+            )
+
+            if info_df.empty or "segment_index" not in info_df.columns:
+                calibration_segments_summary[sensor_name] = {
+                    "num_segments": 0,
+                    "total_duration_s": 0.0,
+                    "segments": [],
+                }
+                continue
+
+            # Per-segment timing and peak summaries.
+            segments_list: list[dict] = []
+            total_duration_s = 0.0
+            for _, row in info_df.iterrows():
+                start_t = float(row.get("start_time_s", 0.0))
+                end_t = float(row.get("end_time_s", start_t))
+                duration_s = max(0.0, end_t - start_t)
+                total_duration_s += duration_s
+
+                seg = {
+                    "index": int(row.get("segment_index", 0)),
+                    "start_time_s": start_t,
+                    "end_time_s": end_t,
+                    "duration_s": duration_s,
+                    "n_peaks": int(row.get("n_peaks", 0)),
+                }
+                segments_list.append(seg)
+
+            calibration_segments_summary[sensor_name] = {
+                "num_segments": len(segments_list),
+                "total_duration_s": total_duration_s,
+                "segments": segments_list,
+            }
+
+        # Number of sections already created for this recording (if any).
+        sections_root = recording_dir(recording_name) / "sections"
+        n_sections = 0
+        if sections_root.is_dir():
+            n_sections = sum(
+                1
+                for d in sections_root.iterdir()
+                if d.is_dir() and d.name.startswith("section_")
+            )
+
+        # Extract a compact per-recording summary for the session-wide JSON.
+        stats_json = {}
+        try:
+            stats_json = json.loads(stats_path.read_text(encoding="utf-8"))
+        except Exception:
+            stats_json = {}
+
+        durations_s: dict[str, float | None] = {}
+        num_samples: dict[str, int | None] = {}
+        streams = stats_json.get("streams", {}) or {}
+        for stream_name, stream_stats in streams.items():
+            timing = stream_stats.get("timing", {}) or {}
+            durations_s[stream_name] = timing.get("duration_s")
+            num_samples[stream_name] = stream_stats.get("num_samples")
+
+        rec_summary: dict = {
+            "recording_name": recording_name,
+            "parsed": {
+                "durations_s": durations_s,
+                "num_samples": num_samples,
+            },
+            "sections": {
+                "count": n_sections,
+            },
+        }
+        if calibration_segments_summary:
+            rec_summary["calibration_segments"] = calibration_segments_summary
+
+        session_summaries.append(rec_summary)
+
+        # Optional section-level timing summaries (if sections already exist).
+        if n_sections > 0:
+            section_details: list[dict] = []
+            for section_dir in sorted(
+                d for d in sections_root.iterdir() if d.is_dir() and d.name.startswith("section_")
+            ):
+                section_streams: dict[str, dict] = {}
+                for sensor_name in ("sporsa", "arduino"):
+                    csv_path = section_dir / f"{sensor_name}.csv"
+                    if not csv_path.exists():
+                        continue
+                    df_sec = load_dataframe(csv_path)
+                    if df_sec.empty:
+                        continue
+                    timing = compute_stream_timing_stats(df_sec, timestamp_col="timestamp")
+                    section_streams[sensor_name] = {
+                        "num_samples": int(df_sec.shape[0]),
+                        "timing": timing,
+                    }
+
+                if section_streams:
+                    section_details.append(
+                        {
+                            "name": section_dir.name,
+                            "streams": section_streams,
+                        }
+                    )
+
+            if section_details:
+                rec_summary["sections"]["details"] = section_details
+
+    # Write session-wide summary JSON across all recordings (without paths).
+    session_stats = {
+        "session_name": session_name,
+        "num_recordings": len(session_summaries),
+        "recordings": session_summaries,
+    }
+    out_session_stats = recordings_root() / f"{session_name}_session_stats.json"
+    out_session_stats.write_text(
+        json.dumps(session_stats, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"[{session_name}] session stats: {out_session_stats.name}")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

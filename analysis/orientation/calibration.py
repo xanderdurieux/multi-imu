@@ -1,11 +1,15 @@
-"""Sensor-level calibration helpers for accelerometer and gyroscope.
+"""Lightweight bias calibration for use inside orientation filters.
 
-These routines implement simple, field-deployable calibration based on static
-segments, matching the spirit of procedures discussed in the literature.
+This module provides simple, field-deployable helpers to estimate **constant
+accelerometer and gyroscope bias** from short static segments. The resulting
+``BiasCalibration`` objects are used by the orientation pipelines
+(:mod:`orientation.pipeline`, :mod:`orientation.session`) to optionally
+de-bias IMU streams before running complementary or Madgwick filters.
 
-They intentionally avoid any dependence on external equipment. Instead, they
-assume that you can record short static periods in known poses to estimate
-constant bias terms.
+For full sensor calibration and world-frame alignment (including gravity
+vector, magnetometer hard-iron offset, and sensor-to-world rotation), see
+``calibration.per_sensor`` and the recording-level pipeline in
+``calibration.session``.
 """
 
 from __future__ import annotations

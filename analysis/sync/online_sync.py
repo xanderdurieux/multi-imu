@@ -45,20 +45,18 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
-import numpy as np
+import shutil
+
 import pandas as pd
 
+from common import write_dataframe
 from common.paths import find_sensor_csv, recording_stage_dir
 
-from dataclasses import replace as _dc_replace
-
-import numpy as np
-
-from .align_df import estimate_offset
 from .calibration_sync import _coarse_offset_from_opening_calibration, _refine_offset_at_calibration
-from .common import add_vector_norms, load_stream, resample_stream
+from .common import load_stream, remove_dropouts
 from .drift_estimator import SyncModel, apply_sync_model, save_sync_model
-from parser.split_sections import find_calibration_segments
+from .metrics import compute_sync_correlations
+from calibration.segments import find_calibration_segments
 
 log = logging.getLogger(__name__)
 
@@ -184,9 +182,7 @@ def estimate_sync_from_opening_anchor(
         len(opening_cal.peak_indices),
     )
 
-    # Coarse offset: match opening cluster in the target stream.
-    from .calibration_sync import _remove_dropouts
-    tgt_clean = _remove_dropouts(tgt_df)
+    tgt_clean = remove_dropouts(tgt_df)
     try:
         coarse_offset_s = _coarse_offset_from_opening_calibration(
             ref_df,
@@ -260,10 +256,6 @@ def synchronize_recording_online(
 
     Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
     """
-    import shutil
-
-    from common import write_dataframe
-
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
     out_dir = recording_stage_dir(recording_name, "synced_online")
@@ -291,40 +283,13 @@ def synchronize_recording_online(
 
     aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
 
-    # Compute Pearson r of acc_norm (offset-only and full offset+drift).
-    def _acc_norm_corr(ref, tgt):
-        r = add_vector_norms(resample_stream(ref, sample_rate_hz))
-        t = add_vector_norms(resample_stream(tgt, sample_rate_hz))
-        rts, tts = r["timestamp"].to_numpy(float), t["timestamp"].to_numpy(float)
-        lo, hi = max(rts[0], tts[0]), min(rts[-1], tts[-1])
-        if lo >= hi:
-            return None
-        ra = r.loc[(rts >= lo) & (rts <= hi), "acc_norm"].to_numpy(float)
-        ta = t.loc[(tts >= lo) & (tts <= hi), "acc_norm"].to_numpy(float)
-        n = min(len(ra), len(ta))
-        if n < 10:
-            return None
-        x, y = ra[:n], ta[:n]
-        v = np.isfinite(x) & np.isfinite(y)
-        if v.sum() < 10:
-            return None
-        return float(np.corrcoef(x[v], y[v])[0, 1])
-
-    offset_only_df = apply_sync_model(tgt_df, _dc_replace(model, drift_seconds_per_second=0.0),
-                                      replace_timestamp=True)
-    corr_offset = _acc_norm_corr(ref_df, offset_only_df)
-    corr_full = _acc_norm_corr(ref_df, aligned_df)
+    correlations = compute_sync_correlations(ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz)
 
     sync_data = json.loads(sync_json_path.read_text(encoding="utf-8"))
     sync_data["sync_method"] = "online_opening_anchor"
     sync_data["drift_ppm_source"] = "pre_characterised"
     sync_data["drift_ppm_applied"] = drift_ppm
-    sync_data["correlation"] = {
-        "offset_only": round(corr_offset, 4) if corr_offset is not None else None,
-        "offset_and_drift": round(corr_full, 4) if corr_full is not None else None,
-        "signal": "acc_norm",
-        "sample_rate_hz": sample_rate_hz,
-    }
+    sync_data["correlation"] = correlations
     sync_json_path.write_text(json.dumps(sync_data, indent=2), encoding="utf-8")
     drop_cols = [
         c for c in ("timestamp_orig", "timestamp_aligned", "timestamp_received")
@@ -343,8 +308,13 @@ def synchronize_recording_online(
     print(f"[{recording_name}/synced_online] {sync_json_path.name}")
 
     if plot:
-        from visualization.plot_session import plot_recording
-        plot_recording(recording_name, stage_filter="synced_online")
+        from visualization import plot_comparison
+        stage_ref = f"{recording_name}/synced_online"
+        try:
+            plot_comparison.main([stage_ref])
+            plot_comparison.main([stage_ref, "--norm"])
+        except SystemExit:
+            pass
 
     return ref_out, tgt_out, sync_json_path
 

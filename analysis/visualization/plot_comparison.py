@@ -14,6 +14,29 @@ from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
 from .plot_sensor import prepare_sensor_axes, sensor_norm
 
 
+def _mask_dropout_packets(df: pd.DataFrame, epsilon_fraction: float = 0.1) -> pd.DataFrame:
+    """Set sensor columns to NaN for rows where acc_norm is near-zero (dropout packets).
+
+    Dropout rows are excluded from the plot via the existing notna mask while
+    the timestamp column is preserved so the time axis still spans the full
+    recording duration and gaps appear as visible breaks.
+    """
+    acc_cols = ["ax", "ay", "az"]
+    if not all(c in df.columns for c in acc_cols):
+        return df
+    acc_norm = np.sqrt((df[acc_cols].to_numpy(dtype=float) ** 2).sum(axis=1))
+    g_approx = float(np.nanmedian(acc_norm))
+    if g_approx <= 0:
+        return df
+    dropout = acc_norm < epsilon_fraction * g_approx
+    if not dropout.any():
+        return df
+    out = df.copy()
+    sensor_cols = [c for c in df.columns if c != "timestamp"]
+    out.loc[dropout, sensor_cols] = np.nan
+    return out
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plot comparison of two sensor streams.")
     parser.add_argument(
@@ -46,8 +69,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    df_a = load_dataframe(csv_path_a)
-    df_b = load_dataframe(csv_path_b)
+    df_a = _mask_dropout_packets(load_dataframe(csv_path_a))
+    df_b = _mask_dropout_packets(load_dataframe(csv_path_b))
 
     if df_a.empty or df_b.empty:
         print(f"[{recording_name}/{stage}] skipping comparison: one or both CSVs are empty")

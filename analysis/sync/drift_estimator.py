@@ -165,6 +165,7 @@ def estimate_sync_model(
     use_acc: bool = True,
     use_gyro: bool = True,
     use_mag: bool = False,
+    lowpass_cutoff_hz: float | None = None,
 ) -> SyncModel:
     """
     Estimate complete synchronization model:
@@ -176,6 +177,7 @@ def estimate_sync_model(
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
     tgt_series = build_alignment_series(
         target_df,
@@ -183,6 +185,7 @@ def estimate_sync_model(
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
     if ref_series.signal.size == 0 or tgt_series.signal.size == 0:
         raise ValueError("Cannot estimate sync model from empty streams.")
@@ -291,6 +294,7 @@ def fit_sync_from_paths(
     use_acc: bool = True,
     use_gyro: bool = True,
     use_mag: bool = False,
+    lowpass_cutoff_hz: float | None = None,
 ) -> SyncModel:
     """Load two CSV paths and estimate a sync model."""
     reference_path = Path(reference_csv)
@@ -310,4 +314,5 @@ def fit_sync_from_paths(
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )

@@ -7,6 +7,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from scipy.signal import butter, filtfilt
 
 from common import load_dataframe
 
@@ -143,6 +144,91 @@ def resample_to_reference_timestamps(
         out[col] = series
 
     return out
+
+
+_IMU_COLUMNS = ["ax", "ay", "az", "gx", "gy", "gz"]
+
+
+def lowpass_filter(
+    df: pd.DataFrame,
+    cutoff_hz: float,
+    sample_rate_hz: float,
+    *,
+    columns: list[str] | None = None,
+    order: int = 4,
+) -> pd.DataFrame:
+    """Apply a zero-phase Butterworth low-pass filter to IMU columns.
+
+    The stream must already be on a uniform time grid (e.g. after
+    :func:`resample_stream`).  Columns that are absent in *df* are silently
+    skipped.
+
+    Parameters
+    ----------
+    df:
+        Uniformly-sampled IMU DataFrame.
+    cutoff_hz:
+        Filter cutoff frequency in Hz (must be < sample_rate_hz / 2).
+    sample_rate_hz:
+        Sampling rate of *df* in Hz.
+    columns:
+        Columns to filter.  Defaults to all standard IMU axes present in *df*
+        (``ax, ay, az, gx, gy, gz``).
+    order:
+        Butterworth filter order (default 4).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of *df* with the selected columns low-pass filtered.
+    """
+    nyq = 0.5 * float(sample_rate_hz)
+    if cutoff_hz <= 0 or cutoff_hz >= nyq:
+        raise ValueError(
+            f"cutoff_hz must be in (0, {nyq:.1f}) for sample_rate_hz={sample_rate_hz:.1f} Hz; "
+            f"got {cutoff_hz}."
+        )
+
+    b, a = butter(order, cutoff_hz / nyq, btype="low", analog=False)
+
+    cols = columns if columns is not None else [c for c in _IMU_COLUMNS if c in df.columns]
+
+    out = df.copy()
+    for col in cols:
+        if col not in out.columns:
+            continue
+        values = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float).copy()
+        finite = np.isfinite(values)
+        if finite.sum() < max(10, 3 * (order + 1)):
+            continue
+        values[~finite] = 0.0
+        out[col] = filtfilt(b, a, values)
+
+    return out
+
+
+def remove_dropouts(df: pd.DataFrame, *, epsilon_fraction: float = 0.1) -> pd.DataFrame:
+    """Remove rows where the acceleration norm is near-zero (sensor dropout packets).
+
+    Some sensors (e.g. Arduino) intermittently emit zero-valued packets whose
+    ``acc_norm`` ≈ 0.  These corrupt cross-correlation and calibration detection
+    and should be excluded before processing.
+
+    Parameters
+    ----------
+    df:
+        Input IMU DataFrame with ``ax``, ``ay``, ``az`` columns.
+    epsilon_fraction:
+        Rows with ``acc_norm < epsilon_fraction × median(acc_norm)`` are removed.
+        Default 0.1 (10 % of the median gravity value).
+    """
+    out = add_vector_norms(df)
+    g_approx = float(out["acc_norm"].median())
+    if g_approx <= 0:
+        return df
+    threshold = epsilon_fraction * g_approx
+    valid = out["acc_norm"] >= threshold
+    return df.loc[valid.values].reset_index(drop=True)
 
 
 def apply_linear_time_transform(

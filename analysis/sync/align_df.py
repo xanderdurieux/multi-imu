@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .common import add_vector_norms, resample_stream
+from .common import add_vector_norms, lowpass_filter, resample_stream
 
 
 @dataclass(frozen=True)
@@ -95,8 +95,17 @@ def build_alignment_series(
     use_gyro: bool = True,
     use_mag: bool = False,
     differentiate: bool = True,
+    lowpass_cutoff_hz: float | None = None,
 ) -> AlignmentSeries:
-    """Resample one stream and derive its 1D activity-over-time signal."""
+    """Resample one stream and derive its 1D activity-over-time signal.
+
+    Parameters
+    ----------
+    lowpass_cutoff_hz:
+        If set, apply a zero-phase Butterworth low-pass filter at this
+        cutoff (Hz) to the uniformly resampled stream before computing the
+        activity signal (spec Step 1 optional; recommended: 20–30 Hz).
+    """
     if sample_rate_hz <= 0:
         raise ValueError("sample_rate_hz must be > 0")
 
@@ -107,6 +116,9 @@ def build_alignment_series(
             signal=np.asarray([], dtype=float),
             sample_rate_hz=float(sample_rate_hz),
         )
+
+    if lowpass_cutoff_hz is not None:
+        resampled = lowpass_filter(resampled, lowpass_cutoff_hz, sample_rate_hz)
 
     signal = build_activity_signal(
         resampled,
@@ -212,6 +224,7 @@ def estimate_offset(
     use_gyro: bool = True,
     use_mag: bool = False,
     differentiate: bool = True,
+    lowpass_cutoff_hz: float | None = None,
 ) -> OffsetEstimate:
     """Estimate SDA coarse offset directly from input dataframes."""
     ref_series = build_alignment_series(
@@ -221,6 +234,7 @@ def estimate_offset(
         use_gyro=use_gyro,
         use_mag=use_mag,
         differentiate=differentiate,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
     tgt_series = build_alignment_series(
         target_df,
@@ -229,6 +243,7 @@ def estimate_offset(
         use_gyro=use_gyro,
         use_mag=use_mag,
         differentiate=differentiate,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
     )
     return estimate_offset_from_series(
         reference_series=ref_series,

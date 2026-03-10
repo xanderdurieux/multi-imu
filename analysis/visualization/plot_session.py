@@ -1,11 +1,16 @@
-"""Session-level plotting utilities.
+"""Session-level plotting utilities for the thesis pipeline.
 
-For a given session (date), iterates all matching recording directories
-under ``data/recordings/`` and generates plots for each stage found.
+For a given session (date), this module iterates all matching recording
+directories under ``data/recordings/`` and regenerates plots for each
+available processing stage. The resulting figures are used to visually
+assess data quality (dropouts, clipping, sync errors, calibration quality)
+before including recordings or sections in motion / incident analysis.
 
 Stage directories plotted per recording:
-- ``parsed``, ``synced_lida``, ``synced_cal``: sensor + comparison plots.
-- ``orientation``: orientation plots.
+- ``parsed``, ``synced_lida``, ``synced_cal``, ``sections/section_*``:
+  sensor + comparison plots.
+- ``calibrated``: calibration diagnostics.
+- ``orientation``: orientation and gravity-compensated acceleration plots.
 """
 
 from __future__ import annotations

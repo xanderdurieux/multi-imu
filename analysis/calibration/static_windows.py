@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from parser.split_sections import CalibrationSegment, find_calibration_segments
+from calibration.segments import CalibrationSegment, find_calibration_segments
 
 _GRAVITY_MS2 = 9.81
 

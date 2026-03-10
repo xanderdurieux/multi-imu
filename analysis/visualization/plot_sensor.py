@@ -13,6 +13,28 @@ from common import find_sensor_csv, load_dataframe, recording_stage_dir
 from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
 
 
+def _mask_dropout_packets(df: pd.DataFrame, epsilon_fraction: float = 0.1) -> pd.DataFrame:
+    """Set sensor columns to NaN for rows where acc_norm is near-zero (dropout packets).
+
+    The timestamp column is preserved so the time axis spans the full recording
+    and dropout periods appear as visible gaps rather than zero spikes.
+    """
+    acc_cols = ["ax", "ay", "az"]
+    if not all(c in df.columns for c in acc_cols):
+        return df
+    acc_norm = np.sqrt((df[acc_cols].to_numpy(dtype=float) ** 2).sum(axis=1))
+    g_approx = float(np.nanmedian(acc_norm))
+    if g_approx <= 0:
+        return df
+    dropout = acc_norm < epsilon_fraction * g_approx
+    if not dropout.any():
+        return df
+    out = df.copy()
+    sensor_cols = [c for c in df.columns if c != "timestamp"]
+    out.loc[dropout, sensor_cols] = np.nan
+    return out
+
+
 def prepare_sensor_axes(num_series: int, num_columns: int = 1, *, sharex: bool = True):
     """Create a grid of axes and normalize return type to a list."""
     fig, axes = plt.subplots(
@@ -95,7 +117,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    df = load_dataframe(csv_path)
+    df = _mask_dropout_packets(load_dataframe(csv_path))
     if df.empty:
         print(f"[{recording_name}/{stage}] skipping {args.sensor_name}: CSV is empty")
         return
