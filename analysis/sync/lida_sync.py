@@ -5,9 +5,9 @@ Signal-Density Alignment (SDA) coarse pass with a Local Instance-based Drift
 Analysis (LIDA) refinement pass that slides a window over the recording.
 
 Reads ``<stage_in>/sporsa.csv`` (reference) and ``<stage_in>/arduino.csv``
-(target), writes aligned outputs to ``synced_lida/``::
+(target), writes aligned outputs to ``synced/lida/``::
 
-    synced_lida/
+    synced/lida/
         sporsa.csv          ← reference copy
         arduino.csv         ← target with corrected timestamps
         sync_info.json      ← fitted offset + drift model
@@ -32,6 +32,8 @@ from common import find_sensor_csv, recording_stage_dir, write_dataframe
 from .common import load_stream
 from .drift_estimator import (
     DEFAULT_LOCAL_SEARCH_SECONDS,
+    DEFAULT_MIN_FIT_R2,
+    DEFAULT_MIN_WINDOW_SCORE,
     DEFAULT_WINDOW_SECONDS,
     DEFAULT_WINDOW_STEP_SECONDS,
     SyncModel,
@@ -56,6 +58,8 @@ def synchronize(
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
     resample_rate_hz: float | None = None,
     use_acc: bool = True,
     use_gyro: bool = True,
@@ -91,6 +95,8 @@ def synchronize(
         window_seconds=window_seconds,
         window_step_seconds=window_step_seconds,
         local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
+        min_fit_r2=min_fit_r2,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
@@ -141,6 +147,8 @@ def synchronize_recording(
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
     resample_rate_hz: float | None = None,
     use_acc: bool = True,
     use_gyro: bool = False,
@@ -149,22 +157,22 @@ def synchronize_recording(
 ) -> tuple[Path, Path, Path]:
     """Synchronize two sensor streams for one recording using SDA + LIDA.
 
-    Reads CSVs from ``<stage_in>/``, writes clean-named outputs to ``synced_lida/``:
+    Reads CSVs from ``<stage_in>/``, writes clean-named outputs to ``synced/lida/``:
 
-    - ``synced_lida/<reference_sensor>.csv``  — reference copy
-    - ``synced_lida/<target_sensor>.csv``     — target with corrected timestamps
-    - ``synced_lida/sync_info.json``          — offset + drift model
+    - ``synced/lida/<reference_sensor>.csv``  — reference copy
+    - ``synced/lida/<target_sensor>.csv``     — target with corrected timestamps
+    - ``synced/lida/sync_info.json``          — offset + drift model
 
     Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
     """
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
 
-    out_dir = recording_stage_dir(recording_name, "synced_lida")
+    out_dir = recording_stage_dir(recording_name, "synced/lida")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{recording_name}/synced_lida] {reference_sensor} (ref) ← {ref_csv.name}")
-    print(f"[{recording_name}/synced_lida] {target_sensor} (target) ← {tgt_csv.name}")
+    print(f"[{recording_name}/synced/lida] {reference_sensor} (ref) ← {ref_csv.name}")
+    print(f"[{recording_name}/synced/lida] {target_sensor} (target) ← {tgt_csv.name}")
 
     tmp_dir = out_dir / "_tmp"
     try:
@@ -177,6 +185,8 @@ def synchronize_recording(
             window_seconds=window_seconds,
             window_step_seconds=window_step_seconds,
             local_search_seconds=local_search_seconds,
+            min_window_score=min_window_score,
+            min_fit_r2=min_fit_r2,
             resample_rate_hz=resample_rate_hz,
             use_acc=use_acc,
             use_gyro=use_gyro,
@@ -194,19 +204,19 @@ def synchronize_recording(
         if uniform_csv_raw is not None:
             uniform_out = out_dir / f"{target_sensor}_uniform.csv"
             shutil.move(str(uniform_csv_raw), uniform_out)
-            print(f"[{recording_name}/synced_lida] {uniform_out.name}")
+            print(f"[{recording_name}/synced/lida] {uniform_out.name}")
 
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
 
-    print(f"[{recording_name}/synced_lida] {ref_out.name}")
-    print(f"[{recording_name}/synced_lida] {tgt_out.name}")
-    print(f"[{recording_name}/synced_lida] {sync_json_out.name}")
+    print(f"[{recording_name}/synced/lida] {ref_out.name}")
+    print(f"[{recording_name}/synced/lida] {tgt_out.name}")
+    print(f"[{recording_name}/synced/lida] {sync_json_out.name}")
 
     if plot:
         from visualization import plot_comparison
-        stage_ref = f"{recording_name}/synced_lida"
+        stage_ref = f"{recording_name}/synced/lida"
         try:
             plot_comparison.main([stage_ref])
             plot_comparison.main([stage_ref, "--norm"])

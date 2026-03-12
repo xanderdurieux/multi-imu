@@ -6,10 +6,10 @@ and acc_norm correlation scores.
 
 Methods and their output directories
 --------------------------------------
-- ``sda``         → ``synced_sda/``    (offset-only, no drift)
-- ``lida``        → ``synced_lida/``   (SDA + LIDA, offset + drift)
-- ``calibration`` → ``synced_cal/``    (calibration-window anchors, offset + drift)
-- ``online``      → ``synced_online/`` (opening anchor + pre-characterised drift)
+- ``sda``         → ``synced/sda/``    (offset-only, no drift)
+- ``lida``        → ``synced/lida/``   (SDA + LIDA, offset + drift)
+- ``calibration`` → ``synced/cal/``    (calibration-window anchors, offset + drift)
+- ``online``      → ``synced/online/`` (opening anchor + pre-characterised drift)
 
 Selection priority
 ------------------
@@ -68,10 +68,10 @@ log = logging.getLogger(__name__)
 ALL_METHODS: list[str] = ["calibration", "lida", "sda", "online"]
 
 METHOD_STAGES: dict[str, str] = {
-    "sda": "synced_sda",
-    "lida": "synced_lida",
-    "calibration": "synced_cal",
-    "online": "synced_online",
+    "sda": "synced/sda",
+    "lida": "synced/lida",
+    "calibration": "synced/cal",
+    "online": "synced/online",
 }
 
 METHOD_LABELS: dict[str, str] = {
@@ -116,10 +116,10 @@ def compare_sync_models(recording_name: str) -> dict:
 
     Returns a dict with:
     - ``"recording"``          — recording name
-    - ``"sda"``                — raw dict from ``synced_sda/sync_info.json``   (or None)
-    - ``"lida"``               — raw dict from ``synced_lida/sync_info.json``  (or None)
-    - ``"calibration"``        — raw dict from ``synced_cal/sync_info.json``   (or None)
-    - ``"online"``             — raw dict from ``synced_online/sync_info.json`` (or None)
+    - ``"sda"``                — raw dict from ``synced/sda/sync_info.json``    (or None)
+    - ``"lida"``               — raw dict from ``synced/lida/sync_info.json``   (or None)
+    - ``"calibration"``        — raw dict from ``synced/cal/sync_info.json``    (or None)
+    - ``"online"``             — raw dict from ``synced/online/sync_info.json`` (or None)
     """
     result: dict[str, Any] = {"recording": recording_name}
     for method, stage in METHOD_STAGES.items():

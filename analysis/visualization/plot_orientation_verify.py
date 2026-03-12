@@ -438,12 +438,20 @@ def plot_3d_frames(
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def _find_orientation_csv(stage_dir: Path, sensor: str) -> Path | None:
+def _find_orientation_csv(search_dir: Path, sensor: str) -> Path | None:
+    """Return the orientation CSV for *sensor* in *search_dir*.
+
+    Looks for the new per-method naming (``<sensor>_orientation.csv``) first,
+    then falls back to legacy flat patterns.
+    """
+    direct = search_dir / f"{sensor}_orientation.csv"
+    if direct.exists():
+        return direct
     for pat in (
         f"{sensor}*__complementary_orientation.csv",
         f"{sensor}*_orientation.csv",
     ):
-        hits = sorted(stage_dir.glob(pat))
+        hits = sorted(search_dir.glob(pat))
         if hits:
             return hits[0]
     return None
@@ -453,12 +461,24 @@ def plot_orientation_verify_stage(
     recording_name: str,
     stage: str = "orientation",
 ) -> None:
-    """Generate all verification plots for every orientation CSV in *stage*."""
+    """Generate all verification plots for every orientation CSV in *stage*.
+
+    Iterates over method subdirectories (``complementary/``, ``madgwick/``, …).
+    Falls back to the flat layout if no subdirectories contain orientation CSVs.
+    """
     stage_dir = recording_stage_dir(recording_name, stage)
     if not stage_dir.exists():
         raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
 
-    csv_files = sorted(stage_dir.glob("*_orientation.csv"))
+    # Collect CSV files from method subdirectories first.
+    csv_files: list[Path] = []
+    for method_dir in sorted(d for d in stage_dir.iterdir() if d.is_dir()):
+        csv_files.extend(sorted(method_dir.glob("*_orientation.csv")))
+
+    # Fallback: flat layout.
+    if not csv_files:
+        csv_files = sorted(stage_dir.glob("*_orientation.csv"))
+
     if not csv_files:
         log.warning("[%s/%s] no orientation CSVs found.", recording_name, stage)
         return

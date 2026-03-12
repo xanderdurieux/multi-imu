@@ -2,9 +2,20 @@
 
 This package provides:
 
-- Sensor-level calibration helpers (bias estimation).
+- Quaternion math utilities.
+- Helpers to load calibration parameters from ``calibrated/calibration.json``
+  (produced by :mod:`calibration.session`) and apply gyro bias correction.
 - Lightweight complementary and Madgwick filters producing body→world quaternions.
-- Simple pipelines that run the filters on standardized CSV data from ``analysis.parser``.
+- Pipelines that run the filters on standardized CSV data.
+
+Typical usage::
+
+    from orientation.session import run_orientation_for_recording
+    run_orientation_for_recording("2026-02-26_5")
+
+The pipeline reads body-frame ``parsed/`` sensor CSVs, loads gyro bias and
+the static sensor-to-world rotation from ``calibrated/calibration.json``,
+and writes quaternion-augmented orientation CSVs to ``orientation/``.
 """
 
 from .quaternion import (
@@ -18,14 +29,12 @@ from .quaternion import (
     quat_slerp,
     euler_from_quat,
     quat_from_euler,
+    quat_from_rotation_matrix,
     tilt_quat_from_acc,
 )
 from .calibration import (
-    BiasCalibration,
-    estimate_gyro_bias_static,
-    estimate_acc_bias_static,
-    estimate_bias_from_dataframe_static_segment,
-    apply_calibration_bias,
+    load_calibration_params,
+    apply_gyro_bias,
 )
 from .complementary import ComplementaryFilterConfig, ComplementaryOrientationFilter
 from .madgwick import MadgwickConfig, MadgwickOrientationFilter
@@ -48,13 +57,11 @@ __all__ = [
     "quat_slerp",
     "euler_from_quat",
     "quat_from_euler",
+    "quat_from_rotation_matrix",
     "tilt_quat_from_acc",
-    # Calibration
-    "BiasCalibration",
-    "estimate_gyro_bias_static",
-    "estimate_acc_bias_static",
-    "estimate_bias_from_dataframe_static_segment",
-    "apply_calibration_bias",
+    # Calibration bridge
+    "load_calibration_params",
+    "apply_gyro_bias",
     # Complementary filter
     "ComplementaryFilterConfig",
     "ComplementaryOrientationFilter",
@@ -67,4 +74,3 @@ __all__ = [
     "run_madgwick_on_dataframe",
     "run_orientation_pipeline_on_csv",
 ]
-

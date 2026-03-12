@@ -8,8 +8,8 @@ World frame convention: ENU (East-North-Up)
 TRIAD uses two non-collinear reference vectors to solve for the rotation from
 sensor frame to world frame:
 
-  Reference 1 — gravity:
-    - In world frame:  r1 = [0, 0, -1]  (gravity points down, i.e. -Z)
+  Reference 1 — specific force (accelerometer reading at rest):
+    - In world frame:  r1 = [0, 0, +1]  (specific force points up, i.e. +Z in ENU)
     - In sensor frame: b1 = normalize(mean_acc_static)
 
   Reference 2 — magnetic north:
@@ -32,8 +32,13 @@ from .per_sensor import SensorCalibration
 log = logging.getLogger(__name__)
 
 # World-frame reference directions (ENU)
-_GRAVITY_WORLD = np.array([0.0, 0.0, -1.0])   # gravity direction (down = -Z)
-_MAG_NORTH_WORLD = np.array([0.0, 1.0, 0.0])  # magnetic north (Y)
+#
+# The accelerometer measures **specific force** (reaction to gravity), which
+# points *upward* when the sensor is at rest.  In ENU, up = +Z.  So the
+# reference for the primary TRIAD vector is [0, 0, +1], and after calibration
+# the world-frame accelerometer output satisfies az ≈ +9.81 m/s² at rest.
+_GRAVITY_WORLD = np.array([0.0, 0.0, 1.0])    # specific-force direction (up = +Z in ENU)
+_MAG_NORTH_WORLD = np.array([0.0, 1.0, 0.0])  # magnetic north (Y in ENU)
 
 
 @dataclass
@@ -123,15 +128,18 @@ def _triad(
 
 
 def _gravity_only_rotation(gravity_sensor: np.ndarray) -> np.ndarray:
-    """Compute pitch+roll rotation that maps *gravity_sensor* to world -Z.
+    """Compute pitch+roll rotation that maps *gravity_sensor* to world +Z.
 
-    Yaw is set to zero (identity rotation about Z after alignment).  Uses
-    Rodrigues' rotation formula for a minimum-angle rotation.
+    *gravity_sensor* is the mean static accelerometer reading (specific force,
+    pointing upward when at rest).  The rotation aligns it to world +Z (up in
+    ENU).  Yaw is set to zero.  Uses Rodrigues' rotation formula for a
+    minimum-angle rotation.
 
     Parameters
     ----------
     gravity_sensor:
-        Gravity vector in sensor frame (m/s²).  Need not be unit length.
+        Mean accelerometer reading during static (specific force, m/s²).
+        Need not be unit length.
 
     Returns
     -------
@@ -293,7 +301,7 @@ def compute_orientation_from_vectors(
 
 
 def _gravity_residual(R: np.ndarray, gravity_sensor: np.ndarray) -> float:
-    """Euclidean distance between *R @ gravity_sensor* and ideal world gravity."""
-    g_ideal = _GRAVITY_WORLD * 9.81          # [0, 0, -9.81] in ENU
+    """Euclidean distance between *R @ gravity_sensor* and ideal world specific force."""
+    g_ideal = _GRAVITY_WORLD * 9.81          # [0, 0, +9.81] in ENU (specific force = up)
     g_rotated = R @ gravity_sensor
     return float(np.linalg.norm(g_rotated - g_ideal))

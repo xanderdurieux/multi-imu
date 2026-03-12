@@ -686,7 +686,7 @@ def synchronize_recording_from_calibration(
     resample_rate_hz: float | None = None,
     plot: bool = True,
 ) -> tuple[Path, Path, Path]:
-    """Synchronize a recording using calibration windows, writing to ``synced_cal/``.
+    """Synchronize a recording using calibration windows, writing to ``synced/cal/``.
 
     Mirrors :func:`sync.lida_sync.synchronize_recording` but uses
     :func:`synchronize_from_calibration` instead of SDA + LIDA.
@@ -696,11 +696,11 @@ def synchronize_recording_from_calibration(
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
 
-    out_dir = recording_stage_dir(recording_name, "synced_cal")
+    out_dir = recording_stage_dir(recording_name, "synced/cal")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{recording_name}/synced_cal] {reference_sensor} (ref) ← {ref_csv.name}")
-    print(f"[{recording_name}/synced_cal] {target_sensor} (target) ← {tgt_csv.name}")
+    print(f"[{recording_name}/synced/cal] {reference_sensor} (ref) ← {ref_csv.name}")
+    print(f"[{recording_name}/synced/cal] {target_sensor} (target) ← {tgt_csv.name}")
 
     tmp_dir = out_dir / "_tmp"
     try:
@@ -734,19 +734,19 @@ def synchronize_recording_from_calibration(
         if uniform_csv_raw is not None:
             uniform_out = out_dir / f"{target_sensor}_uniform.csv"
             shutil.move(str(uniform_csv_raw), uniform_out)
-            print(f"[{recording_name}/synced_cal] {uniform_out.name}")
+            print(f"[{recording_name}/synced/cal] {uniform_out.name}")
 
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
 
-    print(f"[{recording_name}/synced_cal] {ref_out.name}")
-    print(f"[{recording_name}/synced_cal] {tgt_out.name}")
-    print(f"[{recording_name}/synced_cal] {sync_json_out.name}")
+    print(f"[{recording_name}/synced/cal] {ref_out.name}")
+    print(f"[{recording_name}/synced/cal] {tgt_out.name}")
+    print(f"[{recording_name}/synced/cal] {sync_json_out.name}")
 
     if plot:
         from visualization import plot_comparison
-        stage_ref = f"{recording_name}/synced_cal"
+        stage_ref = f"{recording_name}/synced/cal"
         try:
             plot_comparison.main([stage_ref])
             plot_comparison.main([stage_ref, "--norm"])
@@ -768,7 +768,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "reference events.  Detects calibrations in the reference sensor, "
             "then cross-correlates each calibration's peak window against the "
             "target to fit a precise offset + drift model.  Writes outputs to "
-            "data/recordings/<recording_name>/synced_cal/."
+            "data/recordings/<recording_name>/synced/cal/."
         ),
     )
     parser.add_argument(
@@ -844,7 +844,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-plot", action="store_true",
-        help="Skip generating plots for the synced_cal stage.",
+        help="Skip generating plots for the synced/cal stage.",
     )
     return parser
 

@@ -22,9 +22,9 @@ Stages plotted per recording
   Euler angles, gravity-compensated acceleration, sensor comparison, and
   relative (head vs handlebar) orientation.
 
-Intermediate sync stages (``synced_lida``, ``synced_cal``, ``synced_sda``,
-``synced_online``) are intentionally skipped here — they are compared via
-the sync method comparison plot rather than plotted individually.
+Per-method sync outputs live in ``synced/sda/``, ``synced/lida/``,
+``synced/cal/``, ``synced/online/`` and are not plotted individually —
+they are compared via the sync method comparison plot.
 """
 
 from __future__ import annotations
@@ -44,9 +44,6 @@ from visualization import (
 
 
 SENSOR_NAMES: tuple[str, str] = ("sporsa", "arduino")
-
-# Stages that receive only their sync-quality plot (not individual sensor plots).
-_SYNC_ONLY_STAGES = frozenset({"synced_lida", "synced_cal", "synced_sda", "synced_online"})
 
 # Stages to skip entirely during session plotting.
 _SKIP_STAGES: frozenset[str] = frozenset()
@@ -125,10 +122,6 @@ def plot_recording(recording_name: str, stage_filter: Optional[str] = None) -> N
         if stage == "synced":
             _plot_sensor_and_comparison(recording_name, stage)
             plot_sync.plot_sync_stage(recording_name)
-            continue
-
-        # --- Intermediate sync stages: skip individual sensor plots ---
-        if stage in _SYNC_ONLY_STAGES:
             continue
 
         # --- Sections: sensor + comparison plots ---

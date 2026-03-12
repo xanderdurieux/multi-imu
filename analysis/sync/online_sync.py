@@ -252,17 +252,17 @@ def synchronize_recording_online(
 ) -> tuple[Path, Path, Path]:
     """Synchronise a recording using only the opening calibration anchor.
 
-    Writes outputs to ``synced_online/`` alongside the other sync stages.
+    Writes outputs to ``synced/online/`` alongside the other sync stages.
 
     Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
     """
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
-    out_dir = recording_stage_dir(recording_name, "synced_online")
+    out_dir = recording_stage_dir(recording_name, "synced/online")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{recording_name}/synced_online] {reference_sensor} (ref) <- {ref_csv.name}")
-    print(f"[{recording_name}/synced_online] {target_sensor} (target) <- {tgt_csv.name}")
+    print(f"[{recording_name}/synced/online] {reference_sensor} (ref) <- {ref_csv.name}")
+    print(f"[{recording_name}/synced/online] {target_sensor} (target) <- {tgt_csv.name}")
 
     ref_df = load_stream(ref_csv)
     tgt_df = load_stream(tgt_csv)
@@ -303,13 +303,13 @@ def synchronize_recording_online(
     shutil.copy2(ref_csv, ref_out)
     write_dataframe(aligned_df, tgt_out)
 
-    print(f"[{recording_name}/synced_online] {ref_out.name}")
-    print(f"[{recording_name}/synced_online] {tgt_out.name}")
-    print(f"[{recording_name}/synced_online] {sync_json_path.name}")
+    print(f"[{recording_name}/synced/online] {ref_out.name}")
+    print(f"[{recording_name}/synced/online] {tgt_out.name}")
+    print(f"[{recording_name}/synced/online] {sync_json_path.name}")
 
     if plot:
         from visualization import plot_comparison
-        stage_ref = f"{recording_name}/synced_online"
+        stage_ref = f"{recording_name}/synced/online"
         try:
             plot_comparison.main([stage_ref])
             plot_comparison.main([stage_ref, "--norm"])
@@ -325,7 +325,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Online (single-anchor) sync using only the opening calibration tap. "
             "Applies a pre-characterised drift rate rather than estimating drift "
-            "from start and end calibrations. Writes to synced_online/."
+            "from start and end calibrations. Writes to synced/online/."
         ),
     )
     parser.add_argument(
@@ -347,7 +347,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--plot", action="store_true",
-        help="Generate visualisation plots for synced_online stage.",
+        help="Generate visualisation plots for synced/online stage.",
     )
     return parser
 

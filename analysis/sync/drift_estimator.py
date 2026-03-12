@@ -20,7 +20,9 @@ from .common import apply_linear_time_transform, load_stream, resample_stream
 
 DEFAULT_WINDOW_SECONDS = 20.0
 DEFAULT_WINDOW_STEP_SECONDS = 10.0
-DEFAULT_LOCAL_SEARCH_SECONDS = 2.0
+DEFAULT_LOCAL_SEARCH_SECONDS = 0.5
+DEFAULT_MIN_WINDOW_SCORE = 0.10
+DEFAULT_MIN_FIT_R2 = 0.10
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,17 @@ class SyncModel:
     created_at_utc: str
 
 
+def _ncc(a: np.ndarray, b: np.ndarray) -> float:
+    """Normalised cross-correlation (Pearson r) between two equal-length arrays."""
+    a_c = a - a.mean()
+    b_c = b - b.mean()
+    norm_a = float(np.linalg.norm(a_c))
+    norm_b = float(np.linalg.norm(b_c))
+    if norm_a < 1e-10 or norm_b < 1e-10:
+        return 0.0
+    return float(np.dot(a_c, b_c) / (norm_a * norm_b))
+
+
 def _windowed_lag_refinement(
     reference_series: AlignmentSeries,
     target_series: AlignmentSeries,
@@ -45,6 +58,7 @@ def _windowed_lag_refinement(
     window_seconds: float,
     window_step_seconds: float,
     local_search_seconds: float,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     ref_signal = reference_series.signal
     tgt_signal = target_series.signal
@@ -92,12 +106,12 @@ def _windowed_lag_refinement(
             if tgt_win.size != ref_win.size:
                 continue
 
-            score = float(np.dot(ref_win, tgt_win) / ref_win.size)
+            score = _ncc(ref_win, tgt_win)
             if score > best_score:
                 best_score = score
                 best_lag = lag
 
-        if best_lag is None:
+        if best_lag is None or best_score < min_window_score:
             continue
 
         tgt_idx = center - best_lag
@@ -162,6 +176,8 @@ def estimate_sync_model(
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
     use_acc: bool = True,
     use_gyro: bool = True,
     use_mag: bool = False,
@@ -204,6 +220,7 @@ def estimate_sync_model(
         window_seconds=window_seconds,
         window_step_seconds=window_step_seconds,
         local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
     )
 
     if offsets.size == 0:
@@ -211,12 +228,14 @@ def estimate_sync_model(
         drift_seconds_per_second = 0.0
     else:
         weights = np.clip(scores, a_min=0.0, a_max=None)
-        offset_seconds, drift_seconds_per_second, _fit_r2 = _fit_offset_drift(
+        offset_seconds, drift_seconds_per_second, fit_r2 = _fit_offset_drift(
             target_times,
             offsets,
             target_origin_seconds=target_origin_seconds,
             weights=weights,
         )
+        if fit_r2 < min_fit_r2:
+            drift_seconds_per_second = 0.0
 
     return SyncModel(
         reference_csv=str(reference_name),
@@ -291,6 +310,8 @@ def fit_sync_from_paths(
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
     use_acc: bool = True,
     use_gyro: bool = True,
     use_mag: bool = False,
@@ -311,6 +332,8 @@ def fit_sync_from_paths(
         window_seconds=window_seconds,
         window_step_seconds=window_step_seconds,
         local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
+        min_fit_r2=min_fit_r2,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,

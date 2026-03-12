@@ -6,9 +6,9 @@ Method 1 (of 4): estimates a coarse clock offset using Signal-Density Alignment
 The simplest and fastest offline sync method in the pipeline — a useful baseline
 and a fallback when recording duration is too short for reliable drift estimation.
 
-Writes aligned outputs to ``synced_sda/``::
+Writes aligned outputs to ``synced/sda/``::
 
-    synced_sda/
+    synced/sda/
         sporsa.csv          ← reference copy
         arduino.csv         ← target with offset-corrected timestamps
         sync_info.json      ← fitted offset model (drift = 0)
@@ -53,21 +53,21 @@ def synchronize_recording_sda(
 ) -> tuple[Path, Path, Path]:
     """Synchronize two sensor streams using SDA (offset-only, no drift correction).
 
-    Reads CSVs from ``<stage_in>/``, writes clean-named outputs to ``synced_sda/``:
+    Reads CSVs from ``<stage_in>/``, writes clean-named outputs to ``synced/sda/``:
 
-    - ``synced_sda/<reference_sensor>.csv``  — reference copy
-    - ``synced_sda/<target_sensor>.csv``     — target with offset-corrected timestamps
-    - ``synced_sda/sync_info.json``          — offset model (drift = 0)
+    - ``synced/sda/<reference_sensor>.csv``  — reference copy
+    - ``synced/sda/<target_sensor>.csv``     — target with offset-corrected timestamps
+    - ``synced/sda/sync_info.json``          — offset model (drift = 0)
 
     Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
     """
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
-    out_dir = recording_stage_dir(recording_name, "synced_sda")
+    out_dir = recording_stage_dir(recording_name, "synced/sda")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{recording_name}/synced_sda] {reference_sensor} (ref) ← {ref_csv.name}")
-    print(f"[{recording_name}/synced_sda] {target_sensor} (target) ← {tgt_csv.name}")
+    print(f"[{recording_name}/synced/sda] {reference_sensor} (ref) ← {ref_csv.name}")
+    print(f"[{recording_name}/synced/sda] {target_sensor} (target) ← {tgt_csv.name}")
 
     ref_df = load_stream(ref_csv)
     tgt_df = load_stream(tgt_csv)
@@ -120,13 +120,13 @@ def synchronize_recording_sda(
     shutil.copy2(ref_csv, ref_out)
     write_dataframe(aligned_df, tgt_out)
 
-    print(f"[{recording_name}/synced_sda] {ref_out.name}")
-    print(f"[{recording_name}/synced_sda] {tgt_out.name}")
-    print(f"[{recording_name}/synced_sda] {sync_json_path.name}")
+    print(f"[{recording_name}/synced/sda] {ref_out.name}")
+    print(f"[{recording_name}/synced/sda] {tgt_out.name}")
+    print(f"[{recording_name}/synced/sda] {sync_json_path.name}")
 
     if plot:
         from visualization import plot_comparison
-        stage_ref = f"{recording_name}/synced_sda"
+        stage_ref = f"{recording_name}/synced/sda"
         try:
             plot_comparison.main([stage_ref])
             plot_comparison.main([stage_ref, "--norm"])
@@ -141,7 +141,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         prog="python -m sync.sda_sync",
         description=(
             "Synchronize two IMU streams using SDA offset-only alignment. "
-            "No drift correction is applied. Writes to synced_sda/."
+            "No drift correction is applied. Writes to synced/sda/."
         ),
     )
     parser.add_argument(

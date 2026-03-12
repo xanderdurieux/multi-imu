@@ -5,32 +5,46 @@ CSVs.  All relative-orientation metrics use **quaternion algebra** — not
 Euler-angle subtraction — so the result is geometrically exact and free
 from representation singularities.
 
+Sensor axis conventions (recording 2)
+--------------------------------------
+These conventions are fixed by the physical sensor mounting:
+
+* **Sporsa** (handlebar):  X → Front,  Y → Left,  Z → Down
+* **Arduino** (helmet):    Y → Front,  X → Right, Z → Down
+
+When both sensors are placed with the handlebar they are rotated 90° around
+the Down (Z) axis relative to each other.  This **mounting rotation** is:
+
+    q_mount = +90° around Z  →  [w=1/√2, x=0, y=0, z=1/√2]
+
+It is used analytically to define the "zero reference" for relative
+orientation.  0° in all relative-orientation panels means the two sensors
+are in the physically expected co-aligned pose.
+
 Figures
 -------
 orientation_sync.png
     Both sensors' accelerometer norm overlaid on a shared time axis.
-    Identical peaks → the sensors moved together (expected during
-    aligned calibration shakes or co-aligned cycling).
+    Identical peaks → the sensors moved together (expected during aligned
+    calibration shakes or co-aligned cycling).  Protocol phases are shaded.
 
 orientation_relative_quat.png
-    Proper quaternion relative orientation: q_rel = q_sporsa⁻¹ ⊗ q_arduino.
-    Three panels:
-      1. Angular distance from the initial relative pose (scalar, deg).
-         0 → both sensors in the same relative orientation as at t=0.
-         Rising value → the two sensors have diverged from their initial
-         relative pose (e.g. head turns, helmet removed).
-      2. Tilt components (ΔPitch, ΔRoll) of q_change — the rotation that
-         describes how the *change* in relative orientation is distributed.
-         These are observable from the accelerometer and meaningful even
-         without a magnetometer.
-      3. ΔYaw from q_change — interpretable as independent heading drift
-         plus any deliberate head rotation.  Annotated as "unreliable
-         without magnetometer" to manage expectations.
+    Quaternion relative orientation corrected for the known mounting offset:
 
-orientation_acc_world_compare.png
-    World-frame az component for both sensors overlaid.
-    At rest both should track +9.81 m/s²; any systematic offset reveals
-    a calibration or orientation error.
+        q_rel(t)    = q_sporsa(t)⁻¹ ⊗ q_arduino(t)
+        q_change(t) = q_mount⁻¹ ⊗ q_rel(t)
+
+    Four panels:
+      1. Angular distance from the analytically co-aligned pose (°).
+         0° = sensors in the expected co-aligned pose (matching handlebar).
+      2. ΔPitch  — head nodding (most reliable, acc-observable).
+      3. ΔRoll   — head tilting left/right (reliable, acc-observable).
+      4. ΔYaw    — head turning left/right (unreliable without magnetometer).
+    Protocol phases are shaded.
+
+orientation_az_compare.png
+    World-frame az (Up) component for both sensors overlaid.
+    At rest both should track +9.81 m/s².
 
 Usage
 -----
@@ -52,10 +66,30 @@ from common import load_dataframe, recording_stage_dir
 
 log = logging.getLogger(__name__)
 
-_SENSORS   = ("sporsa", "arduino")
-_COLORS    = {"sporsa": "#e05c44", "arduino": "#4c9be8"}
-_LABELS    = {"sporsa": "Sporsa (handlebar)", "arduino": "Arduino (helmet)"}
-_GRAVITY   = 9.81
+_SENSORS = ("sporsa", "arduino")
+_COLORS  = {"sporsa": "#e05c44", "arduino": "#4c9be8"}
+_LABELS  = {"sporsa": "Sporsa (handlebar)", "arduino": "Arduino (helmet)"}
+_GRAVITY = 9.81
+
+# ---------------------------------------------------------------------------
+# Mounting rotation
+# ---------------------------------------------------------------------------
+# Sporsa : X=Front, Y=Left,  Z=Down
+# Arduino: Y=Front, X=Right, Z=Down
+#
+# Express Arduino axes in Sporsa frame:
+#   Arduino-Front (Y_a) = Sporsa-Front (X_s) → Y_a maps to X_s
+#   Arduino-Right (X_a) = Sporsa-Right (-Y_s) → X_a maps to -Y_s
+#   Arduino-Down  (Z_a) = Sporsa-Down  (Z_s)  → Z_a maps to Z_s
+#
+# The rotation R (Sporsa body → Arduino body) is a +90° rotation around Z:
+#   R * [1,0,0] = [0,1,0]   (X_s → Y_a)
+#   R * [0,1,0] = [-1,0,0]  (Y_s → -X_a = left → -right ✓)
+#   R * [0,0,1] = [0,0,1]   (Z_s → Z_a)
+#
+# As quaternion: +90° around Z → [w=1/√2, x=0, y=0, z=1/√2]
+_SQRT2_INV = 1.0 / np.sqrt(2.0)
+_MOUNTING_QUAT = np.array([[_SQRT2_INV, 0.0, 0.0, _SQRT2_INV]])  # shape (1,4)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +154,97 @@ def _unwrap_deg(a: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Protocol phase detection
+# ---------------------------------------------------------------------------
+
+def _detect_shake_clusters(
+    t: np.ndarray,
+    norm: np.ndarray,
+    shake_threshold: float = 18.0,
+    cluster_gap_s: float = 3.0,
+) -> list[tuple[float, float]]:
+    """Return the time intervals of each shake cluster.
+
+    A "shake cluster" is a contiguous group of samples where acc_norm exceeds
+    *shake_threshold*, with gaps < *cluster_gap_s* merged together.
+
+    Returns a list of ``(t_start, t_end)`` tuples, one per cluster.
+    """
+    above = np.isfinite(norm) & (norm > shake_threshold)
+    if not above.any():
+        return []
+
+    # Build contiguous on-segments
+    changes = np.diff(above.astype(int), prepend=0, append=0)
+    starts = np.where(changes == 1)[0]
+    ends   = np.where(changes == -1)[0]
+
+    segments: list[tuple[float, float]] = [
+        (float(t[s]), float(t[min(e, len(t)-1)]))
+        for s, e in zip(starts, ends)
+    ]
+
+    # Merge segments within cluster_gap_s of each other
+    if not segments:
+        return []
+    merged: list[tuple[float, float]] = [segments[0]]
+    for s, e in segments[1:]:
+        if s - merged[-1][1] < cluster_gap_s:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+
+    return merged
+
+
+def _protocol_phases(
+    t: np.ndarray,
+    norm: np.ndarray,
+) -> dict:
+    """Infer recording phases from acc_norm.
+
+    Returns a dict with keys:
+    - ``pre_align``:  (t_start, t_end) of first shake cluster ± buffer
+    - ``post_align``: (t_start, t_end) of last shake cluster ± buffer
+    - ``ride``:       (t_start, t_end) between the two clusters
+    - ``clusters``:   list of all detected shake cluster intervals
+    """
+    clusters = _detect_shake_clusters(t, norm)
+    buf = 6.0   # seconds of padding around each shake cluster
+
+    if len(clusters) < 2:
+        return {"pre_align": None, "post_align": None, "ride": None,
+                "clusters": clusters}
+
+    pre_t0  = max(t[0], clusters[0][0] - buf)
+    pre_t1  = min(t[-1], clusters[0][1] + buf)
+    post_t0 = max(t[0], clusters[-1][0] - buf)
+    post_t1 = min(t[-1], clusters[-1][1] + buf)
+    ride_t0 = clusters[0][1]
+    ride_t1 = clusters[-1][0]
+
+    return {
+        "pre_align":  (pre_t0,  pre_t1),
+        "post_align": (post_t0, post_t1),
+        "ride":       (ride_t0, ride_t1) if ride_t1 > ride_t0 else None,
+        "clusters":   clusters,
+    }
+
+
+def _shade_phases(ax, phases: dict, t_max: float) -> None:
+    """Add protocol phase shading and legend patches to *ax*."""
+    if phases["pre_align"] is not None:
+        t0, t1 = phases["pre_align"]
+        ax.axvspan(t0, t1, color="#2ecc71", alpha=0.12, zorder=0)
+    if phases["post_align"] is not None:
+        t0, t1 = phases["post_align"]
+        ax.axvspan(t0, t1, color="#2ecc71", alpha=0.12, zorder=0)
+    if phases["ride"] is not None:
+        t0, t1 = phases["ride"]
+        ax.axvspan(t0, t1, color="#3498db", alpha=0.07, zorder=0)
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -132,6 +257,17 @@ def _load(csv_path: Path):
 
 
 def _find_csv(stage_dir: Path, sensor: str) -> Path | None:
+    """Return the best orientation CSV for *sensor* in *stage_dir*.
+
+    Prefers ``complementary/<sensor>_orientation.csv`` (new per-method layout),
+    then falls back to legacy flat naming patterns.
+    """
+    # New per-method layout: prefer complementary, fall back to any method.
+    for method in ("complementary", "madgwick"):
+        candidate = stage_dir / method / f"{sensor}_orientation.csv"
+        if candidate.exists():
+            return candidate
+    # Legacy flat layout
     for pat in (f"{sensor}*__complementary_orientation.csv",
                 f"{sensor}*_orientation.csv"):
         hits = sorted(stage_dir.glob(pat))
@@ -140,10 +276,15 @@ def _find_csv(stage_dir: Path, sensor: str) -> Path | None:
     return None
 
 
-def _get_quats_and_time(df, time_s) -> tuple[np.ndarray, np.ndarray]:
-    q = df[["qw","qx","qy","qz"]].to_numpy(dtype=float)
-    finite = np.all(np.isfinite(q), axis=1)
-    return _qnorm(q), time_s, finite
+# ---------------------------------------------------------------------------
+# Phase legend helper
+# ---------------------------------------------------------------------------
+
+def _phase_legend_patches() -> list:
+    return [
+        mpatches.Patch(facecolor="#2ecc71", alpha=0.35, label="Alignment (helmet off, aligned with handlebar)"),
+        mpatches.Patch(facecolor="#3498db", alpha=0.25, label="Bike ride (helmet on)"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +295,7 @@ def plot_sync(
     recording_name: str,
     stage: str = "orientation",
 ) -> Path | None:
-    """Overlay both sensors' acc_body norm — shared peaks confirm synchronisation."""
+    """Overlay both sensors' acc_body norm with protocol phase shading."""
     stage_dir = recording_stage_dir(recording_name, stage)
     data = {}
     for sensor in _SENSORS:
@@ -167,7 +308,7 @@ def plot_sync(
         acc_cols = ["ax","ay","az"]
         if not all(c in df.columns for c in acc_cols):
             continue
-        acc = df[acc_cols].to_numpy(dtype=float)
+        acc  = df[acc_cols].to_numpy(dtype=float)
         norm = np.linalg.norm(acc, axis=1)
         data[sensor] = (t, norm)
 
@@ -175,11 +316,13 @@ def plot_sync(
         log.warning("[%s] need both sensors — skipping sync plot.", recording_name)
         return None
 
+    # Infer phases from Sporsa (handlebar) acc_norm
+    phases = _protocol_phases(*data["sporsa"]) if "sporsa" in data else {}
+
     fig, axes = plt.subplots(3, 1, figsize=(14, 9),
                              gridspec_kw={"height_ratios": [3, 1, 1]},
                              constrained_layout=True)
 
-    # Main overlay panel
     ax_main = axes[0]
     for sensor, (t, norm) in data.items():
         fin = np.isfinite(norm)
@@ -187,13 +330,17 @@ def plot_sync(
                      alpha=0.8, label=_LABELS[sensor])
     ax_main.axhline(_GRAVITY, color="k", linestyle="--", linewidth=0.8,
                     alpha=0.5, label=f"|g| = {_GRAVITY}")
+    _shade_phases(ax_main, phases, max(v[0][-1] for v in data.values()))
     ax_main.set_ylabel("‖acc_body‖ [m/s²]", fontsize=9)
-    ax_main.set_ylim(0, min(60, max(
-        max(np.nanmax(v[1]) for v in data.values()), 15)))
+    ax_main.set_ylim(0, min(60, max(max(np.nanmax(v[1]) for v in data.values()), 15)))
     ax_main.grid(True, alpha=0.25)
-    ax_main.legend(fontsize=9, loc="upper right")
+    legend_handles = [
+        plt.Line2D([], [], color=_COLORS[s], label=_LABELS[s]) for s in data
+    ] + [
+        plt.Line2D([], [], color="k", linestyle="--", label=f"|g| = {_GRAVITY}")
+    ] + _phase_legend_patches()
+    ax_main.legend(handles=legend_handles, fontsize=8, loc="upper right")
 
-    # Separate per-sensor panels (clipped to show detail)
     for ax, sensor in zip(axes[1:], _SENSORS):
         if sensor not in data:
             ax.set_visible(False)
@@ -202,6 +349,7 @@ def plot_sync(
         fin = np.isfinite(norm)
         ax.plot(t[fin], norm[fin], color=_COLORS[sensor], linewidth=0.6, alpha=0.8)
         ax.axhline(_GRAVITY, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
+        _shade_phases(ax, phases, t[-1])
         ax.set_ylabel(_LABELS[sensor].split()[0], fontsize=8)
         ax.set_ylim(0, 50)
         ax.grid(True, alpha=0.2)
@@ -209,7 +357,9 @@ def plot_sync(
     axes[-1].set_xlabel("Time [s]", fontsize=9)
     fig.suptitle(
         f"{recording_name} / {stage}\n"
-        "Acc-norm synchronisation — matching peaks = sensors moved together",
+        "Acc-norm synchronisation — matching peaks = sensors moved together\n"
+        "Green = alignment periods (helmet off, co-aligned with handlebar)  "
+        "| Blue = bike ride",
         fontsize=10,
     )
 
@@ -228,22 +378,24 @@ def plot_relative_quat(
     recording_name: str,
     stage: str = "orientation",
 ) -> Path | None:
-    """Quaternion-based relative orientation (arduino relative to sporsa).
+    """Quaternion-based relative orientation using the analytic mounting offset.
 
-    q_rel(t) = q_sporsa(t)⁻¹ ⊗ q_arduino(t)
+    The relative orientation is:
+        q_rel(t) = q_sporsa(t)⁻¹ ⊗ q_arduino(t)
 
-    All angles represent the rotation that takes the Sporsa body frame into
-    the Arduino body frame.  When both sensors move together (head aligned
-    with handlebar), q_rel should stay constant.
+    To express head rotation relative to handlebar in physically meaningful
+    angles the known mounting rotation is removed analytically:
+        q_change(t) = q_mount⁻¹ ⊗ q_rel(t)
 
-    To remove the static mounting offset, q_change(t) = q_rel_0⁻¹ ⊗ q_rel(t)
-    is shown in the lower panels, where q_rel_0 is the mean relative
-    quaternion computed over the first BASELINE_S seconds.
+    where q_mount = +90° around Z encodes the known axis difference between
+    the two sensors (Sporsa X=Front vs Arduino Y=Front).
+
+    0° in all panels means the sensors are in the expected co-aligned pose
+    (both aligned with the handlebar).  Any deviation during the bike ride
+    represents actual head rotation relative to the handlebar.
     """
-    BASELINE_S = 5.0   # seconds used to estimate the initial relative pose
-
     stage_dir = recording_stage_dir(recording_name, stage)
-    dfs = {}
+    dfs: dict[str, tuple] = {}
     for sensor in _SENSORS:
         p = _find_csv(stage_dir, sensor)
         if p is None:
@@ -260,98 +412,103 @@ def plot_relative_quat(
     df_s, t_s = dfs["sporsa"]
     df_a, t_a = dfs["arduino"]
 
-    q_s = _qnorm(df_s[["qw","qx","qy","qz"]].to_numpy(dtype=float))
+    q_s     = _qnorm(df_s[["qw","qx","qy","qz"]].to_numpy(dtype=float))
     q_a_raw = df_a[["qw","qx","qy","qz"]].to_numpy(dtype=float)
 
-    # Resample arduino quaternions to sporsa time grid
-    t_s_arr = t_s
-    t_a_arr = t_a
-
-    # For each component, interpolate arduino onto sporsa time axis
-    overlap_min = max(t_s_arr[0], t_a_arr[0])
-    overlap_max = min(t_s_arr[-1], t_a_arr[-1])
-    mask_s = (t_s_arr >= overlap_min) & (t_s_arr <= overlap_max)
-    mask_a = (t_a_arr >= overlap_min) & (t_a_arr <= overlap_max)
+    # Find overlapping time window
+    overlap_min = max(t_s[0], t_a[0])
+    overlap_max = min(t_s[-1], t_a[-1])
+    mask_s = (t_s >= overlap_min) & (t_s <= overlap_max)
+    mask_a = (t_a >= overlap_min) & (t_a <= overlap_max)
 
     if mask_s.sum() < 10 or mask_a.sum() < 10:
-        log.warning("[%s] insufficient overlap — skipping.", recording_name)
+        log.warning("[%s] insufficient time overlap — skipping.", recording_name)
         return None
 
+    # Resample arduino onto sporsa time grid via linear interpolation per component
     q_a_interp = np.zeros((mask_s.sum(), 4))
     for i in range(4):
         q_a_interp[:, i] = np.interp(
-            t_s_arr[mask_s], t_a_arr[mask_a], q_a_raw[mask_a, i]
+            t_s[mask_s], t_a[mask_a], q_a_raw[mask_a, i]
         )
     q_a_interp = _qnorm(q_a_interp)
     q_s_sub    = q_s[mask_s]
-    t_ref      = t_s_arr[mask_s]
+    t_ref      = t_s[mask_s]
 
-    # Relative quaternion: how does arduino differ from sporsa?
+    # Relative quaternion: arduino relative to sporsa in sporsa's world frame
     q_rel = _qnorm(_qmul(_qconj(q_s_sub), q_a_interp))
 
-    # Baseline: mean q_rel over first BASELINE_S seconds
-    baseline_mask = t_ref <= (t_ref[0] + BASELINE_S)
-    if baseline_mask.sum() < 2:
-        baseline_mask[:5] = True
-    q_rel_0 = _qnorm(np.nanmean(q_rel[baseline_mask], axis=0, keepdims=True))
+    # Remove analytic mounting rotation (Sporsa X=Front, Y=Left, Z=Down vs
+    # Arduino Y=Front, X=Right, Z=Down → +90° around Z)
+    q_change = _qnorm(_qmul(_qconj(_MOUNTING_QUAT), q_rel))
 
-    # Change relative to baseline
-    q_change = _qnorm(_qmul(_qconj(q_rel_0), q_rel))
-
-    # Angular distance from baseline (scalar, deg) — 0 = same relative pose as start
+    # Angular distance from perfectly co-aligned pose (scalar, degrees)
     ang_dist = 2.0 * np.degrees(np.arccos(np.clip(np.abs(q_change[:, 0]), 0, 1)))
 
-    # Directional decomposition of q_change
+    # Directional decomposition
     yaw_ch, pitch_ch, roll_ch = _euler_from_quat(q_change)
     yaw_ch   = _unwrap_deg(yaw_ch)
     pitch_ch = _unwrap_deg(pitch_ch)
     roll_ch  = _unwrap_deg(roll_ch)
 
+    # Protocol phases from sporsa acc_norm
+    acc_s    = df_s[["ax","ay","az"]].to_numpy(dtype=float)
+    norm_s   = np.linalg.norm(acc_s, axis=1)
+    phases   = _protocol_phases(t_s, norm_s)
+
     # --- Plot ---
-    fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True,
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True,
                              constrained_layout=True)
+
+    def _shade_and_zero(ax):
+        ax.axhline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.4)
+        _shade_phases(ax, phases, t_ref[-1])
+        ax.grid(True, alpha=0.25)
 
     # Panel 1: angular distance
     ax = axes[0]
     ax.fill_between(t_ref, ang_dist, alpha=0.25, color="#555")
     ax.plot(t_ref, ang_dist, color="#333", linewidth=0.7)
-    ax.axhline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.4)
-    ax.set_ylabel("Angular distance\nfrom baseline [°]", fontsize=9)
-    ax.grid(True, alpha=0.25)
-    _annotate_expected(ax, t_ref[-1])
+    _shade_and_zero(ax)
+    ax.set_ylabel("Angular distance [°]", fontsize=9)
+    ax.text(0.01, 0.95,
+            "0° = sensors perfectly co-aligned with handlebar  "
+            "| rises when head and handlebar diverge",
+            transform=ax.transAxes, fontsize=7.5, color="#444",
+            va="top")
 
-    # Panel 2: ΔPitch
+    # Panel 2: ΔPitch (nodding)
     ax = axes[1]
     ax.plot(t_ref, pitch_ch, color="#e67e22", linewidth=0.7)
-    ax.axhline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.4)
-    ax.set_ylabel("ΔPitch change [°]", fontsize=9)
-    ax.grid(True, alpha=0.25)
+    _shade_and_zero(ax)
+    ax.set_ylabel("ΔPitch [°]\n(head nod up/down)", fontsize=9)
 
-    # Panel 3: ΔRoll
+    # Panel 3: ΔRoll (tilting)
     ax = axes[2]
     ax.plot(t_ref, roll_ch, color="#27ae60", linewidth=0.7)
-    ax.axhline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.4)
-    ax.set_ylabel("ΔRoll change [°]", fontsize=9)
-    ax.grid(True, alpha=0.25)
+    _shade_and_zero(ax)
+    ax.set_ylabel("ΔRoll [°]\n(head tilt left/right)", fontsize=9)
 
-    # Panel 4: ΔYaw (with drift warning)
+    # Panel 4: ΔYaw (turning)
     ax = axes[3]
     ax.plot(t_ref, yaw_ch, color="#8e44ad", linewidth=0.7)
-    ax.axhline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.4)
-    ax.set_ylabel("ΔYaw change [°]", fontsize=9)
+    _shade_and_zero(ax)
+    ax.set_ylabel("ΔYaw [°]\n(head turn left/right)", fontsize=9)
     ax.text(0.98, 0.05, "Yaw drifts without\nmagnetometer",
             transform=ax.transAxes, fontsize=8, color="#8e44ad",
             ha="right", va="bottom",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                       edgecolor="#8e44ad", alpha=0.7))
-    ax.grid(True, alpha=0.25)
     ax.set_xlabel("Time [s]", fontsize=9)
+
+    phase_patches = _phase_legend_patches()
+    fig.legend(handles=phase_patches, loc="upper right", fontsize=8,
+               framealpha=0.85, bbox_to_anchor=(0.99, 0.99))
 
     fig.suptitle(
         f"{recording_name} / {stage}\n"
-        "Quaternion relative orientation change from baseline  "
-        "(arduino − sporsa frame, offset removed)\n"
-        "0° = sensors in same relative pose as at recording start",
+        "Head orientation relative to handlebar  (analytic mounting offset removed)\n"
+        "Sporsa: X=Front, Y=Left, Z=Down  |  Arduino: Y=Front, X=Right, Z=Down",
         fontsize=10,
     )
 
@@ -370,13 +527,10 @@ def plot_az_world_compare(
     recording_name: str,
     stage: str = "orientation",
 ) -> Path | None:
-    """Both sensors' world-frame az (Up) component overlaid.
-
-    At rest: should both track +9.81 m/s².  Any systematic vertical offset
-    between the two traces reveals a calibration or orientation error.
-    """
+    """Both sensors' world-frame az (Up) component overlaid with phase shading."""
     stage_dir = recording_stage_dir(recording_name, stage)
     data = {}
+    acc_norms = {}
     for sensor in _SENSORS:
         p = _find_csv(stage_dir, sensor)
         if p is None:
@@ -387,20 +541,22 @@ def plot_az_world_compare(
         qcols = ["qw","qx","qy","qz"]; acols = ["ax","ay","az"]
         if not all(c in df.columns for c in qcols + acols):
             continue
-        q   = _qnorm(df[qcols].to_numpy(dtype=float))
-        acc = df[acols].to_numpy(dtype=float)
-        aw  = _rotate_vecs(q, acc)
-        data[sensor] = (t, aw[:, 2])   # az_world
+        q    = _qnorm(df[qcols].to_numpy(dtype=float))
+        acc  = df[acols].to_numpy(dtype=float)
+        aw   = _rotate_vecs(q, acc)
+        data[sensor]      = (t, aw[:, 2])
+        acc_norms[sensor] = (t, np.linalg.norm(acc, axis=1))
 
     if len(data) < 2:
         log.warning("[%s] need both sensors — skipping az compare.", recording_name)
         return None
 
+    phases = _protocol_phases(*acc_norms["sporsa"]) if "sporsa" in acc_norms else {}
+
     fig, axes = plt.subplots(3, 1, figsize=(14, 9),
                              gridspec_kw={"height_ratios": [3, 1, 1]},
                              constrained_layout=True)
 
-    # Overlay
     ax = axes[0]
     for sensor, (t, az) in data.items():
         fin = np.isfinite(az)
@@ -413,35 +569,38 @@ def plot_az_world_compare(
         _GRAVITY * 0.9, _GRAVITY * 1.1,
         color="k", alpha=0.06, label="±10 %",
     )
+    _shade_phases(ax, phases, max(v[0][-1] for v in data.values()))
     ax.set_ylabel("az_world [m/s²]", fontsize=9)
     ax.set_ylim(-30, 50)
     ax.grid(True, alpha=0.25)
-    ax.legend(fontsize=9, loc="upper right")
+    handles = [
+        plt.Line2D([], [], color=_COLORS[s], label=_LABELS[s]) for s in data
+    ] + [
+        plt.Line2D([], [], color="k", linestyle="--", label=f"+g = {_GRAVITY}"),
+        mpatches.Patch(facecolor="k", alpha=0.15, label="±10 %"),
+    ] + _phase_legend_patches()
+    ax.legend(handles=handles, fontsize=8, loc="upper right")
 
     # Difference panel
     s_t, s_az = data.get("sporsa", (None, None))
     a_t, a_az = data.get("arduino", (None, None))
     if s_t is not None and a_t is not None:
-        t_common = s_t
-        a_interp = np.interp(t_common, a_t[np.isfinite(a_az)],
-                             a_az[np.isfinite(a_az)])
+        a_interp = np.interp(s_t, a_t[np.isfinite(a_az)], a_az[np.isfinite(a_az)])
         diff = a_interp - s_az
-        axes[1].plot(t_common, diff, color="#555", linewidth=0.6)
+        axes[1].plot(s_t, diff, color="#555", linewidth=0.6)
         axes[1].axhline(0, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
+        _shade_phases(axes[1], phases, s_t[-1])
         axes[1].set_ylabel("Arduino − Sporsa\n[m/s²]", fontsize=8)
         axes[1].set_ylim(-20, 20)
         axes[1].grid(True, alpha=0.2)
 
-    # Acc-norm overlay
-    for sensor, (t, _) in data.items():
-        p = _find_csv(stage_dir, sensor)
-        df, _ = _load(p)
-        acc = df[["ax","ay","az"]].to_numpy(dtype=float)
-        norm = np.linalg.norm(acc, axis=1)
+    # Acc-norm panel
+    for sensor, (t, norm) in acc_norms.items():
         fin = np.isfinite(norm)
         axes[2].plot(t[fin], norm[fin], color=_COLORS[sensor],
                      linewidth=0.5, alpha=0.7, label=_LABELS[sensor])
     axes[2].axhline(_GRAVITY, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
+    _shade_phases(axes[2], phases, max(v[0][-1] for v in acc_norms.values()))
     axes[2].set_ylabel("‖acc_body‖ [m/s²]", fontsize=8)
     axes[2].set_ylim(0, 50)
     axes[2].grid(True, alpha=0.2)
@@ -451,7 +610,7 @@ def plot_az_world_compare(
     fig.suptitle(
         f"{recording_name} / {stage}\n"
         "World-frame az comparison — both should track +9.81 m/s² at rest\n"
-        "Middle panel: Arduino − Sporsa az_world (should be ≈0 at rest)",
+        "Middle panel: Arduino − Sporsa az_world (should be ≈ 0 at rest)",
         fontsize=10,
     )
 
@@ -460,18 +619,6 @@ def plot_az_world_compare(
     plt.close(fig)
     print(f"[{recording_name}/{stage}] {out.name}")
     return out
-
-
-# ---------------------------------------------------------------------------
-# Annotation helper
-# ---------------------------------------------------------------------------
-
-def _annotate_expected(ax, t_max: float) -> None:
-    """Add a subtle 'expected: near 0° when aligned' annotation."""
-    ax.text(0.01, 0.96,
-            "≈ 0° when sensors co-aligned  |  rises when head/handlebar diverge",
-            transform=ax.transAxes, fontsize=7.5, color="#666",
-            va="top", ha="left")
 
 
 # ---------------------------------------------------------------------------

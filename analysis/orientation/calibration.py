@@ -1,150 +1,113 @@
-"""Lightweight bias calibration for use inside orientation filters.
+"""Bridge between calibration/ outputs and orientation/ filters.
 
-This module provides simple, field-deployable helpers to estimate **constant
-accelerometer and gyroscope bias** from short static segments. The resulting
-``BiasCalibration`` objects are used by the orientation pipelines
-(:mod:`orientation.pipeline`, :mod:`orientation.session`) to optionally
-de-bias IMU streams before running complementary or Madgwick filters.
+This module loads the static calibration parameters produced by
+:mod:`calibration.session` (gyro bias and sensor-to-world rotation) and
+applies them to raw body-frame IMU DataFrames before running orientation
+filters.
 
-For full sensor calibration and world-frame alignment (including gravity
-vector, magnetometer hard-iron offset, and sensor-to-world rotation), see
-``calibration.per_sensor`` and the recording-level pipeline in
-``calibration.session``.
+The orientation filters (:mod:`orientation.complementary`,
+:mod:`orientation.madgwick`) require **body-frame** sensor data and an
+optional initial orientation quaternion.  Two things are needed from the
+upstream calibration:
+
+1. **Gyro bias** — subtract from ``gx/gy/gz`` before integration so the
+   filter does not accumulate a constant angular velocity offset.
+2. **Initial orientation** — the static sensor-to-world rotation estimated
+   during the calibration sequence, used to seed the filter with the correct
+   starting pose rather than identity.
+
+Both are read from ``calibrated/calibration.json`` produced by
+:func:`calibration.session.calibrate_recording`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Tuple
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-
-@dataclass
-class BiasCalibration:
-    """Constant sensor bias for accelerometer and gyroscope (sensor/body frame)."""
-
-    accel_bias: np.ndarray  # shape (3,)
-    gyro_bias: np.ndarray  # shape (3,)
+from common.paths import recording_stage_dir
+from .quaternion import quat_from_rotation_matrix
 
 
-def _as_array3(x: Iterable[float]) -> np.ndarray:
-    arr = np.asarray(x, dtype=float).reshape(-1)
-    if arr.shape[0] != 3:
-        raise ValueError("Expected 3-vector.")
-    return arr
-
-
-def estimate_gyro_bias_static(gyro_samples_rad: np.ndarray) -> np.ndarray:
-    """Estimate constant gyroscope bias from a static recording.
+def load_calibration_params(
+    recording_name: str,
+    sensor_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load gyro bias and initial orientation from ``calibration.json``.
 
     Parameters
     ----------
-    gyro_samples_rad:
-        Array of shape (N, 3) with angular velocity in rad/s for a period where
-        the sensor is at rest (true angular velocity ≈ 0).
+    recording_name:
+        Recording identifier, e.g. ``"2026-02-26_5"``.
+    sensor_name:
+        Sensor identifier, e.g. ``"sporsa"`` or ``"arduino"``.
+
+    Returns
+    -------
+    gyro_bias:
+        Shape ``(3,)`` gyro zero-rate bias in the same units as the raw CSV
+        ``gx/gy/gz`` columns.  Subtract from raw readings before filtering.
+    initial_q:
+        Shape ``(4,)`` unit quaternion ``[w, x, y, z]`` representing the
+        static sensor-to-world rotation at calibration time.  Use as the
+        filter's starting pose.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``calibrated/calibration.json`` does not exist.  Run
+        :func:`calibration.session.calibrate_recording` first.
+    KeyError
+        If *sensor_name* is not present in ``calibration.json``.
     """
-    if gyro_samples_rad.ndim != 2 or gyro_samples_rad.shape[1] != 3:
-        raise ValueError("gyro_samples_rad must have shape (N, 3).")
-    return np.nanmean(gyro_samples_rad, axis=0)
+    cal_path = recording_stage_dir(recording_name, "calibrated") / "calibration.json"
+    if not cal_path.exists():
+        raise FileNotFoundError(
+            f"calibration.json not found at {cal_path}. "
+            "Run calibration.session first: "
+            f"python -m calibration.session {recording_name}"
+        )
+
+    cal = json.loads(cal_path.read_text(encoding="utf-8"))
+
+    if sensor_name not in cal:
+        available = [k for k in cal if k != "metadata"]
+        raise KeyError(
+            f"Sensor '{sensor_name}' not found in {cal_path}. "
+            f"Available sensors: {available}"
+        )
+
+    sensor_cal = cal[sensor_name]
+    gyro_bias = np.array(sensor_cal["gyro_bias_deg_per_s"], dtype=float)
+    R = np.array(sensor_cal["rotation_sensor_to_world"], dtype=float)
+    initial_q = quat_from_rotation_matrix(R)
+
+    return gyro_bias, initial_q
 
 
-def estimate_acc_bias_static(
-    acc_samples_ms2: np.ndarray,
-    expected_gravity_body: Iterable[float] | None = None,
-) -> np.ndarray:
-    """Estimate constant accelerometer bias from a static pose.
-
-    Parameters
-    ----------
-    acc_samples_ms2:
-        Array of shape (N, 3) with specific force readings in m/s^2 during a
-        static period (only gravity is present, no linear acceleration).
-    expected_gravity_body:
-        Expected gravity vector in the *sensor/body* frame for this pose
-        (default assumes sensor z-axis aligned with world -Z, i.e. device lying
-        flat with z up: ``[0, 0, -9.81]``).
-
-    Notes
-    -----
-    - In a more sophisticated multi-pose calibration you would solve for scale
-      and axis misalignment as well (e.g. Tedaldi et al. 2014). Here we restrict
-      ourselves to a constant bias vector, which is usually the dominant term.
-    """
-    if expected_gravity_body is None:
-        expected_gravity_body = np.array([0.0, 0.0, -9.81], dtype=float)
-    g_body = _as_array3(expected_gravity_body)
-
-    if acc_samples_ms2.ndim != 2 or acc_samples_ms2.shape[1] != 3:
-        raise ValueError("acc_samples_ms2 must have shape (N, 3).")
-
-    mean_measured = np.nanmean(acc_samples_ms2, axis=0)
-    return mean_measured - g_body
-
-
-def apply_calibration_bias(
+def apply_gyro_bias(
     df: pd.DataFrame,
-    accel_bias: Iterable[float] | None = None,
-    gyro_bias: Iterable[float] | None = None,
-    inplace: bool = False,
+    gyro_bias: np.ndarray,
 ) -> pd.DataFrame:
-    """Apply constant bias correction to accelerometer and gyroscope columns.
+    """Subtract gyroscope bias from ``gx/gy/gz`` columns.
 
     Parameters
     ----------
     df:
-        DataFrame with columns ``ax, ay, az, gx, gy, gz`` (as produced by the
-        existing parsers).
-    accel_bias, gyro_bias:
-        3-vectors in sensor/body frame. If ``None``, the corresponding sensor
-        is left unchanged.
-    inplace:
-        If ``True``, modify ``df`` in-place and return it. Otherwise work on a
-        copy.
+        IMU DataFrame with ``gx``, ``gy``, ``gz`` columns.
+    gyro_bias:
+        Shape ``(3,)`` bias in the same units as the gyro columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of *df* with gyro bias subtracted.
     """
-    if not inplace:
-        df = df.copy()
-
-    if accel_bias is not None:
-        b = _as_array3(accel_bias)
-        for col, val in zip(["ax", "ay", "az"], b):
-            if col in df.columns:
-                df[col] = df[col] - val
-
-    if gyro_bias is not None:
-        b = _as_array3(gyro_bias)
-        for col, val in zip(["gx", "gy", "gz"], b):
-            if col in df.columns:
-                df[col] = df[col] - val
-
-    return df
-
-
-def estimate_bias_from_dataframe_static_segment(
-    df: pd.DataFrame,
-    start_time: float,
-    end_time: float,
-    expected_gravity_body: Iterable[float] | None = None,
-) -> BiasCalibration:
-    """Convenience wrapper: estimate biases from a static segment in a session.
-
-    Parameters
-    ----------
-    df:
-        IMU DataFrame with columns ``timestamp, ax, ay, az, gx, gy, gz``.
-    start_time, end_time:
-        Timestamps defining a static interval in the same units as ``df["timestamp"]``.
-    expected_gravity_body:
-        Expected gravity vector for this pose in body frame (see
-        :func:`estimate_acc_bias_static`).
-    """
-    mask = (df["timestamp"] >= start_time) & (df["timestamp"] <= end_time)
-    segment = df.loc[mask]
-    acc = segment[["ax", "ay", "az"]].to_numpy()
-    gyro = segment[["gx", "gy", "gz"]].to_numpy()
-
-    accel_bias = estimate_acc_bias_static(acc, expected_gravity_body=expected_gravity_body)
-    gyro_bias = estimate_gyro_bias_static(gyro)
-    return BiasCalibration(accel_bias=accel_bias, gyro_bias=gyro_bias)
-
+    out = df.copy()
+    for col, bias_val in zip(["gx", "gy", "gz"], gyro_bias):
+        if col in out.columns:
+            out[col] = out[col] - bias_val
+    return out
