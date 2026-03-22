@@ -10,7 +10,6 @@ import json
 
 from common import (
     load_dataframe,
-    recording_dir,
     recording_stage_dir,
     recordings_root,
     session_input_dir,

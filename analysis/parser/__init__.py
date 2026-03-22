@@ -1,10 +1,15 @@
-"""Parsers for raw IMU log files."""
+"""Parsers for raw IMU log files.
 
-from .arduino import parse_arduino_log
-from .sporsa import parse_sporsa_log
-from .session import process_session
-from .stats import compute_recording_stats, write_recording_stats
-from .split_sections import find_calibration_segments, split_recording  # noqa: F401
+This package avoids eager imports so single submodules can still be executed
+even when optional higher-level pipeline modules are unavailable in the current
+checkout.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
 
 __all__ = [
     "parse_arduino_log",
@@ -15,3 +20,28 @@ __all__ = [
     "find_calibration_segments",
     "split_recording",
 ]
+
+
+_ATTR_TO_MODULE = {
+    "parse_arduino_log": (".arduino", "parse_arduino_log"),
+    "parse_sporsa_log": (".sporsa", "parse_sporsa_log"),
+    "process_session": (".session", "process_session"),
+    "compute_recording_stats": (".stats", "compute_recording_stats"),
+    "write_recording_stats": (".stats", "write_recording_stats"),
+    "find_calibration_segments": (".split_sections", "find_calibration_segments"),
+    "split_recording": (".split_sections", "split_recording"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve parser exports lazily so lightweight commands stay usable."""
+
+    try:
+        module_name, attr_name = _ATTR_TO_MODULE[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+
+    module = import_module(module_name, __name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
