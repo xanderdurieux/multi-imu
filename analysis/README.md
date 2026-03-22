@@ -52,13 +52,13 @@ definitions.
 
 - **`sync/`**
   - Four synchronization methods for aligning Sporsa and Arduino IMU streams:
-    - **SDA only** (`sync.sda_sync` → `synced_sda/`): offset-only, no drift.
-    - **SDA + LIDA** (`sync.lida_sync` → `synced_lida/`): offset + drift from windowed refinement.
-    - **Calibration sync** (`sync.calibration_sync` → `synced_cal/`): offset + drift from tap-burst anchors.
-    - **Online sync** (`sync.online_sync` → `synced_online/`): causal single-anchor + pre-characterised drift.
+    - **SDA only** (`sync.sda_sync` → `synced/sda/`): offset-only, no drift.
+    - **SDA + LIDA** (`sync.lida_sync` → `synced/lida/`): offset + drift from windowed refinement.
+    - **Calibration sync** (`sync.calibration_sync` → `synced/cal/`): offset + drift from tap-burst anchors.
+    - **Online sync** (`sync.online_sync` → `synced/online/`): causal single-anchor + pre-characterised drift.
   - Comparison and selection (`sync.selection`) to evaluate all methods and copy the best to `synced/`.
-  - Session-level orchestration (`sync.session`) that runs all methods, selects the best, and prints a summary.
-  - Core algorithm modules: `drift_estimator` (LIDA), `align_df` (SDA), `metrics`, `common`.
+  - Full pipeline entry point: `python -m sync` (`sync.run` + `sync.pipeline`) runs all methods, selects the best, and prints a summary.
+  - Shared primitives live in `sync.core` (streams, SDA alignment, LIDA `SyncModel`, correlation metrics).
   - See [`sync/README.md`](sync/README.md) for full algorithm and API documentation.
 
 - **`visualization/`**
@@ -115,10 +115,10 @@ The analysis code expects the following directory structure relative to
   Within each recording directory, a full thesis run can populate several *stages* (availability depends on which tools you run):
 
   - `parsed/` – normalized per-sensor CSVs and basic plots.
-  - `synced_sda/` – SDA offset-only synchronization (optional).
-  - `synced_lida/` – SDA + LIDA synchronization (optional).
-  - `synced_cal/` – calibration-anchor synchronization (optional).
-  - `synced_online/` – single-anchor online synchronization (optional).
+  - `synced/sda/` – SDA offset-only synchronization (optional).
+  - `synced/lida/` – SDA + LIDA synchronization (optional).
+  - `synced/cal/` – calibration-anchor synchronization (optional).
+  - `synced/online/` – single-anchor online synchronization (optional).
   - `synced/` – best selected method (written by `sync.selection --apply`).
   - `sections/section_N/` – per-section CSVs and plots, bounded by calibration
     events.
@@ -143,7 +143,7 @@ are **not** present here.
 **Typical manual flow in this tree:**
 
 1. `uv run -m parser.session <session_name>`
-2. `uv run -m sync.session <recording_or_session> …` (see Stage 2)
+2. `uv run -m sync <recording_or_session> …` (see Stage 2)
 3. Optional: `uv run -m parser.split_sections …` (Stage 3)
 4. **Static Arduino IMU calibration** (six stationary logs): `uv run python -m static_calibration` (separate from ride recordings; see below)
 
@@ -208,21 +208,21 @@ to pick the best result.
 
 | Method | Module | Output dir | Drift? |
 |---|---|---|---|
-| SDA only | `sync.sda_sync` | `synced_sda/` | No |
-| SDA + LIDA | `sync.lida_sync` | `synced_lida/` | Yes |
-| Calibration anchors | `sync.calibration_sync` | `synced_cal/` | Yes |
-| Online (single anchor) | `sync.online_sync` | `synced_online/` | Pre-characterised |
+| SDA only | `sync.sda_sync` | `synced/sda/` | No |
+| SDA + LIDA | `sync.lida_sync` | `synced/lida/` | Yes |
+| Calibration anchors | `sync.calibration_sync` | `synced/cal/` | Yes |
+| Online (single anchor) | `sync.online_sync` | `synced/online/` | Pre-characterised |
 
 ```bash
 # Run all methods on a single recording + select best
-uv run -m sync.session 2026-02-26_5 --apply --plot
+uv run -m sync 2026-02-26_5 --apply --plot
 
 # Run all methods on an entire session
-uv run -m sync.session 2026-02-26 --all --apply
+uv run -m sync 2026-02-26 --all --apply
 
 # Or run methods individually
-uv run -m sync.calibration_sync 2026-02-26_5/parsed
-uv run -m sync.lida_sync        2026-02-26_5/parsed
+uv run -m sync calibration_sync 2026-02-26_5/parsed
+uv run -m sync lida_sync        2026-02-26_5/parsed
 uv run -m sync.selection        2026-02-26_5 --apply --plot
 ```
 
@@ -387,10 +387,10 @@ flowchart TD
   parsedStage --> syncLIDA["sync.lida_sync"]
   parsedStage --> syncCal["sync.calibration_sync"]
   parsedStage --> syncOnline["sync.online_sync"]
-  syncSDA --> syncedSDA["synced_sda/"]
-  syncLIDA --> syncedLida["synced_lida/"]
-  syncCal --> syncedCal["synced_cal/"]
-  syncOnline --> syncedOnline["synced_online/"]
+  syncSDA --> syncedSDA["synced/sda/"]
+  syncLIDA --> syncedLida["synced/lida/"]
+  syncCal --> syncedCal["synced/cal/"]
+  syncOnline --> syncedOnline["synced/online/"]
   syncedSDA & syncedLida & syncedCal & syncedOnline --> selection["sync.selection"]
   selection --> syncedBest["synced/"]
   syncedBest --> splitSections["parser.split_sections"]
@@ -407,6 +407,6 @@ flowchart TD
 **In this repository:** `parser`, `sync`, `visualization`, and **`static_calibration`**
 (six-pose Arduino calibration, separate from the ride pipeline) are available.
 **Dotted / optional** stages require other packages or branches. The thesis
-workflow typically selects the best sync (often `synced_cal/` when quality
+workflow typically selects the best sync (often `synced/cal/` when quality
 allows), writes `synced/`, then continues with sections and—when those tools
 exist—world calibration, orientation, and features.

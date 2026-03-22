@@ -1,36 +1,14 @@
-"""SDA + LIDA recording-level synchronization.
-
-Method 2 (of 4): estimates clock offset and drift by combining a global
-Signal-Density Alignment (SDA) coarse pass with a Local Instance-based Drift
-Analysis (LIDA) refinement pass that slides a window over the recording.
-
-Reads ``<stage_in>/sporsa.csv`` (reference) and ``<stage_in>/arduino.csv``
-(target), writes aligned outputs to ``synced/lida/``::
-
-    synced/lida/
-        sporsa.csv          ← reference copy
-        arduino.csv         ← target with corrected timestamps
-        sync_info.json      ← fitted offset + drift model
-
-CLI::
-
-    python -m sync.lida_sync <recording_name>/<stage>
-    python -m sync.lida_sync 2026-02-26_5/parsed
-"""
+"""SDA + LIDA recording-level synchronization."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 from pathlib import Path
 
-import pandas as pd
-
 from common import find_sensor_csv, recording_stage_dir, write_dataframe
 
-from .common import load_stream
-from .drift_estimator import (
+from .core import (
     DEFAULT_LOCAL_SEARCH_SECONDS,
     DEFAULT_MIN_FIT_R2,
     DEFAULT_MIN_WINDOW_SCORE,
@@ -38,11 +16,12 @@ from .drift_estimator import (
     DEFAULT_WINDOW_STEP_SECONDS,
     SyncModel,
     apply_sync_model,
+    compute_sync_correlations,
     estimate_sync_model,
+    load_stream,
     resample_aligned_stream,
     save_sync_model,
 )
-from .metrics import compute_sync_correlations
 
 DEFAULT_SAMPLE_RATE_HZ = 100.0
 DEFAULT_MAX_LAG_SECONDS = 60.0
@@ -66,15 +45,7 @@ def synchronize(
     use_mag: bool = False,
     lowpass_cutoff_hz: float | None = None,
 ) -> tuple[Path, Path, Path | None]:
-    """Synchronize target stream to reference stream using SDA + LIDA.
-
-    Applies offset + drift correction to the target's timestamps so they align
-    with the reference clock.  The target CSV is written with corrected timestamps
-    and its original sensor values unchanged.
-
-    Returns:
-      ``(sync_json_path, target_synced_csv_path, optional_uniform_resampled_csv_path)``
-    """
+    """Synchronize target stream to reference stream using SDA + LIDA."""
     ref_path = Path(reference_csv)
     tgt_path = Path(target_csv)
     out_dir = Path(output_dir)
@@ -155,16 +126,7 @@ def synchronize_recording(
     use_mag: bool = False,
     plot: bool = False,
 ) -> tuple[Path, Path, Path]:
-    """Synchronize two sensor streams for one recording using SDA + LIDA.
-
-    Reads CSVs from ``<stage_in>/``, writes clean-named outputs to ``synced/lida/``:
-
-    - ``synced/lida/<reference_sensor>.csv``  — reference copy
-    - ``synced/lida/<target_sensor>.csv``     — target with corrected timestamps
-    - ``synced/lida/sync_info.json``          — offset + drift model
-
-    Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
-    """
+    """Synchronize two sensor streams for one recording using SDA + LIDA."""
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
 
@@ -216,6 +178,7 @@ def synchronize_recording(
 
     if plot:
         from visualization import plot_comparison
+
         stage_ref = f"{recording_name}/synced/lida"
         try:
             plot_comparison.main([stage_ref])
@@ -224,68 +187,3 @@ def synchronize_recording(
             pass
 
     return ref_out, tgt_out, sync_json_out
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m sync.lida_sync",
-        description=(
-            "Synchronize two IMU streams for one recording using SDA + LIDA. "
-            "Default: sporsa as reference, arduino as target."
-        ),
-    )
-    parser.add_argument(
-        "recording_name_stage",
-        help="Recording name and input stage as '<recording_name>/<stage>' (e.g. '2026-02-26_5/parsed').",
-    )
-    parser.add_argument(
-        "--reference-sensor",
-        default="sporsa",
-        help="Sensor name token for the reference stream (default: sporsa).",
-    )
-    parser.add_argument(
-        "--target-sensor",
-        default="arduino",
-        help="Sensor name token for the target stream (default: arduino).",
-    )
-    parser.add_argument(
-        "--max-lag-seconds",
-        type=float,
-        default=DEFAULT_MAX_LAG_SECONDS,
-        help=f"Maximum coarse lag search range in seconds (default: {DEFAULT_MAX_LAG_SECONDS}).",
-    )
-    parser.add_argument(
-        "--sample-rate-hz",
-        type=float,
-        default=DEFAULT_SAMPLE_RATE_HZ,
-        help=f"Resampling rate for alignment signal (default: {DEFAULT_SAMPLE_RATE_HZ}).",
-    )
-    parser.add_argument(
-        "--resample-rate-hz",
-        type=float,
-        default=None,
-        help="If set, also write a uniformly resampled synced target CSV.",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = _build_arg_parser().parse_args(argv)
-    parts = args.recording_name_stage.split("/", 1)
-    if len(parts) != 2:
-        raise SystemExit("recording_name_stage must be '<recording_name>/<stage>'")
-
-    recording_name, stage_in = parts
-    synchronize_recording(
-        recording_name=recording_name,
-        stage_in=stage_in,
-        reference_sensor=args.reference_sensor,
-        target_sensor=args.target_sensor,
-        max_lag_seconds=args.max_lag_seconds,
-        sample_rate_hz=args.sample_rate_hz,
-        resample_rate_hz=args.resample_rate_hz,
-    )
-
-
-if __name__ == "__main__":
-    main()

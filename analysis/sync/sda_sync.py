@@ -1,27 +1,7 @@
-"""SDA-only (offset-only) recording-level synchronization.
-
-Method 1 (of 4): estimates a coarse clock offset using Signal-Density Alignment
-(SDA) across the full recording but applies no drift correction.
-
-The simplest and fastest offline sync method in the pipeline — a useful baseline
-and a fallback when recording duration is too short for reliable drift estimation.
-
-Writes aligned outputs to ``synced/sda/``::
-
-    synced/sda/
-        sporsa.csv          ← reference copy
-        arduino.csv         ← target with offset-corrected timestamps
-        sync_info.json      ← fitted offset model (drift = 0)
-
-CLI::
-
-    python -m sync.sda_sync <recording_name>/<stage>
-    python -m sync.sda_sync 2026-02-26_5/parsed
-"""
+"""SDA-only (offset-only) recording-level synchronization."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 from datetime import UTC, datetime
@@ -29,10 +9,14 @@ from pathlib import Path
 
 from common import find_sensor_csv, recording_stage_dir, write_dataframe
 
-from .align_df import estimate_offset
-from .common import load_stream
-from .drift_estimator import SyncModel, apply_sync_model, save_sync_model
-from .metrics import compute_sync_correlations
+from .core import (
+    SyncModel,
+    apply_sync_model,
+    compute_sync_correlations,
+    estimate_offset,
+    load_stream,
+    save_sync_model,
+)
 
 DEFAULT_SAMPLE_RATE_HZ = 100.0
 DEFAULT_MAX_LAG_SECONDS = 60.0
@@ -51,16 +35,7 @@ def synchronize_recording_sda(
     use_mag: bool = False,
     plot: bool = False,
 ) -> tuple[Path, Path, Path]:
-    """Synchronize two sensor streams using SDA (offset-only, no drift correction).
-
-    Reads CSVs from ``<stage_in>/``, writes clean-named outputs to ``synced/sda/``:
-
-    - ``synced/sda/<reference_sensor>.csv``  — reference copy
-    - ``synced/sda/<target_sensor>.csv``     — target with offset-corrected timestamps
-    - ``synced/sda/sync_info.json``          — offset model (drift = 0)
-
-    Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
-    """
+    """Synchronize two sensor streams using SDA (offset-only, no drift correction)."""
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
     out_dir = recording_stage_dir(recording_name, "synced/sda")
@@ -126,6 +101,7 @@ def synchronize_recording_sda(
 
     if plot:
         from visualization import plot_comparison
+
         stage_ref = f"{recording_name}/synced/sda"
         try:
             plot_comparison.main([stage_ref])
@@ -134,60 +110,3 @@ def synchronize_recording_sda(
             pass
 
     return ref_out, tgt_out, sync_json_path
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m sync.sda_sync",
-        description=(
-            "Synchronize two IMU streams using SDA offset-only alignment. "
-            "No drift correction is applied. Writes to synced/sda/."
-        ),
-    )
-    parser.add_argument(
-        "recording_name_stage",
-        help="Recording name and input stage as '<recording_name>/<stage>' (e.g. '2026-02-26_5/parsed').",
-    )
-    parser.add_argument(
-        "--reference-sensor",
-        default="sporsa",
-        help="Reference sensor name token (default: sporsa).",
-    )
-    parser.add_argument(
-        "--target-sensor",
-        default="arduino",
-        help="Target sensor name token (default: arduino).",
-    )
-    parser.add_argument(
-        "--max-lag-seconds",
-        type=float,
-        default=DEFAULT_MAX_LAG_SECONDS,
-        help=f"Maximum SDA lag search range in seconds (default: {DEFAULT_MAX_LAG_SECONDS}).",
-    )
-    parser.add_argument(
-        "--sample-rate-hz",
-        type=float,
-        default=DEFAULT_SAMPLE_RATE_HZ,
-        help=f"Resampling rate for alignment signal (default: {DEFAULT_SAMPLE_RATE_HZ}).",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = _build_arg_parser().parse_args(argv)
-    parts = args.recording_name_stage.split("/", 1)
-    if len(parts) != 2:
-        raise SystemExit("recording_name_stage must be '<recording_name>/<stage>'")
-    recording_name, stage_in = parts
-    synchronize_recording_sda(
-        recording_name=recording_name,
-        stage_in=stage_in,
-        reference_sensor=args.reference_sensor,
-        target_sensor=args.target_sensor,
-        max_lag_seconds=args.max_lag_seconds,
-        sample_rate_hz=args.sample_rate_hz,
-    )
-
-
-if __name__ == "__main__":
-    main()

@@ -217,7 +217,7 @@ def plot_sync_comparison(
 
     Returns the path to the saved PNG, or ``None`` if no method data exists.
     """
-    from .common import add_vector_norms, remove_dropouts, resample_stream
+    from .core import add_vector_norms, remove_dropouts, resample_stream
 
     def _load(recording_name: str, stage: str, sensor: str) -> Optional[pd.DataFrame]:
         df = _load_sensor_csv(recording_name, stage, sensor)
@@ -552,7 +552,8 @@ def compare_all_recordings(
 # CLI
 # ---------------------------------------------------------------------------
 
-def _print_selection(result: SyncSelectionResult) -> None:
+def print_selection_result(result: SyncSelectionResult) -> None:
+    """Print a short summary of which method was selected and per-method metrics."""
     print(f"Recording  : {result.recording_name}")
     print(f"Selected   : {result.method} (stage: {result.stage})")
     print()
@@ -616,7 +617,7 @@ def main(argv: list[str] | None = None) -> None:
         print_comparison(cmp)
         result = select_best_sync_method(args.recording_name)
         print()
-        _print_selection(result)
+        print_selection_result(result)
         if args.apply:
             apply_selection(args.recording_name, result, plot=args.plot)
 

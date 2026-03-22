@@ -58,8 +58,16 @@ def find_sensor_csv(
         raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
 
     csv_files = list(stage_dir.glob("*.csv"))
-    matching = [f for f in csv_files if sensor_name.lower() in f.name.lower()]
+    token = sensor_name.lower()
 
+    exact = [f for f in csv_files if f.stem.lower() == token]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        names = ", ".join(sorted(f.name for f in exact))
+        raise ValueError(f"Multiple CSV files named like '{sensor_name}.csv' in {stage_dir}: {names}")
+
+    matching = [f for f in csv_files if token in f.name.lower()]
     if not matching:
         raise FileNotFoundError(
             f"No CSV file containing '{sensor_name}' in {stage_dir}"

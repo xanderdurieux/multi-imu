@@ -1,80 +1,41 @@
-"""Online (single-anchor) synchronisation for live recording.
-
-This module implements a causal synchronisation strategy suitable for live
-data collection, where the closing calibration sequence has not yet occurred
-and the full recording is unavailable.
-
-Strategy
---------
-1. At session start, the user performs the opening calibration tap-burst.
-2. :func:`estimate_sync_from_opening_anchor` detects the opening calibration
-   in the reference stream and the corresponding cluster in the target stream,
-   yielding a precise initial offset.
-3. Clock drift is **not** measurable in real time (requires two anchors separated
-   in time), so a *pre-characterised* drift rate is applied instead.  This rate
-   is derived from offline analysis of historical recordings
-   (:func:`load_characterised_drift`).
-4. The result is a :class:`~sync.drift_estimator.SyncModel` that can be used
-   to correct the target stream's timestamps as new samples arrive.
-
-Comparison with offline methods
----------------------------------
-+---------------------------+---------------------+-----------------------------+
-| Property                  | SDA + LIDA          | Online (this module)        |
-+===========================+=====================+=============================+
-| Requires full recording   | Yes                 | No (causal)                 |
-+---------------------------+---------------------+-----------------------------+
-| Calibration tap needed    | No                  | Yes (opening only)          |
-+---------------------------+---------------------+-----------------------------+
-| Drift estimation          | From full signal    | From historical mean        |
-+---------------------------+---------------------+-----------------------------+
-| Latency                   | Post-hoc            | Near-zero after cal event   |
-+---------------------------+---------------------+-----------------------------+
-
-CLI::
-
-    python -m sync.online_sync <recording_name>/<stage>
-    python -m sync.online_sync 2026-02-26_5/parsed --drift-ppm 400
-"""
+"""Online (single-anchor) synchronisation using opening calibration + characterised drift."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-
-import shutil
 
 import pandas as pd
 
 from common import write_dataframe
+from common.calibration_segments import find_calibration_segments
 from common.paths import find_sensor_csv, recording_stage_dir
 
-from .calibration_sync import _coarse_offset_from_opening_calibration, _refine_offset_at_calibration
-from .common import load_stream, remove_dropouts
-from .drift_estimator import SyncModel, apply_sync_model, save_sync_model
-from .metrics import compute_sync_correlations
-from common.calibration_segments import find_calibration_segments
+from .calibration_sync import (
+    _coarse_offset_from_opening_calibration,
+    _refine_offset_at_calibration,
+)
+from .core import (
+    SyncModel,
+    apply_sync_model,
+    compute_sync_correlations,
+    estimate_offset,
+    load_stream,
+    remove_dropouts,
+    save_sync_model,
+)
 
 log = logging.getLogger(__name__)
 
-# Default drift rate used when no historical data is available (ppm).
-# Derived from the cal-sync estimates across all 2026-02-26 recordings with
-# calibration_span_s >= 60 s.  Value is set conservatively to the median
-# (see drift_characterisation.json after running analyse_drift.py).
 DEFAULT_DRIFT_PPM = 400.0
-
-# Path relative to the analysis directory where drift characterisation lives.
 DRIFT_CHAR_JSON = Path(__file__).parent.parent / "data" / "drift_characterisation.json"
 
 
 def load_characterised_drift(json_path: Path = DRIFT_CHAR_JSON) -> float:
-    """Load the median drift rate (ppm) from the offline drift characterisation.
-
-    Falls back to :data:`DEFAULT_DRIFT_PPM` if the file is absent or invalid.
-    """
+    """Load the median drift rate (ppm) from the offline drift characterisation."""
     if not json_path.exists():
         log.info(
             "Drift characterisation file not found (%s). "
@@ -84,7 +45,6 @@ def load_characterised_drift(json_path: Path = DRIFT_CHAR_JSON) -> float:
         return DEFAULT_DRIFT_PPM
     try:
         data = json.loads(json_path.read_text(encoding="utf-8"))
-        # Prefer cal-sync median (span >= 60 s); fall back to LIDA median.
         for key in ("cal_span_ge_60s", "lida"):
             block = data.get(key)
             if block and block.get("median_ppm") is not None:
@@ -110,57 +70,10 @@ def estimate_sync_from_opening_anchor(
     reference_name: str = "",
     target_name: str = "",
 ) -> SyncModel:
-    """Estimate a sync model using only the opening calibration anchor.
-
-    This is the online-safe version of :func:`sync.calibration_sync.estimate_sync_from_calibration`.
-    It requires only the opening calibration tap to have occurred, making it
-    suitable for real-time applications where the closing calibration has not
-    yet been performed.
-
-    The clock drift is supplied externally (``drift_ppm``).  If ``None``, the
-    pre-characterised median drift is loaded from
-    ``data/drift_characterisation.json`` (requires running ``analyse_drift.py``
-    first).
-
-    Parameters
-    ----------
-    ref_df:
-        Reference sensor DataFrame (Sporsa, stable Unix-epoch clock).
-    tgt_df:
-        Target sensor DataFrame (Arduino, ``millis()`` from boot).
-    drift_ppm:
-        Clock drift to apply in parts-per-million.  Positive = Arduino runs
-        fast (its ``millis()`` advances faster than real time).  If ``None``,
-        loaded from the offline characterisation file.
-    sample_rate_hz:
-        Resampling rate for the refinement cross-correlation.
-    peak_min_height, peak_min_count, peak_max_gap_s:
-        Calibration-sequence detection parameters (passed to
-        :func:`parser.split_sections.find_calibration_segments`).
-    cal_search_s:
-        Search window (±s) for each calibration cross-correlation.
-    peak_buffer_s:
-        Buffer added around the calibration peaks in the reference window.
-    reference_name, target_name:
-        Optional labels stored in the returned ``SyncModel``.
-
-    Returns
-    -------
-    SyncModel
-        A linear sync model with the refined opening offset and the
-        pre-characterised drift.
-
-    Raises
-    ------
-    ValueError
-        If no calibration segment is found in the reference stream, or if
-        the opening calibration cannot be located in the target stream.
-    """
     if drift_ppm is None:
         drift_ppm = load_characterised_drift()
     drift_s_per_s = drift_ppm * 1e-6
 
-    # Detect opening calibration in the reference sensor.
     ref_cals = find_calibration_segments(
         ref_df,
         sample_rate_hz=sample_rate_hz,
@@ -195,8 +108,7 @@ def estimate_sync_from_opening_anchor(
         log.warning(
             "Opening-calibration coarse offset failed; falling back to SDA at 5 Hz."
         )
-        from .align_df import estimate_offset as _sda
-        coarse = _sda(
+        coarse = estimate_offset(
             ref_df, tgt_clean,
             sample_rate_hz=5.0,
             max_lag_seconds=120.0,
@@ -206,7 +118,6 @@ def estimate_sync_from_opening_anchor(
         )
         coarse_offset_s = float(coarse.offset_seconds)
 
-    # Fine offset: cross-correlate the calibration peak window.
     cal_result = _refine_offset_at_calibration(
         ref_df, tgt_df, opening_cal,
         coarse_offset_s=coarse_offset_s,
@@ -250,12 +161,6 @@ def synchronize_recording_online(
     sample_rate_hz: float = 100.0,
     plot: bool = False,
 ) -> tuple[Path, Path, Path]:
-    """Synchronise a recording using only the opening calibration anchor.
-
-    Writes outputs to ``synced/online/`` alongside the other sync stages.
-
-    Returns ``(reference_csv, synced_target_csv, sync_info_json)``.
-    """
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
     out_dir = recording_stage_dir(recording_name, "synced/online")
@@ -309,6 +214,7 @@ def synchronize_recording_online(
 
     if plot:
         from visualization import plot_comparison
+
         stage_ref = f"{recording_name}/synced/online"
         try:
             plot_comparison.main([stage_ref])
@@ -317,62 +223,3 @@ def synchronize_recording_online(
             pass
 
     return ref_out, tgt_out, sync_json_path
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m sync.online_sync",
-        description=(
-            "Online (single-anchor) sync using only the opening calibration tap. "
-            "Applies a pre-characterised drift rate rather than estimating drift "
-            "from start and end calibrations. Writes to synced/online/."
-        ),
-    )
-    parser.add_argument(
-        "recording_name_stage",
-        help="'<recording_name>/<stage>' e.g. '2026-02-26_5/parsed'.",
-    )
-    parser.add_argument(
-        "--drift-ppm", type=float, default=None,
-        help="Drift rate to apply (ppm). If omitted, loads from drift_characterisation.json.",
-    )
-    parser.add_argument(
-        "--reference-sensor", default="sporsa",
-    )
-    parser.add_argument(
-        "--target-sensor", default="arduino",
-    )
-    parser.add_argument(
-        "--sample-rate-hz", type=float, default=100.0,
-    )
-    parser.add_argument(
-        "--plot", action="store_true",
-        help="Generate visualisation plots for synced/online stage.",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    args = _build_arg_parser().parse_args(argv)
-    parts = args.recording_name_stage.split("/", 1)
-    if len(parts) != 2:
-        raise SystemExit("recording_name_stage must be '<recording_name>/<stage>'")
-    recording_name, stage_in = parts
-
-    ref_out, tgt_out, sync_json = synchronize_recording_online(
-        recording_name=recording_name,
-        stage_in=stage_in,
-        reference_sensor=args.reference_sensor,
-        target_sensor=args.target_sensor,
-        drift_ppm=args.drift_ppm,
-        sample_rate_hz=args.sample_rate_hz,
-        plot=args.plot,
-    )
-    print(f"\nreference: {ref_out}")
-    print(f"synced:    {tgt_out}")
-    print(f"model:     {sync_json}")
-
-
-if __name__ == "__main__":
-    main()

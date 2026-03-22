@@ -28,8 +28,8 @@ The corrected target timestamp is:
 t_ref = t_tgt + offset + drift × (t_tgt − t_origin)
 ```
 
-This linear model is captured in the `SyncModel` dataclass
-(`drift_estimator.py`) and serialised to `sync_info.json`.
+This linear model is captured in the `SyncModel` dataclass (`core.py`) and
+serialised to `sync_info.json`.
 
 ### Quality metric
 
@@ -39,8 +39,8 @@ resampled streams over their overlap window — evaluated twice:
 1. **Offset only** (`corr.offset_only`): drift correction is zeroed out.
 2. **Offset + drift** (`corr.offset_and_drift`): full model applied.
 
-Both values are written to `sync_info.json` by `metrics.py` so they are
-directly comparable across methods.
+Both values are written to `sync_info.json` by `core.compute_sync_correlations`
+so they are directly comparable across methods.
 
 ---
 
@@ -48,18 +48,15 @@ directly comparable across methods.
 
 ```
 sync/
-├── common.py            # stream loading, resampling, dropout removal
-├── align_df.py          # SDA core algorithm
-├── drift_estimator.py   # LIDA core algorithm + SyncModel
-├── metrics.py           # acc_norm correlation metric (shared by all methods)
-│
-├── sda_sync.py          # Method 1: SDA only         → synced_sda/
-├── lida_sync.py         # Method 2: SDA + LIDA       → synced_lida/
-├── calibration_sync.py  # Method 3: calibration anchors → synced_cal/
-├── online_sync.py       # Method 4: online single-anchor → synced_online/
-│
-├── selection.py         # Compare all methods, select best, write synced/
-├── session.py           # Session-level orchestration (recommended entry point)
+├── core.py                # streams, SDA alignment, LIDA SyncModel, shared metrics
+├── sda_sync.py            # Method 1: SDA only              → synced/sda/
+├── lida_sync.py           # Method 2: SDA + LIDA             → synced/lida/
+├── calibration_sync.py    # Method 3: calibration anchors    → synced/cal/
+├── online_sync.py         # Method 4: opening anchor + drift  → synced/online/
+├── selection.py    # compare methods, select best, apply to synced/
+├── pipeline.py     # run methods + selection (Python API)
+├── run.py          # CLI (`python -m sync`)
+├── __main__.py     # delegates to run.main()
 └── __init__.py
 ```
 
@@ -70,7 +67,7 @@ sync/
 ### Run all methods on an entire session
 
 ```bash
-uv run -m sync.session 2026-02-26 --all --apply
+uv run -m sync 2026-02-26 --all --apply
 ```
 
 This discovers every recording whose name starts with `2026-02-26_`, runs all
@@ -90,19 +87,20 @@ selects the best result, copies it to `synced/`, and prints a summary:
 
 ```bash
 # Single recording — run all methods, select, copy to synced/
-uv run -m sync.session 2026-02-26_5 --apply --plot
+uv run -m sync 2026-02-26_5 --apply --plot
 
 # Only run the two most useful offline methods
-uv run -m sync.session 2026-02-26 --all --methods calibration lida --apply
+uv run -m sync 2026-02-26 --all --methods calibration lida --apply
 
 # Just compare methods that have already been run
-uv run -m sync.selection 2026-02-26_5
-uv run -m sync.selection 2026-02-26_5 --apply --plot
+uv run -m sync 2026-02-26_5 --select-only
+uv run -m sync 2026-02-26_5 --select-only --apply --plot
+uv run -m sync.selection 2026-02-26_5   # alternative entry point
 ```
 
 ---
 
-## `session.py` — session-level orchestration
+## `run.py` / `pipeline.py` — full pipeline
 
 Runs any subset of the four sync methods on a recording or all recordings in
 a session, then selects the best and (optionally) applies it.
@@ -110,7 +108,7 @@ a session, then selects the best and (optionally) applies it.
 ### Python API
 
 ```python
-from sync.session import synchronize_recording_all_methods, synchronize_session
+from sync.pipeline import synchronize_recording_all_methods, synchronize_session
 
 # Single recording
 result = synchronize_recording_all_methods(
@@ -136,7 +134,11 @@ results = synchronize_session("2026-02-26", apply=True, plot=False)
 ### CLI
 
 ```bash
-uv run -m sync.session <name> [--all] [--stage STAGE] [--methods ...] [--apply] [--plot]
+uv run -m sync <name> [--all] [--stage STAGE] [--methods ...] [--apply] [--plot] [--select-only]
+uv run -m sync sda_sync <recording>/parsed
+uv run -m sync lida_sync <recording>/parsed
+uv run -m sync calibration_sync <recording>/parsed
+uv run -m sync online_sync <recording>/parsed [--drift-ppm 400] [--plot]
 ```
 
 | Flag | Default | Meaning |
@@ -146,6 +148,7 @@ uv run -m sync.session <name> [--all] [--stage STAGE] [--methods ...] [--apply] 
 | `--methods` | all four | Space-separated subset: `sda lida calibration online` |
 | `--apply` | off | Copy the selected winner to `synced/` |
 | `--plot` | off | Generate plots per method and the comparison overlay |
+| `--select-only` | off | Skip running methods; compare existing outputs and select |
 
 ---
 
@@ -164,12 +167,12 @@ estimation; sanity-checking the offset independently of drift.
 4. Compute quality correlations via `compute_sync_correlations()`.
 
 **Output:** `synced_sda/`  
-**CLI:** `uv run -m sync.sda_sync <recording>/parsed`  
+**CLI:** `uv run -m sync sda_sync <recording>/parsed` (alias: `sda`)  
 **`sync_info.json` extras:** `sync_method: "sda_offset_only"`, `sda_score`
 
 ---
 
-### Method 2 — SDA + LIDA (`lida_sync.py`)
+### Method 2 — SDA + LIDA (`lida.py`)
 
 **When to use:** standard offline post-processing for recordings without
 reliable calibration sequences.
@@ -183,7 +186,7 @@ reliable calibration sequences.
 4. Apply the full `offset + drift × Δt` model.
 
 **Output:** `synced_lida/`  
-**CLI:** `uv run -m sync.lida_sync <recording>/parsed`  
+**CLI:** `uv run -m sync lida_sync <recording>/parsed` (alias: `lida`)  
 **`sync_info.json` extras:** `sync_method: "sda_lida"`
 
 **Notable parameters** (passed to `synchronize_recording`):
@@ -222,7 +225,7 @@ drift because it uses known, sharp events as timing anchors.
 5. Back-propagate the opening offset to the target time origin.
 
 **Output:** `synced_cal/`  
-**CLI:** `uv run -m sync.calibration_sync <recording>/parsed`
+**CLI:** `uv run -m sync calibration_sync <recording>/parsed` (alias: `cal`)
 
 **`sync_info.json` extras:**
 
@@ -255,7 +258,7 @@ drift matters for a given recording.
    loaded drift.
 
 **Output:** `synced_online/`  
-**CLI:** `uv run -m sync.online_sync <recording>/parsed [--drift-ppm 400]`  
+**CLI:** `uv run -m sync online_sync <recording>/parsed [--drift-ppm 400] [--plot]` (alias: `online`)  
 **`sync_info.json` extras:** `sync_method: "online_opening_anchor"`,
 `drift_ppm_source`, `drift_ppm_applied`
 
@@ -301,12 +304,14 @@ to `synced/`:
 
 ```bash
 # Compare what's available (no --apply)
+uv run -m sync 2026-02-26_5 --select-only
 uv run -m sync.selection 2026-02-26_5
 
 # Compare, select, copy
-uv run -m sync.selection 2026-02-26_5 --apply --plot
+uv run -m sync 2026-02-26_5 --select-only --apply --plot
 
 # Batch comparison over a session
+uv run -m sync 2026-02-26 --all --select-only --plot
 uv run -m sync.selection 2026-02-26 --all --plot
 ```
 
@@ -314,7 +319,7 @@ uv run -m sync.selection 2026-02-26 --all --plot
 
 ## Core algorithm modules
 
-### `align_df.py` — Signal-Density Alignment (SDA)
+### `core.py` (SDA section) — Signal-Density Alignment
 
 Estimates a single coarse offset by cross-correlating a 1-D *activity signal*
 derived from both IMU streams.
@@ -334,7 +339,7 @@ drift accumulates over time and degrades alignment quality for long recordings.
 
 ---
 
-### `drift_estimator.py` — Local Instance-based Drift Analysis (LIDA)
+### `core.py` (LIDA section) — Local Instance-based Drift Analysis
 
 Extends SDA by fitting a linear drift model on top of the coarse offset.
 
@@ -360,7 +365,7 @@ Extends SDA by fitting a linear drift model on top of the coarse offset.
 
 ---
 
-### `metrics.py` — Synchronization quality metrics
+### `core.py` (metrics) — Synchronization quality metrics
 
 Used by every method to populate `sync_info.json`:
 
@@ -372,7 +377,7 @@ Used by every method to populate `sync_info.json`:
 
 ---
 
-### `common.py` — Shared stream utilities
+### `core.py` (streams) — Shared stream utilities
 
 | Function | Purpose |
 |---|---|
