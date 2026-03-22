@@ -1,9 +1,9 @@
 # Visualization
 
-This package produces all diagnostic and thesis-quality figures for the
-two-sensor IMU pipeline.  Each module targets one stage of the pipeline and
-can be run individually from the command line or called programmatically via
-`plot_session`.
+This package produces diagnostic and thesis-quality figures for the two-sensor
+IMU pipeline. Each module targets one processing stage and can be run from the
+CLI or via `plot_session`. Stages such as `calibrated/` and `orientation/` must
+already exist on disk (this repository does not generate them).
 
 ---
 

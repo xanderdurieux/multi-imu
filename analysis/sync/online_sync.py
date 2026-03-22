@@ -56,7 +56,7 @@ from .calibration_sync import _coarse_offset_from_opening_calibration, _refine_o
 from .common import load_stream, remove_dropouts
 from .drift_estimator import SyncModel, apply_sync_model, save_sync_model
 from .metrics import compute_sync_correlations
-from calibration.segments import find_calibration_segments
+from common.calibration_segments import find_calibration_segments
 
 log = logging.getLogger(__name__)
 

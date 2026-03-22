@@ -1,4 +1,4 @@
-# master-thesis/src/arduino
+# master-thesis/arduino
 
 This folder contains the Arduino sketches that are uploaded to the Arduino board(s) used in this thesis.
 
@@ -11,7 +11,7 @@ The board used is the **Arduino Nano 33 BLE**, which provides:
 
 ## Sketches
 
-### `ble_imu_advertisting/ble_imu_advertising.ino`
+### `ble_imu_advertising/ble_imu_advertising.ino`
 
 This sketch turns the Nano 33 BLE into a **BLE IMU peripheral**. It:
 
@@ -60,7 +60,7 @@ On the host machine running the Arduino IDE:
 
 ## Uploading the Sketch
 
-1. Open `ble_imu_advertisting/ble_imu_advertising.ino` in the Arduino IDE.
+1. Open `ble_imu_advertising/ble_imu_advertising.ino` in the Arduino IDE.
 2. In **Tools → Board**, select **Arduino Nano 33 BLE**.
 3. In **Tools → Port**, select the serial port corresponding to the Nano 33 BLE.
 4. Ensure the required libraries are installed (see above).

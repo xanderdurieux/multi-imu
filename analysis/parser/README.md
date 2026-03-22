@@ -144,7 +144,7 @@ section_dirs = split_recording_into_sections(
 
 **How it works:**
 1. Detect calibration segments in the reference sensor (Sporsa) using
-   `calibration.segments.find_calibration_segments`.
+   `common.calibration_segments.find_calibration_segments`.
 2. For a recording with N calibration segments, produce N−1 sections.
    Section `k` spans from the end of calibration segment `k` to the start
    of calibration segment `k+1`, including a small overlap with each flanking

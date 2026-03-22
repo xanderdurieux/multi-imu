@@ -1,6 +1,7 @@
 """Plot orientation data and orientation-compensated acceleration from CSV files.
 
-This module operates on orientation CSVs produced by ``orientation.session``.
+This module operates on orientation CSVs (body-frame IMU plus estimated
+quaternions), typically produced by an orientation-estimation pipeline.
 For each orientation file, it can generate:
 
 - Orientation (yaw, pitch, roll) over time.
@@ -21,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from common import load_dataframe, recording_stage_dir
-from orientation.quaternion import euler_from_quat, quat_rotate
+from common.quaternion import euler_from_quat, quat_rotate
 
 log = logging.getLogger(__name__)
 

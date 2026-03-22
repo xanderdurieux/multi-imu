@@ -56,7 +56,7 @@ from .drift_estimator import (
     save_sync_model,
 )
 from .metrics import compute_sync_correlations
-from calibration.segments import find_calibration_segments, _acc_norm, _smooth, _find_peaks
+from common.calibration_segments import find_calibration_segments, _acc_norm, _smooth, _find_peaks
 
 log = logging.getLogger(__name__)
 

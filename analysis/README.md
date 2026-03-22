@@ -7,7 +7,7 @@ The code turns raw logs from a bicycle-mounted Sporsa IMU and a rider-mounted
 Arduino IMU into synchronized, calibrated, world-frame signals and diagnostic
 plots that can be used for motion and fall / incident analysis.
 
-**What lives in this directory:** `common/`, `parser/`, `sync/`, `visualization/`, and **`static_calibration/`** (standalone six-pose Arduino IMU calibration). Recording-level packages such as `calibration.session`, `orientation/`, and `features/` are **not** included in this repository snapshot; later sections still describe the **intended** thesis pipeline where those stages exist.
+**What lives in this directory:** `common/`, `parser/`, `sync/`, `visualization/`, and **`static_calibration/`** (standalone six-pose Arduino IMU calibration). Ride-level world calibration, orientation filtering, and feature extraction are **not** included here; the notes below describe how this tree fits into the broader thesis workflow when you add those tools separately.
 
 ## Terminology
 
@@ -122,12 +122,8 @@ The analysis code expects the following directory structure relative to
   - `synced/` – best selected method (written by `sync.selection --apply`).
   - `sections/section_N/` – per-section CSVs and plots, bounded by calibration
     events.
-  - `calibrated/` – world-frame, bias-corrected sensor CSVs and
-    `calibration.json`.
-  - `orientation/` – orientation-enhanced CSVs and `orientation_stats.json`.
-  - `features/` – flat CSV feature tables:
-    - `recording_features.csv` – one row per (sensor, stage) for the full recording.
-    - `section_features.csv` – one row per (sensor, section) across all sections.
+  - `calibrated/`, `orientation/`, `features/` – only appear if you run
+    separate tooling (not bundled here); see “Extended pipeline” below.
 
 - **Run logs** (optional)  
   `analysis/data/run_logs/<session_name>_pipeline_run.json` — if you use a
@@ -141,7 +137,7 @@ The steps below describe the **intended** end-to-end chain (parse → sync →
 sections → world calibration → orientation → features). **This checkout** ships
 **parser**, **sync**, **visualization**, and **static_calibration**; run stages
 manually with `uv run -m …` as documented in each section. A single-command
-orchestrator and the `calibrated/`, `orientation/`, and `features/` packages
+orchestrator and the downstream ride-calibration / orientation / feature tools
 are **not** present here.
 
 **Typical manual flow in this tree:**
@@ -271,110 +267,24 @@ opening calibration of the next, making it suitable for:
 
 ---
 
-## Stage 4 – World-frame calibration *(not in this checkout)*
+## Extended pipeline *(not in this checkout)*
 
-**Goal**: Align each sensor to a world frame and correct biases so that
-accelerations and angular velocities are comparable across recordings and
-sensors. The recording-level **`calibration.session`** package is **not**
-included here; the following documents the intended interface when that code
-is available.
-
-```bash
-# When calibration.session exists in your branch:
-uv run -m calibration.session <recording_name> --stage synced_cal
-# e.g. uv run -m calibration.session 2026-02-26_5 --stage synced_cal
-```
-
-- **Input**: `data/recordings/<recording_name>/synced_cal/`
-- **Output**: `data/recordings/<recording_name>/calibrated/`
-  - `calibration.json`
-  - `sporsa.csv`, `arduino.csv` (bias-corrected, world-frame)
-  - Calibration plots
-
-The calibration pipeline:
-
-1. Detects calibration sequences and extracts static windows.
-2. Estimates per-sensor gyro bias, gravity vector, and magnetometer offsets.
-3. Computes a sensor-to-world rotation (TRIAD when magnetometer is usable,
-   gravity-only otherwise).
-4. Applies bias correction and rotates all IMU vectors into the world frame.
-
-**Calibration quality indicators** (`calibration.json`):
-
-- `gravity_residual_m_per_s2` close to 0 (≲ 0.2) indicates good alignment.
-- `n_static_samples` and `n_mag_samples` should be reasonably large.
-- `yaw_calibrated` shows whether heading could be stabilised (magnetometer
-  quality dependent).
-
-Recordings where calibration fails or yields large residuals should not be
-used for features that rely on absolute orientation; they may still be used
-for magnitude-only features.
-
-When present, see the package’s own `README` for algorithm details,
-`calibration.json` schema, and quality thresholds.
+After `synced/` and `sections/`, the thesis workflow can continue with **ride-level
+world-frame calibration** (producing `calibrated/` and `calibration.json`),
+**orientation estimation** on body-frame CSVs (producing `orientation/` and
+`orientation_stats.json`), and **feature extraction** into `features/`. Those
+stages require separate code; this repository only documents the directory
+names so you can interpret data trees and use `visualization.plot_calibration` /
+`visualization.plot_orientation` when those folders exist.
 
 ---
 
-## Stage 5 – Orientation estimation (`orientation/`) *(reference — not in this checkout)*
-
-The **`orientation/`** package is **not** included here. When available, it
-estimates continuous body→world quaternions from body-frame IMU data
-(gyroscope integration + accelerometer correction). The static
-calibration rotation from Stage 4 is used to seed each filter with the correct
-starting pose rather than identity.
-
-**Important:** orientation estimation uses `parsed/` (body-frame) data, not
-`calibrated/`. The `calibrated/` world-frame CSVs are for static analysis;
-feeding world-frame data to an orientation filter is incorrect because the
-filters need body-frame sensor readings to track rotation.
-
-### Single-file pipeline (`orientation.pipeline`)
-
-```bash
-uv run -m orientation.pipeline <input.csv> [output.csv]
-```
-
-- **Input**: Any body-frame IMU CSV with `timestamp`, `ax`–`az`, `gx`–`gz`.
-- **Output**: `<input_stem>_orientation.csv` with `qw, qx, qy, qz` and
-  optionally `yaw_deg, pitch_deg, roll_deg`.
-- Note: no calibration is applied at this level — for calibrated initialization
-  use `orientation.session`.
-
-### Recording-level pipeline (`orientation.session`)
-
-```bash
-uv run -m orientation.session <recording_name>
-# e.g. uv run -m orientation.session 2026-02-26_5
-# Optionally specify the body-frame input stage (default: parsed):
-uv run -m orientation.session 2026-02-26_5 --stage parsed
-```
-
-**Requires** `calibrated/calibration.json` to exist (run Stage 4 first).
-
-- **Input**: `data/recordings/<recording_name>/parsed/` (body-frame)
-- **Calibration**: `data/recordings/<recording_name>/calibrated/calibration.json`
-- **Output**: `data/recordings/<recording_name>/orientation/`
-  - Two CSVs per sensor (one per filter):
-    - `<sensor>__complementary_orientation.csv`
-    - `<sensor>__madgwick_orientation.csv`
-  - `orientation_stats.json` with metrics such as:
-    - Deviation of world-frame acceleration norm from gravity.
-    - Fraction of samples classified as static.
-    - Static pitch and roll variability.
-
-When the package exists, use its README for algorithm details and quality
-metric interpretation.
-
-Combined with plots from `visualization.plot_orientation`, these metrics
-indicate which recordings (and which filters) produce reliable orientation
-for incident analysis.
-
----
-
-## Stage 6 – Visualization (`visualization/`)
+## Stage 4 – Visualization (`visualization/`)
 
 Plots are produced automatically by the pipeline, but can also be regenerated
-manually.
+manually. Modules such as `plot_calibration` and `plot_orientation` expect the
+corresponding stage directories to exist (from external processing if not
+present in this tree).
 
 ### Plot a single sensor stream
 
@@ -465,52 +375,6 @@ modelling, but can still be used for qualitative inspection.
 
 ---
 
-## Stage 7 – Feature extraction (`features/`) *(reference — not in this checkout)*
-
-**Goal**: Convert per-recording and per-section IMU CSVs into compact flat
-feature tables suitable for incident analysis and machine learning. The
-**`features/`** package is **not** included in this snapshot.
-
-### Recording-level features
-
-```python
-from features import extract_recording_features
-
-csv_path = extract_recording_features("2026-02-26_5", stage="calibrated")
-# → data/recordings/2026-02-26_5/features/recording_features.csv
-```
-
-### Section-level features
-
-```python
-from features import extract_section_features
-
-csv_path = extract_section_features("2026-02-26_5")
-# → data/recordings/2026-02-26_5/features/section_features.csv
-```
-
-Both functions accept an optional `sensors` iterable to restrict which sensor
-CSVs are processed (matched against filenames).
-
-**Feature columns** (per sensor, per row):
-
-| Column group | Description |
-|---|---|
-| `n_samples`, `duration_s` | Sample count and duration. |
-| `acc_{min,max,mean,std,p25,p50,p75}` | `acc_norm` (m/s²) statistics. |
-| `gyro_{min,max,mean,std,p25,p50,p75}` | `gyro_norm` (deg/s) statistics. |
-| `jerk_{min,max,mean,std,p25,p50,p75}` | Time-derivative of `acc_norm` statistics. |
-
-**Output layout**:
-
-```
-data/recordings/<recording_name>/features/
-    recording_features.csv
-    section_features.csv
-```
-
----
-
 ## Visual pipeline overview
 
 The following diagram summarizes the main flow for a single recording:
@@ -531,10 +395,10 @@ flowchart TD
   selection --> syncedBest["synced/"]
   syncedBest --> splitSections["parser.split_sections"]
   splitSections --> sectionsStage["sections/section_*/"]
-  sectionsStage --> optionalCal["calibrated/ (calibration.session — optional checkout)"]
-  parsedStage --> optionalOri["orientation/ (orientation.session — optional checkout)"]
+  sectionsStage --> optionalCal["calibrated/ (external tooling)"]
+  parsedStage --> optionalOri["orientation/ (external tooling)"]
   optionalCal -.-> optionalOri
-  optionalOri --> optionalFeat["features/ (optional checkout)"]
+  optionalOri --> optionalFeat["features/ (external tooling)"]
   sectionsStage --> optionalFeat
   rawCalib["data/calibrations/raw/*.txt"] --> staticCal["python -m static_calibration"]
   staticCal --> calibOut["data/calibrations/*.json + plots"]

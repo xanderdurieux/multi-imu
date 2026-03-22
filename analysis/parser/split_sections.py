@@ -30,7 +30,7 @@ import pandas as pd
 
 from common.csv_schema import load_dataframe, write_dataframe
 from common.paths import find_sensor_csv, recording_dir
-from calibration.segments import CalibrationSegment, find_calibration_segments
+from common.calibration_segments import CalibrationSegment, find_calibration_segments
 
 log = logging.getLogger(__name__)
 

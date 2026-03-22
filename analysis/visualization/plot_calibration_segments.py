@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from calibration.segments import (
+from common.calibration_segments import (
     CalibrationSegment,
     _acc_norm,
     _smooth,
@@ -54,7 +54,7 @@ def plot_calibration_segments(
         ``timestamp``).
     segments:
         Iterable of :class:`CalibrationSegment` produced by
-        :func:`calibration.segments.find_calibration_segments`.
+        :func:`common.calibration_segments.find_calibration_segments`.
     sample_rate_hz:
         Sampling rate used for peak detection, only used when no timestamp
         column is available.
@@ -69,7 +69,7 @@ def plot_calibration_segments(
     (fig, info_df, out_path)
         *fig* is the created Matplotlib figure,
         *info_df* is the segment summary from
-        :func:`calibration.segments.describe_calibration_segments`,
+        :func:`common.calibration_segments.describe_calibration_segments`,
         *out_path* is the resolved Path where the figure was saved (or
         ``None`` if *out_path* was not given).
     """
@@ -195,7 +195,7 @@ def plot_calibration_segments_from_detection(
     """Detect calibration segments and immediately plot them.
 
     This is a convenience wrapper that runs
-    :func:`calibration.segments.find_calibration_segments`, builds the segment
+    :func:`common.calibration_segments.find_calibration_segments`, builds the segment
     summary via :func:`describe_calibration_segments`, and generates the
     diagnostic figure with :func:`plot_calibration_segments`.
     """

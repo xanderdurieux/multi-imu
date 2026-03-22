@@ -40,16 +40,18 @@ and upload instructions.
 
 ### Analysis toolkit (`analysis/`)
 
-A Python package (requires Python ≥ 3.13, managed with `uv`) that implements a
-six-stage offline pipeline:
+A Python package (requires Python ≥ 3.13, managed with `uv`) that ships the
+**stages implemented in this tree**:
 
 1. **Parse** raw device logs into normalised per-recording IMU CSVs.
 2. **Synchronise** Sporsa and Arduino clocks (four methods, automatic selection).
 3. **Section** each recording into calibration-bounded sub-intervals.
-4. **Calibrate** sensors into a world frame and correct biases.
-5. **Estimate orientation** using complementary or Madgwick filters.
-6. **Extract features** (duration, acceleration, gyroscope, jerk statistics)
-   at recording and section level.
+4. **Static six-pose Arduino calibration** (`static_calibration/`) for helmet IMU
+   bias and scale (separate from ride recordings).
+5. **Visualise** parsed, synced, and—if you have produced those stages
+   elsewhere—calibrated and orientation outputs.
 
-See [`analysis/README.md`](analysis/README.md) for full pipeline documentation,
-data layout, CLI commands, and quality criteria.
+World-frame calibration of ride recordings, continuous orientation filters, and
+feature extraction are part of the broader thesis workflow but are **not**
+included here. See [`analysis/README.md`](analysis/README.md) for data layout,
+CLI commands for the available modules, and notes on the extended pipeline.
