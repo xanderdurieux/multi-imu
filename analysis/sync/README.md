@@ -49,12 +49,13 @@ so they are directly comparable across methods.
 ```
 sync/
 ├── core.py                # streams, SDA alignment, LIDA SyncModel, shared metrics
-├── sda_sync.py            # Method 1: SDA only              → synced/sda/
-├── lida_sync.py           # Method 2: SDA + LIDA             → synced/lida/
-├── calibration_sync.py    # Method 3: calibration anchors    → synced/cal/
-├── online_sync.py         # Method 4: opening anchor + drift  → synced/online/
-├── selection.py    # compare methods, select best, apply to synced/
-├── pipeline.py     # run methods + selection (Python API)
+├── sync_sda.py            # Method 1: SDA only              → synced/sda/
+├── sync_lida.py           # Method 2: SDA + LIDA             → synced/lida/
+├── sync_cal.py    # Method 3: calibration anchors    → synced/cal/
+├── sync_online.py         # Method 4: opening anchor + drift  → synced/online/
+├── plotting.py           # comparison/diagnostic plots
+├── pipeline.py           # run methods, compare outputs, select best result
+├── selection.py          # backward-compatible wrapper around pipeline helpers
 ├── run.py          # CLI (`python -m sync`)
 ├── __main__.py     # delegates to run.main()
 └── __init__.py
@@ -105,7 +106,7 @@ Thin CLI plus orchestration: always all four methods, always apply selection to 
 
 ## Sync methods
 
-### Method 1 — SDA only (`sda_sync.py`)
+### Method 1 — SDA only (`sync_sda.py`)
 
 **When to use:** quick baseline; recordings too short for reliable drift
 estimation; sanity-checking the offset independently of drift.
@@ -153,7 +154,7 @@ file-to-file use without the recording-directory convention.
 
 ---
 
-### Method 3 — Calibration-sequence sync (`calibration_sync.py`)
+### Method 3 — Calibration-sequence sync (`sync_cal.py`)
 
 **When to use:** preferred method when both opening and closing calibration
 tap-bursts are present and well-detected. Gives the most precise offset and
@@ -190,7 +191,7 @@ drift because it uses known, sharp events as timing anchors.
 
 ---
 
-### Method 4 — Online sync (`online_sync.py`)
+### Method 4 — Online sync (`sync_online.py`)
 
 **When to use:** real-time/causal context where the closing calibration has
 not yet occurred. Also useful as a reference point when evaluating how much

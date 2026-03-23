@@ -52,10 +52,10 @@ definitions.
 
 - **`sync/`**
   - Four synchronization methods for aligning Sporsa and Arduino IMU streams:
-    - **SDA only** (`sync.sda_sync` → `synced/sda/`): offset-only, no drift.
-    - **SDA + LIDA** (`sync.lida_sync` → `synced/lida/`): offset + drift from windowed refinement.
-    - **Calibration sync** (`sync.calibration_sync` → `synced/cal/`): offset + drift from tap-burst anchors.
-    - **Online sync** (`sync.online_sync` → `synced/online/`): causal single-anchor + pre-characterised drift.
+    - **SDA only** (`sync.sync_sda` → `synced/sda/`): offset-only, no drift.
+    - **SDA + LIDA** (`sync.sync_lida` → `synced/lida/`): offset + drift from windowed refinement.
+    - **Calibration sync** (`sync.sync_cal` → `synced/cal/`): offset + drift from tap-burst anchors.
+    - **Online sync** (`sync.sync_online` → `synced/online/`): causal single-anchor + pre-characterised drift.
   - Full pipeline entry point: `python -m sync` runs all four methods, selects the best, copies to flat `synced/`, and writes comparison plots.
   - Shared primitives live in `sync.core` (streams, SDA alignment, LIDA `SyncModel`, correlation metrics).
   - See [`sync/README.md`](sync/README.md) for full algorithm and API documentation.
@@ -201,10 +201,10 @@ Four methods run internally (SDA, LIDA, calibration windows, online); the pipeli
 
 | Method | Module | Drift? |
 |---|---|---|
-| SDA only | `sync.sda_sync` | No |
-| SDA + LIDA | `sync.lida_sync` | Yes |
-| Calibration anchors | `sync.calibration_sync` | Yes |
-| Online (single anchor) | `sync.online_sync` | Pre-characterised |
+| SDA only | `sync.sync_sda` | No |
+| SDA + LIDA | `sync.sync_lida` | Yes |
+| Calibration anchors | `sync.sync_cal` | Yes |
+| Online (single anchor) | `sync.sync_online` | Pre-characterised |
 
 ```bash
 uv run -m sync 2026-02-26_5
@@ -368,10 +368,10 @@ The following diagram summarizes the main flow for a single recording:
 flowchart TD
   rawSession["Raw session logs (sporsa + arduino)"] --> parseSession["parser.session"]
   parseSession --> parsedStage["parsed/"]
-  parsedStage --> syncSDA["sync.sda_sync"]
-  parsedStage --> syncLIDA["sync.lida_sync"]
-  parsedStage --> syncCal["sync.calibration_sync"]
-  parsedStage --> syncOnline["sync.online_sync"]
+  parsedStage --> syncSDA["sync.sync_sda"]
+  parsedStage --> syncLIDA["sync.sync_lida"]
+  parsedStage --> syncCal["sync.sync_cal"]
+  parsedStage --> syncOnline["sync.sync_online"]
   syncSDA --> syncedSDA["synced/sda/"]
   syncLIDA --> syncedLida["synced/lida/"]
   syncCal --> syncedCal["synced/cal/"]

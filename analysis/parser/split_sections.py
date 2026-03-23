@@ -229,7 +229,7 @@ def sync_sections(
     plot:
         If ``True``, regenerate sensor and comparison plots after syncing.
     """
-    from sync.calibration_sync import synchronize_from_calibration
+    from sync.sync_cal import synchronize_pair
 
     sections_root = recording_dir(recording_name) / "sections"
     if not sections_root.exists():
@@ -255,7 +255,7 @@ def sync_sections(
         log.info("Syncing %s/%s ...", recording_name, section_dir.name)
         tmp_dir = section_dir / "_tmp_sync"
         try:
-            sync_json_raw, synced_csv_raw, _ = synchronize_from_calibration(
+            artifacts = synchronize_pair(
                 reference_csv=ref_csv,
                 target_csv=tgt_csv,
                 output_dir=tmp_dir,
@@ -264,8 +264,8 @@ def sync_sections(
                 cal_search_s=cal_search_s,
             )
 
-            shutil.move(str(synced_csv_raw), tgt_csv)
-            shutil.move(str(sync_json_raw), section_dir / "sync_info.json")
+            shutil.move(str(artifacts.target_csv), tgt_csv)
+            shutil.move(str(artifacts.sync_json), section_dir / "sync_info.json")
             log.info("  → wrote %s/sync_info.json", section_dir.name)
 
         except Exception as exc:
