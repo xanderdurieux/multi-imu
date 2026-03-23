@@ -14,8 +14,8 @@ configured sensors into matching time windows saved under::
 
 CLI usage::
 
-    python -m parser.split_sections 2026-02-26_5/synced_lida
-    python -m parser.split_sections 2026-02-26_5/synced_cal --no-plot
+    python -m parser.split_sections 2026-02-26_5/synced/lida
+    python -m parser.split_sections 2026-02-26_5/synced/cal --no-plot
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _plot_section(recording_name: str, section_stage: str, sensors: list[str]) -
 
 def split_recording(
     recording_name: str,
-    stage: str = "synced_cal",
+    stage: str = "synced/cal",
     sensors: list[str] | None = None,
     *,
     reference_sensor: str = "sporsa",
@@ -229,7 +229,7 @@ def sync_sections(
     plot:
         If ``True``, regenerate sensor and comparison plots after syncing.
     """
-    from sync.calibration_sync import synchronize_from_calibration
+    from sync.sync_cal import synchronize_streams
 
     sections_root = recording_dir(recording_name) / "sections"
     if not sections_root.exists():
@@ -255,17 +255,17 @@ def sync_sections(
         log.info("Syncing %s/%s ...", recording_name, section_dir.name)
         tmp_dir = section_dir / "_tmp_sync"
         try:
-            sync_json_raw, synced_csv_raw, _ = synchronize_from_calibration(
+            artifacts = synchronize_streams(
                 reference_csv=ref_csv,
                 target_csv=tgt_csv,
                 output_dir=tmp_dir,
                 sample_rate_hz=sample_rate_hz,
-                coarse_max_lag_s=coarse_max_lag_s,
-                cal_search_s=cal_search_s,
+                coarse_max_lag_seconds=coarse_max_lag_s,
+                cal_search_seconds=cal_search_s,
             )
 
-            shutil.move(str(synced_csv_raw), tgt_csv)
-            shutil.move(str(sync_json_raw), section_dir / "sync_info.json")
+            shutil.move(str(artifacts.target_csv), tgt_csv)
+            shutil.move(str(artifacts.sync_info_json), section_dir / "sync_info.json")
             log.info("  → wrote %s/sync_info.json", section_dir.name)
 
         except Exception as exc:
@@ -303,7 +303,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "recording_name_stage",
         help=(
             "Recording name and input stage as '<recording_name>/<stage>' "
-            "(e.g. '2026-02-26_5/synced_cal')."
+            "(e.g. '2026-02-26_5/synced/cal')."
         ),
     )
     parser.add_argument(
