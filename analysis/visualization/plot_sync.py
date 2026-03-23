@@ -3,7 +3,7 @@
 Produces two figure types per recording, saved in the ``synced/`` stage
 directory:
 
-1. **Sync method comparison** (``sync_method_comparison.png``):
+1. **Sync method scores** (``sync_scores_barh.png``):
    Horizontal bar chart comparing the acc_norm cross-correlation score
    (offset + drift) achieved by each of the four sync methods — SDA,
    LIDA, calibration-window, and online.  The selected (best) method
@@ -172,7 +172,7 @@ def plot_sync_method_comparison(recording_name: str) -> Path | None:
     fig.legend(handles=[legend_patch], loc="upper right", fontsize=8, framealpha=0.8)
 
     fig.suptitle(f"{recording_name} — Sync method comparison", fontsize=11)
-    out_path = synced_dir / "sync_method_comparison.png"
+    out_path = synced_dir / "sync_scores_barh.png"
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
     print(f"[{recording_name}/synced] {out_path.name}")
@@ -270,7 +270,7 @@ def plot_sync_stage(recording_name: str, *, alignment: bool = True) -> None:
     """Generate all sync quality plots for *recording_name*.
 
     Produces:
-    - ``synced/sync_method_comparison.png``: method quality bar chart.
+    - ``synced/sync_scores_barh.png``: method quality bar chart (from all_methods.json).
     - ``synced/sync_alignment.png``: pre/post-sync acc_norm overlay (if ``alignment=True``).
     """
     plot_sync_method_comparison(recording_name)

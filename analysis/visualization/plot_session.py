@@ -12,8 +12,8 @@ Stages plotted per recording
   Sensor + comparison plots, timing quality (interval histograms,
   interval timeline, Arduino clock drift).
 - ``synced``:
-  Sync method comparison bar chart and pre/post-sync alignment overlay.
-  Sensor + comparison plots for the selected (best) sync output.
+  Flat selected-stream CSVs plus multi-method comparison PNGs
+  (acc/gyro/mag norms, metrics) and ``sporsa`` vs ``arduino`` overlays.
 - ``sections/section_*``:
   Sensor + comparison plots for each section.
 - ``calibrated``:
@@ -22,9 +22,9 @@ Stages plotted per recording
   Euler angles, gravity-compensated acceleration, sensor comparison, and
   relative (head vs handlebar) orientation.
 
-Per-method sync outputs live in ``synced/sda/``, ``synced/lida/``,
-``synced/cal/``, ``synced/online/`` and are not plotted individually —
-they are compared via the sync method comparison plot.
+During a full sync run, methods write to ``synced/sda/`` … temporarily;
+after selection those folders are removed and only flat ``synced/*.csv``
+and comparison figures remain.
 """
 
 from __future__ import annotations

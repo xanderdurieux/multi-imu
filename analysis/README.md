@@ -56,8 +56,7 @@ definitions.
     - **SDA + LIDA** (`sync.lida_sync` → `synced/lida/`): offset + drift from windowed refinement.
     - **Calibration sync** (`sync.calibration_sync` → `synced/cal/`): offset + drift from tap-burst anchors.
     - **Online sync** (`sync.online_sync` → `synced/online/`): causal single-anchor + pre-characterised drift.
-  - Comparison and selection (`sync.selection`) to evaluate all methods and copy the best to `synced/`.
-  - Full pipeline entry point: `python -m sync` (`sync.run` + `sync.pipeline`) runs all methods, selects the best, and prints a summary.
+  - Full pipeline entry point: `python -m sync` runs all four methods, selects the best, copies to flat `synced/`, and writes comparison plots.
   - Shared primitives live in `sync.core` (streams, SDA alignment, LIDA `SyncModel`, correlation metrics).
   - See [`sync/README.md`](sync/README.md) for full algorithm and API documentation.
 
@@ -115,11 +114,7 @@ The analysis code expects the following directory structure relative to
   Within each recording directory, a full thesis run can populate several *stages* (availability depends on which tools you run):
 
   - `parsed/` – normalized per-sensor CSVs and basic plots.
-  - `synced/sda/` – SDA offset-only synchronization (optional).
-  - `synced/lida/` – SDA + LIDA synchronization (optional).
-  - `synced/cal/` – calibration-anchor synchronization (optional).
-  - `synced/online/` – single-anchor online synchronization (optional).
-  - `synced/` – best selected method (written by `sync.selection --apply`).
+  - `synced/` – after `python -m sync`, the chosen alignment plus `all_methods.json` and comparison PNGs (per-method subfolders exist only briefly during the run).
   - `sections/section_N/` – per-section CSVs and plots, bounded by calibration
     events.
   - `calibrated/`, `orientation/`, `features/` – only appear if you run
@@ -163,10 +158,9 @@ uv run -m parser.session <session_name>
   `data/sessions/<session_name>/{arduino,sporsa}/*.txt`
 
 - **Output** (per recording `2026-02-26_k`):  
-  `data/recordings/2026-02-26_k/parsed/`
-  - `sporsa.csv`
-  - `arduino.csv`
-  - `session_stats.json`
+  - `data/recordings/2026-02-26_k/session_stats.json` (timing stats)  
+  - `data/recordings/2026-02-26_k/parsed/` — `sporsa.csv`, `arduino.csv`, plots  
+- **Output** (session): `data/sessions/<session_name>/session_stats.json`
 
 ---
 
@@ -203,27 +197,18 @@ Exclude logs with empty parses, extreme dropouts, or poses that do not match the
 
 ## Stage 2 – Synchronize IMU streams (`sync/`)
 
-Four methods are available. Run any or all of them, then use `sync.selection`
-to pick the best result.
+Four methods run internally (SDA, LIDA, calibration windows, online); the pipeline picks the best and flattens the result into `synced/`.
 
-| Method | Module | Output dir | Drift? |
-|---|---|---|---|
-| SDA only | `sync.sda_sync` | `synced/sda/` | No |
-| SDA + LIDA | `sync.lida_sync` | `synced/lida/` | Yes |
-| Calibration anchors | `sync.calibration_sync` | `synced/cal/` | Yes |
-| Online (single anchor) | `sync.online_sync` | `synced/online/` | Pre-characterised |
+| Method | Module | Drift? |
+|---|---|---|
+| SDA only | `sync.sda_sync` | No |
+| SDA + LIDA | `sync.lida_sync` | Yes |
+| Calibration anchors | `sync.calibration_sync` | Yes |
+| Online (single anchor) | `sync.online_sync` | Pre-characterised |
 
 ```bash
-# Run all methods on a single recording + select best
-uv run -m sync 2026-02-26_5 --apply --plot
-
-# Run all methods on an entire session
-uv run -m sync 2026-02-26 --all --apply
-
-# Or run methods individually
-uv run -m sync calibration_sync 2026-02-26_5/parsed
-uv run -m sync lida_sync        2026-02-26_5/parsed
-uv run -m sync.selection        2026-02-26_5 --apply --plot
+uv run -m sync 2026-02-26_5
+uv run -m sync 2026-02-26 --all
 ```
 
 The selected winner is written to `synced/` with `sync_info.json`,

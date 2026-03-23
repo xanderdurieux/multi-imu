@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import find_sensor_csv, load_dataframe, recording_stage_dir
+from common import find_sensor_csv, load_dataframe, recording_dir, recording_stage_dir
 from ._utils import time_axis_seconds
 
 log = logging.getLogger(__name__)
@@ -55,7 +55,10 @@ _GAP_THRESHOLDS = {"sporsa": 15.0, "arduino": 25.5}
 # ---------------------------------------------------------------------------
 
 def _load_timing_stats(recording_name: str) -> dict:
-    stats_path = recording_stage_dir(recording_name, _STAGE) / "session_stats.json"
+    stats_path = recording_dir(recording_name) / "session_stats.json"
+    if not stats_path.exists():
+        legacy = recording_stage_dir(recording_name, _STAGE) / "session_stats.json"
+        stats_path = legacy if legacy.exists() else stats_path
     if not stats_path.exists():
         return {}
     try:
