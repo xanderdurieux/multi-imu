@@ -511,7 +511,6 @@ def synchronize_recording_from_calibration(
     peak_buffer_s: float = 1.0,
     lowpass_cutoff_hz: float | None = None,
     resample_rate_hz: float | None = None,
-    plot: bool = True,
 ) -> tuple[Path, Path, Path]:
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
@@ -563,15 +562,5 @@ def synchronize_recording_from_calibration(
     print(f"[{recording_name}/synced/cal] {ref_out.name}")
     print(f"[{recording_name}/synced/cal] {tgt_out.name}")
     print(f"[{recording_name}/synced/cal] {sync_json_out.name}")
-
-    if plot:
-        from visualization import plot_comparison
-
-        stage_ref = f"{recording_name}/synced/cal"
-        try:
-            plot_comparison.main([stage_ref])
-            plot_comparison.main([stage_ref, "--norm"])
-        except SystemExit:
-            pass
 
     return ref_out, tgt_out, sync_json_out

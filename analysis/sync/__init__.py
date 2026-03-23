@@ -1,10 +1,12 @@
-"""Synchronization package: SDA, LIDA, calibration, and online methods + selection.
+"""Synchronization package: four methods + automatic selection.
 
-Run all methods and pick the best for a recording::
+From ``analysis/``::
 
-    python -m sync <recording> --apply --plot
+    python -m sync 2026-02-26_5
+    python -m sync 2026-02-26 --all
 
-See :mod:`sync.run` for the full CLI (including ``sync sda_sync …``, short aliases, and ``--select-only``).
+Runs every method on ``parsed/``, selects the best, writes flat ``synced/`` with plots.
+See :mod:`sync.run`.
 """
 
 from .core import (
@@ -41,13 +43,17 @@ from .online_sync import (
     load_characterised_drift,
     synchronize_recording_online,
 )
+from .plots import (
+    plot_method_scores,
+    plot_methods_norm_grid,
+    plot_synced_norm_overlay,
+)
 from .selection import (
     SyncMethodQuality,
     SyncSelectionResult,
     apply_selection,
-    compare_all_recordings,
     compare_sync_models,
-    plot_sync_comparison,
+    prune_method_stage_directories,
     print_comparison,
     print_selection_result,
     select_best_sync_method,
@@ -92,9 +98,11 @@ __all__ = [
     "SyncMethodQuality",
     "SyncSelectionResult",
     "apply_selection",
-    "compare_all_recordings",
     "compare_sync_models",
-    "plot_sync_comparison",
+    "plot_method_scores",
+    "plot_methods_norm_grid",
+    "plot_synced_norm_overlay",
+    "prune_method_stage_directories",
     "print_comparison",
     "print_selection_result",
     "select_best_sync_method",

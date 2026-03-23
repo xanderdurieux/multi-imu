@@ -124,7 +124,6 @@ def synchronize_recording(
     use_acc: bool = True,
     use_gyro: bool = False,
     use_mag: bool = False,
-    plot: bool = False,
 ) -> tuple[Path, Path, Path]:
     """Synchronize two sensor streams for one recording using SDA + LIDA."""
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
@@ -175,15 +174,5 @@ def synchronize_recording(
     print(f"[{recording_name}/synced/lida] {ref_out.name}")
     print(f"[{recording_name}/synced/lida] {tgt_out.name}")
     print(f"[{recording_name}/synced/lida] {sync_json_out.name}")
-
-    if plot:
-        from visualization import plot_comparison
-
-        stage_ref = f"{recording_name}/synced/lida"
-        try:
-            plot_comparison.main([stage_ref])
-            plot_comparison.main([stage_ref, "--norm"])
-        except SystemExit:
-            pass
 
     return ref_out, tgt_out, sync_json_out

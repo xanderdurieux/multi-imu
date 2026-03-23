@@ -18,13 +18,13 @@ from .selection import (
     SyncSelectionResult,
     apply_selection,
     compare_sync_models,
-    plot_sync_comparison,
     print_comparison,
-    print_selection_result,
     select_best_sync_method,
 )
 
 log = logging.getLogger(__name__)
+
+_STAGE_IN = "parsed"
 
 
 @dataclass
@@ -55,27 +55,16 @@ class RecordingResult:
 
 
 _METHOD_RUNNERS = {
-    "sda": lambda rec, stage, **kw: synchronize_recording_sda(rec, stage, plot=kw.get("plot", False)),
-    "lida": lambda rec, stage, **kw: synchronize_recording(rec, stage, plot=kw.get("plot", False)),
-    "calibration": lambda rec, stage, **kw: synchronize_recording_from_calibration(
-        rec, stage, plot=kw.get("plot", False)
-    ),
-    "online": lambda rec, stage, **kw: synchronize_recording_online(rec, stage, plot=kw.get("plot", False)),
+    "sda": lambda rec, stage: synchronize_recording_sda(rec, stage),
+    "lida": lambda rec, stage: synchronize_recording(rec, stage),
+    "calibration": lambda rec, stage: synchronize_recording_from_calibration(rec, stage),
+    "online": lambda rec, stage: synchronize_recording_online(rec, stage),
 }
 
 
-def synchronize_recording_all_methods(
-    recording_name: str,
-    stage_in: str = "parsed",
-    *,
-    methods: list[str] | None = None,
-    apply: bool = True,
-    plot: bool = False,
-) -> RecordingResult:
-    """Run sync methods on one recording, then select the best result."""
-    if methods is None:
-        methods = ["sda", "lida", "calibration", "online"]
-
+def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
+    """Run all four sync methods on *recording_name* ``parsed/`` data, then select and apply."""
+    methods = ["sda", "lida", "calibration", "online"]
     result = RecordingResult(recording_name=recording_name)
     print(f"\n{'━' * 60}")
     print(f"  {recording_name}")
@@ -90,7 +79,7 @@ def synchronize_recording_all_methods(
 
         print(f"  [{label}] running …", end="", flush=True)
         try:
-            runner(recording_name, stage_in, plot=plot)
+            runner(recording_name, _STAGE_IN)
             result.method_results.append(MethodResult(method=method, ok=True))
             print("  done")
         except Exception as exc:
@@ -110,8 +99,7 @@ def synchronize_recording_all_methods(
         sel = select_best_sync_method(recording_name)
         result.selection = sel
         print(f"\n  Selected: {sel.method} (stage: {sel.stage})")
-        if apply:
-            apply_selection(recording_name, sel, plot=plot)
+        apply_selection(recording_name, sel)
     except Exception as exc:
         result.selection_error = str(exc)
         log.warning("Selection failed for %s: %s", recording_name, exc)
@@ -119,15 +107,8 @@ def synchronize_recording_all_methods(
     return result
 
 
-def synchronize_session(
-    session_name: str,
-    stage_in: str = "parsed",
-    *,
-    methods: list[str] | None = None,
-    apply: bool = True,
-    plot: bool = False,
-) -> list[RecordingResult]:
-    """Run sync methods on every recording in a session."""
+def synchronize_session(session_name: str) -> list[RecordingResult]:
+    """Run :func:`synchronize_recording_all_methods` for every ``session_name_*`` recording."""
     root = recordings_root()
     recordings = sorted(
         d.name
@@ -143,13 +124,7 @@ def synchronize_session(
 
     results: list[RecordingResult] = []
     for rec in recordings:
-        r = synchronize_recording_all_methods(
-            rec,
-            stage_in,
-            methods=methods,
-            apply=apply,
-            plot=plot,
-        )
+        r = synchronize_recording_all_methods(rec)
         results.append(r)
 
     _print_session_summary(session_name, results)
@@ -169,43 +144,3 @@ def _print_session_summary(session_name: str, results: list[RecordingResult]) ->
             line += f"  failed=[{fail_str}]"
         print(line)
     print(f"{'━' * 60}")
-
-
-def run_selection_only(
-    recording_name: str,
-    *,
-    apply: bool = False,
-    plot: bool = False,
-) -> None:
-    """Compare existing method outputs and optionally apply the winner."""
-    cmp = compare_sync_models(recording_name)
-    print_comparison(cmp)
-    result = select_best_sync_method(recording_name)
-    print()
-    print_selection_result(result)
-    if apply:
-        apply_selection(recording_name, result, plot=plot)
-    elif plot:
-        plot_sync_comparison(recording_name)
-
-
-def run_selection_session(
-    session_prefix: str,
-    *,
-    apply: bool = False,
-    plot: bool = False,
-) -> None:
-    """Run selection for every recording in a session."""
-    root = recordings_root()
-    recordings = sorted(
-        d.name
-        for d in root.iterdir()
-        if d.is_dir() and d.name.startswith(f"{session_prefix}_")
-    )
-    if not recordings:
-        log.warning("No recordings found matching prefix '%s_'.", session_prefix)
-        return
-
-    for rec in recordings:
-        print(f"\n=== {rec} ===")
-        run_selection_only(rec, apply=apply, plot=plot)

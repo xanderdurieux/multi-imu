@@ -64,91 +64,42 @@ sync/
 
 ## Recommended workflow
 
-### Run all methods on an entire session
+Input is always ``data/recordings/<recording>/parsed/`` (Sporsa + Arduino CSVs).
 
 ```bash
-uv run -m sync 2026-02-26 --all --apply
+# One recording: run all four methods, select best, flat synced/ + plots
+uv run -m sync 2026-02-26_5
+
+# Whole session (every folder 2026-02-26_*)
+uv run -m sync 2026-02-26 --all
 ```
 
-This discovers every recording whose name starts with `2026-02-26_`, runs all
-four sync methods on each one (failures per method are caught individually),
-selects the best result, copies it to `synced/`, and prints a summary:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Session summary: 2026-02-26
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  2026-02-26_2    ok=[Calibration, SDA + LIDA, ...]  → calibration
-  2026-02-26_3    ok=[SDA + LIDA, SDA only, Online]  → lida  failed=[Calibration]
-  ...
-```
-
-### Common variants
-
-```bash
-# Single recording — run all methods, select, copy to synced/
-uv run -m sync 2026-02-26_5 --apply --plot
-
-# Only run the two most useful offline methods
-uv run -m sync 2026-02-26 --all --methods calibration lida --apply
-
-# Just compare methods that have already been run
-uv run -m sync 2026-02-26_5 --select-only
-uv run -m sync 2026-02-26_5 --select-only --apply --plot
-uv run -m sync.selection 2026-02-26_5   # alternative entry point
-```
-
----
-
-## `run.py` / `pipeline.py` — full pipeline
-
-Runs any subset of the four sync methods on a recording or all recordings in
-a session, then selects the best and (optionally) applies it.
+Per-method outputs live under ``synced/sda`` … only until selection finishes; then
+they are removed and only the chosen streams remain in ``synced/`` together with
+comparison figures and ``all_methods.json``.
 
 ### Python API
 
 ```python
 from sync.pipeline import synchronize_recording_all_methods, synchronize_session
 
-# Single recording
-result = synchronize_recording_all_methods(
-    "2026-02-26_5",
-    stage_in="parsed",
-    methods=["calibration", "lida"],  # None = all four
-    apply=True,
-    plot=True,
-)
-print(result.succeeded)          # ["calibration", "lida"]
-print(result.failed)             # []
-print(result.selection.method)   # "calibration"
-
-# Whole session
-results = synchronize_session("2026-02-26", apply=True, plot=False)
+result = synchronize_recording_all_methods("2026-02-26_5")
+results = synchronize_session("2026-02-26")
 ```
 
-### Return types
-
-- `RecordingResult` — per-method success/failure list + selected `SyncSelectionResult`
-- `MethodResult` — `method`, `ok`, `error` (if failed)
+`RecordingResult` lists per-method success/failure and the selected method (if any).
 
 ### CLI
 
-```bash
-uv run -m sync <name> [--all] [--stage STAGE] [--methods ...] [--apply] [--plot] [--select-only]
-uv run -m sync sda_sync <recording>/parsed
-uv run -m sync lida_sync <recording>/parsed
-uv run -m sync calibration_sync <recording>/parsed
-uv run -m sync online_sync <recording>/parsed [--drift-ppm 400] [--plot]
+```text
+python -m sync <recording_or_session_prefix> [--all]
 ```
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--all` | off | Treat `name` as a session prefix, process all matching recordings |
-| `--stage` | `parsed` | Input stage directory |
-| `--methods` | all four | Space-separated subset: `sda lida calibration online` |
-| `--apply` | off | Copy the selected winner to `synced/` |
-| `--plot` | off | Generate plots per method and the comparison overlay |
-| `--select-only` | off | Skip running methods; compare existing outputs and select |
+---
+
+## `run.py` / `pipeline.py`
+
+Thin CLI plus orchestration: always all four methods, always apply selection to ``synced/``.
 
 ---
 
@@ -166,8 +117,7 @@ estimation; sanity-checking the offset independently of drift.
 3. Apply the offset-only correction to the target timestamps.
 4. Compute quality correlations via `compute_sync_correlations()`.
 
-**Output:** `synced_sda/`  
-**CLI:** `uv run -m sync sda_sync <recording>/parsed` (alias: `sda`)  
+**Output (intermediate):** `synced/sda/`  
 **`sync_info.json` extras:** `sync_method: "sda_offset_only"`, `sda_score`
 
 ---
@@ -185,8 +135,7 @@ reliable calibration sequences.
 3. Fit a linear model `offset(t) = offset_0 + drift × Δt` to the scatter.
 4. Apply the full `offset + drift × Δt` model.
 
-**Output:** `synced_lida/`  
-**CLI:** `uv run -m sync lida_sync <recording>/parsed` (alias: `lida`)  
+**Output (intermediate):** `synced/lida/`  
 **`sync_info.json` extras:** `sync_method: "sda_lida"`
 
 **Notable parameters** (passed to `synchronize_recording`):
@@ -224,8 +173,7 @@ drift because it uses known, sharp events as timing anchors.
    recording-duration ratio.
 5. Back-propagate the opening offset to the target time origin.
 
-**Output:** `synced_cal/`  
-**CLI:** `uv run -m sync calibration_sync <recording>/parsed` (alias: `cal`)
+**Output (intermediate):** `synced/cal/`
 
 **`sync_info.json` extras:**
 
@@ -257,8 +205,7 @@ drift matters for a given recording.
 4. Back-propagate the refined offset to the target time origin using the
    loaded drift.
 
-**Output:** `synced_online/`  
-**CLI:** `uv run -m sync online_sync <recording>/parsed [--drift-ppm 400] [--plot]` (alias: `online`)  
+**Output (intermediate):** `synced/online/`  
 **`sync_info.json` extras:** `sync_method: "online_opening_anchor"`,
 `drift_ppm_source`, `drift_ppm_applied`
 
@@ -289,8 +236,10 @@ best result.
 
 ### `synced/` output
 
-When `apply_selection` (or `--apply`) is used, the winner's files are copied
-to `synced/`:
+`apply_selection` (called automatically by the pipeline) copies the winner into
+flat `synced/` and adds `sync_methods_comparison.png`, `sync_method_metrics.png`,
+`synced_norms_overlay.png`, `all_methods.json`, then
+removes the per-method subfolders.
 
 | File | Description |
 |---|---|
@@ -298,22 +247,6 @@ to `synced/`:
 | `arduino.csv` | Synchronised target sensor (copy from winner) |
 | `sync_info.json` | The winning method's model |
 | `all_methods.json` | Comparison metrics for all four methods |
-| `sync_method_comparison.png` | acc_norm overlay per method (if `--plot`) |
-
-### CLI
-
-```bash
-# Compare what's available (no --apply)
-uv run -m sync 2026-02-26_5 --select-only
-uv run -m sync.selection 2026-02-26_5
-
-# Compare, select, copy
-uv run -m sync 2026-02-26_5 --select-only --apply --plot
-
-# Batch comparison over a session
-uv run -m sync 2026-02-26 --all --select-only --plot
-uv run -m sync.selection 2026-02-26 --all --plot
-```
 
 ---
 

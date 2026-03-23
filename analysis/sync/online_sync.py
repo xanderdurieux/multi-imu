@@ -159,7 +159,6 @@ def synchronize_recording_online(
     target_sensor: str = "arduino",
     drift_ppm: float | None = None,
     sample_rate_hz: float = 100.0,
-    plot: bool = False,
 ) -> tuple[Path, Path, Path]:
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
     tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
@@ -211,15 +210,5 @@ def synchronize_recording_online(
     print(f"[{recording_name}/synced/online] {ref_out.name}")
     print(f"[{recording_name}/synced/online] {tgt_out.name}")
     print(f"[{recording_name}/synced/online] {sync_json_path.name}")
-
-    if plot:
-        from visualization import plot_comparison
-
-        stage_ref = f"{recording_name}/synced/online"
-        try:
-            plot_comparison.main([stage_ref])
-            plot_comparison.main([stage_ref, "--norm"])
-        except SystemExit:
-            pass
 
     return ref_out, tgt_out, sync_json_path

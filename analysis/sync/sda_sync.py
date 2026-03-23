@@ -33,7 +33,6 @@ def synchronize_recording_sda(
     use_acc: bool = True,
     use_gyro: bool = False,
     use_mag: bool = False,
-    plot: bool = False,
 ) -> tuple[Path, Path, Path]:
     """Synchronize two sensor streams using SDA (offset-only, no drift correction)."""
     ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
@@ -98,15 +97,5 @@ def synchronize_recording_sda(
     print(f"[{recording_name}/synced/sda] {ref_out.name}")
     print(f"[{recording_name}/synced/sda] {tgt_out.name}")
     print(f"[{recording_name}/synced/sda] {sync_json_path.name}")
-
-    if plot:
-        from visualization import plot_comparison
-
-        stage_ref = f"{recording_name}/synced/sda"
-        try:
-            plot_comparison.main([stage_ref])
-            plot_comparison.main([stage_ref, "--norm"])
-        except SystemExit:
-            pass
 
     return ref_out, tgt_out, sync_json_path

@@ -18,8 +18,9 @@ Selection priority
    ``correlation.offset_and_drift``, with ties broken by:
    ``lida > sda > online``.
 
-The selected method's files are copied to ``synced/`` together with a
-``all_methods.json`` summary of every method's metrics.
+The selected method's CSVs and ``sync_info.json`` are copied to flat ``synced/``;
+per-method subfolders are removed. ``all_methods.json`` and comparison PNGs
+summarise every method's metrics.
 
 Usage
 -----
@@ -33,13 +34,12 @@ Usage
 
     result = select_best_sync_method("2026-02-26_5")
     print(result.method)   # e.g. "calibration"
-    print(result.stage)    # e.g. "synced_cal"
+    print(result.stage)    # e.g. "synced/cal" (intermediate; flattened to synced/ after apply)
 
 Command line::
 
-    python -m sync.selection 2026-02-26_5
-    python -m sync.selection 2026-02-26_5 --plot
-    python -m sync.selection 2026-02-26_5 --all
+    python -m sync 2026-02-26_5
+    python -m sync 2026-02-26 --all
 """
 
 from __future__ import annotations
@@ -51,12 +51,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
 
-from common import recording_stage_dir, recordings_root
+from common import recording_stage_dir
+
+from . import plots as sync_plots
 
 log = logging.getLogger(__name__)
 
@@ -195,92 +194,6 @@ def print_comparison(result: dict) -> None:
         ])
 
     print(f"{'─' * 70}")
-
-
-# ---------------------------------------------------------------------------
-# Overlay plot
-# ---------------------------------------------------------------------------
-
-def plot_sync_comparison(
-    recording_name: str,
-    *,
-    reference_sensor: str = "sporsa",
-    target_sensor: str = "arduino",
-    sample_rate_hz: float = 10.0,
-    zoom_s: float = 90.0,
-    out_dir: Optional[Path] = None,
-) -> Optional[Path]:
-    """Generate an acc_norm overlay plot comparing all available sync methods.
-
-    Produces one row per available method (up to 4), with two columns:
-    left = full recording, right = first ``zoom_s`` seconds.
-
-    Returns the path to the saved PNG, or ``None`` if no method data exists.
-    """
-    from .core import add_vector_norms, remove_dropouts, resample_stream
-
-    def _load(recording_name: str, stage: str, sensor: str) -> Optional[pd.DataFrame]:
-        df = _load_sensor_csv(recording_name, stage, sensor)
-        if df is None or df.empty:
-            return None
-        df = add_vector_norms(df)
-        df = remove_dropouts(df)
-        return resample_stream(df, sample_rate_hz)
-
-    panels = []
-    for method, stage in METHOD_STAGES.items():
-        ref_df = _load(recording_name, stage, reference_sensor)
-        tgt_df = _load(recording_name, stage, target_sensor)
-        if ref_df is not None or tgt_df is not None:
-            panels.append((method, METHOD_LABELS[method], ref_df, tgt_df))
-
-    if not panels:
-        log.warning("No sync data found for any method – skipping comparison plot.")
-        return None
-
-    n_rows = len(panels)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 3.5 * n_rows), sharey="row")
-    if n_rows == 1:
-        axes = [axes]
-    fig.suptitle(f"{recording_name}: acc_norm alignment per sync method", fontsize=12)
-
-    for row_idx, (method, label, ref_df, tgt_df) in enumerate(panels):
-        for col, zoom in enumerate([False, True]):
-            ax = axes[row_idx][col]
-
-            def _plot(df: Optional[pd.DataFrame], name: str, color: str) -> None:
-                if df is None or df.empty:
-                    return
-                ts = df["timestamp"].to_numpy(float)
-                t0 = float(ref_df["timestamp"].iloc[0]) if ref_df is not None else ts[0]
-                t_s = (ts - t0) / 1000.0 if ts.mean() > 1e9 else ts - t0
-                ax.plot(t_s, df["acc_norm"].to_numpy(float), lw=0.6, alpha=0.85,
-                        label=name, color=color)
-
-            _plot(ref_df, reference_sensor, "steelblue")
-            _plot(tgt_df, target_sensor, "tomato")
-
-            if zoom and ref_df is not None:
-                ax.set_xlim(0, zoom_s)
-
-            ax.set_xlabel("Time (s)" if row_idx == n_rows - 1 else "")
-            ax.set_ylabel("acc_norm (m/s²)" if col == 0 else "")
-            title_suffix = f"first {zoom_s:.0f} s" if zoom else "full recording"
-            ax.set_title(f"{label} — {title_suffix}", fontsize=9)
-            if row_idx == 0 and col == 0:
-                ax.legend(loc="upper right", fontsize=8)
-            ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    if out_dir is None:
-        out_dir = recordings_root() / recording_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "sync_method_comparison.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[{recording_name}] Comparison plot saved → {out_path.name}")
-    return out_path
 
 
 # ---------------------------------------------------------------------------
@@ -462,29 +375,35 @@ def select_best_sync_method(recording_name: str) -> SyncSelectionResult:
 # Apply selection: copy winner to synced/
 # ---------------------------------------------------------------------------
 
+def prune_method_stage_directories(recording_name: str) -> None:
+    """Remove all ``synced/{sda,lida,cal,online}/`` trees after the winner was copied flat."""
+    for _method, stage in METHOD_STAGES.items():
+        path = recording_stage_dir(recording_name, stage)
+        if path.is_dir():
+            shutil.rmtree(path)
+            print(f"[{recording_name}/synced] removed {path.name}/")
+
+
 def apply_selection(
     recording_name: str,
     result: SyncSelectionResult,
     *,
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-    plot: bool = True,
 ) -> Path:
-    """Copy the selected method's outputs to ``synced/`` and write a summary JSON.
-
-    The ``synced/`` directory will contain:
-
-    - ``<reference_sensor>.csv``  — reference sensor data
-    - ``<target_sensor>.csv``     — synchronised target sensor data
-    - ``sync_info.json``          — the winning method's sync model
-    - ``all_methods.json``        — comparison metrics for all methods
-    - ``sync_method_comparison.png`` — overlay plot (if *plot* is True)
-
-    Returns the path to the ``synced/`` directory.
-    """
+    """Copy the winner into flat ``synced/``, write ``all_methods.json``, plots, then prune method subdirs."""
     src_dir = recording_stage_dir(recording_name, result.stage)
     out_dir = recording_stage_dir(recording_name, "synced")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    comparison_snapshot = compare_sync_models(recording_name)
+
+    sync_plots.plot_methods_norm_grid(
+        recording_name,
+        reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
+        out_dir=out_dir,
+    )
 
     for filename in (f"{reference_sensor}.csv", f"{target_sensor}.csv", "sync_info.json"):
         src = src_dir / filename
@@ -502,55 +421,24 @@ def apply_selection(
     print(f"[{recording_name}/synced] sync_info.json")
     print(f"[{recording_name}/synced] all_methods.json")
 
-    if plot:
-        plot_sync_comparison(recording_name, out_dir=out_dir)
-        from visualization import plot_comparison
-        stage_ref = f"{recording_name}/synced"
-        try:
-            plot_comparison.main([stage_ref])
-            plot_comparison.main([stage_ref, "--norm"])
-        except SystemExit:
-            pass
+    sync_plots.plot_method_scores(
+        recording_name,
+        result,
+        comparison=comparison_snapshot,
+        out_dir=out_dir,
+    )
+    sync_plots.plot_synced_norm_overlay(
+        recording_name,
+        reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
+        selected_method_key=result.method,
+        out_dir=out_dir,
+    )
+
+    prune_method_stage_directories(recording_name)
 
     return out_dir
 
-
-# ---------------------------------------------------------------------------
-# Batch helpers
-# ---------------------------------------------------------------------------
-
-def compare_all_recordings(
-    session_prefix: str,
-    *,
-    plot: bool = False,
-) -> list[dict]:
-    """Run :func:`compare_sync_models` for every recording matching *session_prefix*.
-
-    Returns a list of comparison dicts (one per recording).
-    """
-    root = recordings_root()
-    recordings = sorted(
-        d.name
-        for d in root.iterdir()
-        if d.is_dir() and d.name.startswith(f"{session_prefix}_")
-    )
-    if not recordings:
-        log.warning("No recordings found matching prefix '%s_'", session_prefix)
-        return []
-
-    results = []
-    for rec in recordings:
-        result = compare_sync_models(rec)
-        results.append(result)
-        print_comparison(result)
-        if plot:
-            plot_sync_comparison(rec)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def print_selection_result(result: SyncSelectionResult) -> None:
     """Print a short summary of which method was selected and per-method metrics."""
@@ -566,61 +454,3 @@ def print_selection_result(result: SyncSelectionResult) -> None:
         drift = _fmt(q.drift_ppm, ".1f")
         marker = " ← selected" if m == result.method else ""
         print(f"  {METHOD_LABELS[m]:<14}  corr={corr}  drift={drift} ppm{marker}")
-
-
-def main(argv: list[str] | None = None) -> None:
-    """CLI entry point.
-
-    Usage::
-
-        python -m sync.selection <recording_name> [--apply] [--plot] [--all]
-    """
-    import sys
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="python -m sync.selection",
-        description=(
-            "Compare all sync methods and select the best for a recording. "
-            "Optionally copy the winner to synced/ with a summary JSON."
-        ),
-    )
-    parser.add_argument(
-        "recording_name",
-        help="Recording name (e.g. '2026-02-26_5') or session prefix when --all is used.",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Copy the selected method's outputs to synced/.",
-    )
-    parser.add_argument(
-        "--plot",
-        action="store_true",
-        help="Generate comparison plots.",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        dest="all_recordings",
-        help="Process all recordings whose name starts with RECORDING_NAME followed by '_'.",
-    )
-
-    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
-
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-
-    if args.all_recordings:
-        compare_all_recordings(args.recording_name, plot=args.plot)
-    else:
-        cmp = compare_sync_models(args.recording_name)
-        print_comparison(cmp)
-        result = select_best_sync_method(args.recording_name)
-        print()
-        print_selection_result(result)
-        if args.apply:
-            apply_selection(args.recording_name, result, plot=args.plot)
-
-
-if __name__ == "__main__":
-    main()
