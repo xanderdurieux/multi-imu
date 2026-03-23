@@ -36,10 +36,12 @@ uv run -m parser.session 2026-02-26
 
 - **Input**: `data/sessions/2026-02-26/{arduino,sporsa}/*.txt`
 - **Output** per recording `2026-02-26_k`:
+  - `session_stats.json` — stream timing stats (recording root)
   - `parsed/sporsa.csv`
   - `parsed/arduino.csv`
-  - `parsed/session_stats.json`
   - `parsed/*.png` — diagnostic plots (acc_norm, calibration segments, timing)
+- **Output** for the whole session:
+  - `data/sessions/2026-02-26/session_stats.json` — compact summary across recordings
 
 **File matching:** recording numbers are extracted from filenames using patterns
 like `session10`, `log3`, or the last integer found. Sporsa and Arduino files
@@ -95,12 +97,11 @@ Parses the Arduino (helmet) BLE log. The Arduino transmits two formats:
 ```python
 from parser.stats import compute_stream_timing_stats, write_recording_stats
 
-stats = compute_stream_timing_stats(df, sensor_type="arduino")
-write_recording_stats(recording_name, stats_dict)
+write_recording_stats("2026-02-26_5")  # reads parsed/*.csv, writes recording/session_stats.json
 ```
 
 Computes per-sensor timing quality metrics and writes them to
-`parsed/session_stats.json`.
+`data/recordings/<recording>/session_stats.json`.
 
 **Key metrics:**
 

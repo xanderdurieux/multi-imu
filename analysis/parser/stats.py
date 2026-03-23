@@ -2,7 +2,7 @@
 Session statistics utilities.
 
 Computes timing/statistics for processed IMU CSV streams (DataFrames) and writes
-the results to a JSON file in the session folder.
+the results to ``session_stats.json`` in the recording folder.
 
 Key metrics:
 - sampling rate and inter-sample interval distribution
@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common import recording_stage_dir, load_dataframe
+from common import load_dataframe, recording_dir, recording_stage_dir
 
 
 def _interval_summary(interval_ms: pd.Series) -> dict[str, Any]:
@@ -235,8 +235,7 @@ def compute_recording_stats(recording_name: str, stage: str = "parsed") -> Recor
 
 def write_recording_stats(recording_name: str, stage: str = "parsed") -> Path:
     stats = compute_recording_stats(recording_name, stage)
-    stage_dir = recording_stage_dir(recording_name, stage)
-    path = stage_dir / "session_stats.json"
+    path = recording_dir(recording_name) / "session_stats.json"
     path.write_text(json.dumps(asdict(stats), indent=2, sort_keys=True), encoding="utf-8")
     return path
 
@@ -244,7 +243,7 @@ def write_recording_stats(recording_name: str, stage: str = "parsed") -> Path:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m parser.stats",
-        description="Compute IMU CSV timing statistics and write session_stats.json.",
+        description="Compute IMU CSV timing statistics and write recording/session_stats.json.",
     )
     parser.add_argument(
         "recording_name",

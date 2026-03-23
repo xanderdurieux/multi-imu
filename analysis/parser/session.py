@@ -10,8 +10,8 @@ import json
 
 from common import (
     load_dataframe,
+    recording_dir,
     recording_stage_dir,
-    recordings_root,
     session_input_dir,
     write_dataframe,
 )
@@ -71,16 +71,17 @@ def process_session(session_name: str) -> None:
 
     Output layout (one folder per recording number)::
 
-        data/recordings/<session_name>_<N>/parsed/
-            sporsa.csv
-            arduino.csv
-            session_stats.json
-            *.png                              # per-recording sensor/comparison plots
-            <sensor>_calibration_segments.png  # calibration-segment diagnostics
+        data/recordings/<session_name>_<N>/
+            session_stats.json                 # per-recording stream timing stats
+            parsed/
+                sporsa.csv
+                arduino.csv
+                *.png                          # per-recording sensor/comparison plots
+                <sensor>_calibration_segments.png
 
-    Additionally, a session-wide summary JSON without file paths is written to::
+    Additionally, a session-wide summary JSON (no file paths) is written to::
 
-        data/recordings/<session_name>_session_stats.json
+        data/sessions/<session_name>/session_stats.json
 
     This aggregates per-recording parsed durations, section statistics, and
     calibration-segment summaries for each sensor.
@@ -132,9 +133,9 @@ def process_session(session_name: str) -> None:
             df = _process_file(sensor, src, dst)
             parsed_nonempty[sensor] = bool(df is not None and not df.empty)
 
-        # Per-recording parsed timing stats (written to parsed/session_stats.json).
+        # Per-recording timing stats at recording root (see write_recording_stats).
         stats_path = write_recording_stats(recording_name)
-        print(f"[{recording_name}/parsed] stats: {stats_path.name}")
+        print(f"[{recording_name}] stats: {stats_path.name}")
 
         # Per-recording sensor/comparison plots for the parsed stage.
         plot_recording(recording_name, stage_filter="parsed")
@@ -275,12 +276,12 @@ def process_session(session_name: str) -> None:
         "num_recordings": len(session_summaries),
         "recordings": session_summaries,
     }
-    out_session_stats = recordings_root() / f"{session_name}_session_stats.json"
+    out_session_stats = in_root / "session_stats.json"
     out_session_stats.write_text(
         json.dumps(session_stats, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"[{session_name}] session stats: {out_session_stats.name}")
+    print(f"[{session_name}] session stats: sessions/{session_name}/{out_session_stats.name}")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
