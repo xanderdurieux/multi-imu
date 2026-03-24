@@ -72,12 +72,15 @@ def _compute_euler_deg_from_df(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray
         ):
             return yaw_col, pitch_col, roll_col
 
-    # Fall back to computing from quaternions.
-    quat_cols = {"qw", "qx", "qy", "qz"}
-    if not quat_cols.issubset(df.columns):
+    # Fall back to computing from quaternions (support both qw/qx/qy/qz and q0/q1/q2/q3).
+    if {"qw", "qx", "qy", "qz"}.issubset(df.columns):
+        quat_names = ["qw", "qx", "qy", "qz"]
+    elif {"q0", "q1", "q2", "q3"}.issubset(df.columns):
+        quat_names = ["q0", "q1", "q2", "q3"]
+    else:
         return yaw, pitch, roll
 
-    quats = df[["qw", "qx", "qy", "qz"]].to_numpy(dtype=float)
+    quats = df[quat_names].to_numpy(dtype=float)
     for i in range(n):
         if not np.all(np.isfinite(quats[i])):
             continue
@@ -101,12 +104,15 @@ def _compute_world_linear_acc(
 
     Returns an ``(N, 3)`` array with NaNs for samples where inputs are invalid.
     """
-    required = {"ax", "ay", "az", "qw", "qx", "qy", "qz"}
-    if not required.issubset(df.columns):
+    if {"ax", "ay", "az", "qw", "qx", "qy", "qz"}.issubset(df.columns):
+        quat_names_lin = ["qw", "qx", "qy", "qz"]
+    elif {"ax", "ay", "az", "q0", "q1", "q2", "q3"}.issubset(df.columns):
+        quat_names_lin = ["q0", "q1", "q2", "q3"]
+    else:
         return np.zeros((len(df), 3), dtype=float) * np.nan
 
     acc_body = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-    quats = df[["qw", "qx", "qy", "qz"]].to_numpy(dtype=float)
+    quats = df[quat_names_lin].to_numpy(dtype=float)
 
     n = len(df)
     acc_world = np.full((n, 3), np.nan, dtype=float)
