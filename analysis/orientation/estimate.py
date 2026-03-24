@@ -19,12 +19,18 @@ from common import load_dataframe
 from common.quaternion import euler_from_quat, quat_rotate
 
 from .complementary import complementary_orientation
+from .ekf import ekf_orientation
 from .madgwick import madgwick_acc_only, madgwick_9dof
 
 log = logging.getLogger(__name__)
 
 GRAVITY_M_S2 = 9.81
-FILTER_VARIANTS = ["madgwick_acc_only", "madgwick_9dof", "complementary_orientation"]
+FILTER_VARIANTS = [
+    "madgwick_acc_only",
+    "madgwick_9dof",
+    "complementary_orientation",
+    "ekf_orientation",
+]
 
 
 def _world_to_body(df: pd.DataFrame, R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -208,6 +214,8 @@ def estimate_section(
                 quats = madgwick_9dof(acc_body, gyro_body, mag_valid, dt)
             elif variant == "complementary_orientation":
                 quats = complementary_orientation(acc_body, gyro_body, dt)
+            elif variant == "ekf_orientation":
+                quats = ekf_orientation(acc_body, gyro_body, dt)
             else:
                 continue
 
