@@ -97,7 +97,7 @@ Parses the Arduino (helmet) BLE log. The Arduino transmits two formats:
 ```python
 from parser.stats import compute_stream_timing_stats, write_recording_stats
 
-write_recording_stats("2026-02-26_5")  # reads parsed/*.csv, writes recording/session_stats.json
+write_recording_stats("2026-02-26_r5")  # reads parsed/*.csv, writes recording/session_stats.json
 ```
 
 Computes per-sensor timing quality metrics and writes them to
@@ -127,15 +127,15 @@ Detects calibration sequences in a synchronized recording and splits all
 sensor CSVs into calibration-bounded **sections**.
 
 ```bash
-uv run -m parser.split_sections 2026-02-26_5/synced_cal
-uv run -m parser.split_sections 2026-02-26_5/synced_cal --no-plot
+uv run -m parser.split_sections 2026-02-26_r5/synced_cal
+uv run -m parser.split_sections 2026-02-26_r5/synced_cal --no-plot
 ```
 
 ```python
 from parser.split_sections import split_recording_into_sections
 
 section_dirs = split_recording_into_sections(
-    recording_name="2026-02-26_5",
+    recording_name="2026-02-26_r5",
     stage_in="synced_cal",
     sensors=["sporsa", "arduino"],
     reference_sensor="sporsa",
@@ -150,20 +150,18 @@ section_dirs = split_recording_into_sections(
    Section `k` spans from the end of calibration segment `k` to the start
    of calibration segment `k+1`, including a small overlap with each flanking
    calibration for context.
-3. Write `sections/section_k/sporsa.csv` and `sections/section_k/arduino.csv`
+3. Write `data/sections/<recording_name>s<section_k>/sporsa.csv` and
+   `data/sections/<recording_name>s<section_k>/arduino.csv`
    for each section.
 4. Optionally generate per-section sensor and comparison plots.
 
 **Output layout:**
 
 ```
-data/recordings/<recording>/sections/
-    section_1/
-        sporsa.csv
-        arduino.csv
-        *.png (if plot=True)
-    section_2/
-        ...
+data/sections/<recording_name>s<section_idx>/
+    sporsa.csv
+    arduino.csv
+    *.png (if plot=True)
 ```
 
 **Section inclusion:** sections where only one calibration sequence is

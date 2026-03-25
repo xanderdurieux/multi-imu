@@ -6,11 +6,11 @@ A calibration sequence has the pattern:
 This module finds those sequences in the reference sensor, then splits all
 configured sensors into matching time windows saved under::
 
-    data/recordings/<recording_name>/sections/
-        section_1/sporsa.csv
-        section_1/arduino.csv
-        section_2/sporsa.csv
-        …
+    data/sections/
+        <recording_name>s<section_idx>/
+            sporsa.csv
+            arduino.csv
+            …
 
 CLI usage::
 
@@ -84,13 +84,10 @@ def split_recording(
 
     Outputs are saved to::
 
-        data/recordings/<recording_name>/sections/
-            section_1/
-                sporsa.csv
-                arduino.csv
-                sporsa.png, arduino.png, …  (if plot=True)
-            section_2/
-                …
+        data/sections/<recording_name>s<section_idx>/
+            sporsa.csv
+            arduino.csv
+            *.png  (if plot=True)
 
     If fewer than two calibration sequences are found a warning is logged and
     the full streams are saved under ``sections/section_1/``.
@@ -144,12 +141,14 @@ def split_recording(
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         sensor_dfs[sensor] = df
 
-    sections_root = recording_dir(recording_name) / "sections"
+    from common.paths import sections_root as _sections_root
+
+    sections_base = _sections_root()
     available_sensors = list(sensor_dfs)
 
     def _write_section(section_idx: int, sensor_slices: dict[str, pd.DataFrame]) -> list[Path]:
-        section_stage = f"section_{section_idx}"
-        section_dir = sections_root / section_stage
+        section_stage = f"section_{section_idx}"  # used for stage-ref strings to plotting
+        section_dir = sections_base / f"{recording_name}s{section_idx}"
         section_dir.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []
         for sensor, df in sensor_slices.items():
@@ -231,15 +230,12 @@ def sync_sections(
     """
     from sync.calibration_sync import synchronize_from_calibration
 
-    sections_root = recording_dir(recording_name) / "sections"
-    if not sections_root.exists():
-        log.warning("No sections directory found for %s", recording_name)
-        return
+    from common.paths import iter_sections_for_recording
 
-    section_dirs = sorted(
-        (d for d in sections_root.iterdir() if d.is_dir() and d.name.startswith("section_")),
-        key=lambda p: p.name,
-    )
+    section_dirs = iter_sections_for_recording(recording_name)
+    if not section_dirs:
+        log.warning("No section directories found for %s", recording_name)
+        return
 
     for section_dir in section_dirs:
         ref_csv = section_dir / f"{reference_sensor}.csv"
@@ -278,9 +274,12 @@ def sync_sections(
                 shutil.rmtree(tmp_dir)
 
         if plot:
+            from common.paths import parse_section_folder_name
+
+            _rec_name, sec_idx = parse_section_folder_name(section_dir.name)
             _plot_section(
                 recording_name,
-                f"sections/{section_dir.name}",
+                f"sections/section_{sec_idx}",
                 [reference_sensor, target_sensor],
             )
 
@@ -296,14 +295,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Detect calibration sequences in a recording and split it into "
             "sections.  Each section spans from the start of one calibration "
             "to the end of the next and is saved under "
-            "data/recordings/<recording_name>/sections/section_N/."
+            "data/sections/<recording_name>s<section_idx>/."
         ),
     )
     parser.add_argument(
         "recording_name_stage",
         help=(
             "Recording name and input stage as '<recording_name>/<stage>' "
-            "(e.g. '2026-02-26_5/synced_cal')."
+            "(e.g. '2026-02-26_r5/synced_cal')."
         ),
     )
     parser.add_argument(

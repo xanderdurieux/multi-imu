@@ -13,6 +13,7 @@ from common import find_sensor_csv, load_dataframe, recording_stage_dir
 from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
 from .plot_sensor import prepare_sensor_axes, sensor_norm
 from ._utils import mask_dropout_packets as _mask_dropout_packets
+from ._utils import mask_valid_plot_x
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -36,16 +37,33 @@ def main(argv: Optional[list[str]] = None) -> None:
     if len(parts) != 2:
         parser.error("recording_name_stage must be in format '<recording_name>/<stage>'")
     recording_name, stage = parts
-    stage_dir = recording_stage_dir(recording_name, stage)
 
-    try:
-        csv_path_a = find_sensor_csv(recording_name, stage, args.sensor_name_a)
-        csv_path_b = find_sensor_csv(recording_name, stage, args.sensor_name_b)
-    except FileNotFoundError as exc:
-        print(f"[{recording_name}/{stage}] skipping comparison: {exc}")
+    # New layout: section stage strings map to top-level data/sections/<rec>s<idx>/.
+    if stage.startswith("sections/"):
+        from common.paths import section_dir as _section_dir
+
+        sec_s = stage.split("/", 1)[1]
+        if not sec_s.startswith("section_"):
+            parser.error(f"Unrecognized section stage id: {stage!r}")
+        sec_idx = int(sec_s.split("_", 1)[1])
+        stage_dir = _section_dir(recording_name, sec_idx)
+
+        csv_path_a = stage_dir / f"{args.sensor_name_a}.csv"
+        csv_path_b = stage_dir / f"{args.sensor_name_b}.csv"
+    else:
+        stage_dir = recording_stage_dir(recording_name, stage)
+        try:
+            csv_path_a = find_sensor_csv(recording_name, stage, args.sensor_name_a)
+            csv_path_b = find_sensor_csv(recording_name, stage, args.sensor_name_b)
+        except FileNotFoundError as exc:
+            print(f"[{recording_name}/{stage}] skipping comparison: {exc}")
+            return
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    if not csv_path_a.is_file() or not csv_path_b.is_file():
+        print(f"[{recording_name}/{stage}] skipping comparison: missing CSV(s)")
         return
-    except ValueError as exc:
-        parser.error(str(exc))
 
     df_a = _mask_dropout_packets(load_dataframe(csv_path_a))
     df_b = _mask_dropout_packets(load_dataframe(csv_path_b))
@@ -68,6 +86,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         time_seconds_a = (ts_a - ts_a.min()) / 1000.0
         time_seconds_b = (ts_b - ts_b.min()) / 1000.0
 
+    ta = time_seconds_a.to_numpy(dtype=float)
+    tb = time_seconds_b.to_numpy(dtype=float)
+    mx_a = mask_valid_plot_x(ta)
+    mx_b = mask_valid_plot_x(tb)
+
     num_cols = 1 if args.norm else 3
     sensor_types = ["acc", "gyro", "mag"]
     fig, ax_grid = prepare_sensor_axes(len(sensor_types), num_cols)
@@ -75,8 +98,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     for i, sensor_type in enumerate(sensor_types):
         data_a = df_a[list(SENSOR_COMPONENTS[sensor_type])]
         data_b = df_b[list(SENSOR_COMPONENTS[sensor_type])]
-        mask_a = data_a.notna().all(axis=1)
-        mask_b = data_b.notna().all(axis=1)
+        mask_a = data_a.notna().all(axis=1).to_numpy(dtype=bool) & mx_a
+        mask_b = data_b.notna().all(axis=1).to_numpy(dtype=bool) & mx_b
 
         if args.norm:
             data_a = sensor_norm(data_a, sensor_type)
@@ -87,15 +110,19 @@ def main(argv: Optional[list[str]] = None) -> None:
             col_data_b = data_b if args.norm else data_b[SENSOR_COMPONENTS[sensor_type][j]]
 
             ax = ax_grid[i][j]
-            ax.plot(time_seconds_a[mask_a], col_data_a[mask_a], label=args.sensor_name_a, alpha=0.8)
-            ax.plot(time_seconds_b[mask_b], col_data_b[mask_b], label=args.sensor_name_b, alpha=0.8)
+            ax.plot(ta[mask_a], col_data_a[mask_a], label=args.sensor_name_a, alpha=0.8)
+            ax.plot(tb[mask_b], col_data_b[mask_b], label=args.sensor_name_b, alpha=0.8)
             ax.legend(loc="upper right")
             ax.grid(True, alpha=0.3)
             ax.set_xlabel("Time [s]")
-            ax.set_xlim(
-                min(time_seconds_a.min(), time_seconds_b.min()),
-                max(time_seconds_a.max(), time_seconds_b.max()),
-            )
+            x_parts = []
+            if mask_a.any():
+                x_parts.append(ta[mask_a])
+            if mask_b.any():
+                x_parts.append(tb[mask_b])
+            if x_parts:
+                xc = np.concatenate(x_parts)
+                ax.set_xlim(float(xc.min()), float(xc.max()))
             ax.set_ylabel(SENSOR_LABELS[sensor_type][1])
             ax.set_title(SENSOR_LABELS[sensor_type][0])
 

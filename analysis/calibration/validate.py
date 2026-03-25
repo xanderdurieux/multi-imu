@@ -52,6 +52,14 @@ def validate(section_path: Path) -> dict[str, str | float | int]:
         result[f"{sensor}_gravity_residual_m_per_s2"] = residual
         result[f"{sensor}_n_static_samples"] = n_static
         result[f"{sensor}_status"] = status
+        fa = meta.get("frame_alignment", "")
+        if fa:
+            result[f"{sensor}_frame_alignment"] = fa
+        ff = meta.get("forward_frame_meta") or {}
+        if isinstance(ff, dict) and ff.get("fallback"):
+            result[f"{sensor}_forward_fallback"] = 1
+            if worst_status == "good":
+                worst_status = "marginal"
 
         if status == "poor" or (status == "marginal" and worst_status == "good"):
             worst_status = status

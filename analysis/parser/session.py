@@ -71,7 +71,7 @@ def process_session(session_name: str) -> None:
 
     Output layout (one folder per recording number)::
 
-        data/recordings/<session_name>_<N>/
+        data/recordings/<session_name>_r<N>/
             session_stats.json                 # per-recording stream timing stats
             parsed/
                 sporsa.csv
@@ -118,7 +118,7 @@ def process_session(session_name: str) -> None:
     session_summaries: list[dict] = []
 
     for n in sorted(recordings.keys()):
-        recording_name = f"{session_name}_{n}"
+        recording_name = f"{session_name}_r{n}"
         out_dir = recording_stage_dir(recording_name, "parsed")
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -200,14 +200,10 @@ def process_session(session_name: str) -> None:
             }
 
         # Number of sections already created for this recording (if any).
-        sections_root = recording_dir(recording_name) / "sections"
-        n_sections = 0
-        if sections_root.is_dir():
-            n_sections = sum(
-                1
-                for d in sections_root.iterdir()
-                if d.is_dir() and d.name.startswith("section_")
-            )
+        from common.paths import iter_sections_for_recording
+
+        section_dirs = iter_sections_for_recording(recording_name)
+        n_sections = len(section_dirs)
 
         # Extract a compact per-recording summary for the session-wide JSON.
         stats_json = {}
@@ -242,9 +238,9 @@ def process_session(session_name: str) -> None:
         # Optional section-level timing summaries (if sections already exist).
         if n_sections > 0:
             section_details: list[dict] = []
-            for section_dir in sorted(
-                d for d in sections_root.iterdir() if d.is_dir() and d.name.startswith("section_")
-            ):
+            from common.paths import parse_section_folder_name, section_id_for_idx
+
+            for section_dir in section_dirs:
                 section_streams: dict[str, dict] = {}
                 for sensor_name in ("sporsa", "arduino"):
                     csv_path = section_dir / f"{sensor_name}.csv"
@@ -260,9 +256,11 @@ def process_session(session_name: str) -> None:
                     }
 
                 if section_streams:
+                    _rec_name, sec_idx = parse_section_folder_name(section_dir.name)
                     section_details.append(
                         {
-                            "name": section_dir.name,
+                            # Keep legacy section id in the JSON summary (e.g. "section_1").
+                            "name": section_id_for_idx(sec_idx),
                             "streams": section_streams,
                         }
                     )

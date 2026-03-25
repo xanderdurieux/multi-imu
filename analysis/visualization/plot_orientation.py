@@ -23,6 +23,7 @@ import pandas as pd
 
 from common import load_dataframe, recording_stage_dir
 from common.quaternion import euler_from_quat, quat_rotate
+from ._utils import mask_valid_plot_x
 
 log = logging.getLogger(__name__)
 
@@ -203,11 +204,13 @@ def plot_orientation_over_time(csv_path: Path) -> None:
         ("Roll [deg]", roll_deg, axes[2]),
     )
 
+    tx = time_s.to_numpy(dtype=float)
+    xm = mask_valid_plot_x(tx)
     for label, series, ax in angle_series:
-        mask = np.isfinite(series)
+        mask = np.isfinite(series) & xm
         if not np.any(mask):
             continue
-        ax.plot(time_s[mask], series[mask], label=label.split()[0])
+        ax.plot(tx[mask], series[mask], label=label.split()[0])
         _draw_360_refs(ax, series)
         ax.set_ylabel(label)
         ax.grid(True, alpha=0.3)
@@ -241,13 +244,15 @@ def plot_orientation_compensated_acc(csv_path: Path, gravity: float = 9.81) -> N
         constrained_layout=True,
     )
 
+    tx = time_s.to_numpy(dtype=float)
+    xm = mask_valid_plot_x(tx)
     components = ("ax_world_lin", "ay_world_lin", "az_world_lin")
     for i, (label, ax) in enumerate(zip(components, axes, strict=False)):
         series = lin_world[:, i]
-        mask = np.isfinite(series)
+        mask = np.isfinite(series) & xm
         if not np.any(mask):
             continue
-        ax.plot(time_s[mask], series[mask], label=label)
+        ax.plot(tx[mask], series[mask], label=label)
         ax.set_ylabel("m/s²")
         ax.grid(True, alpha=0.3)
         if ax.get_legend_handles_labels()[0]:
@@ -379,10 +384,12 @@ def plot_orientation_comparison(
         roll = _unwrap_deg(roll)
         color = _SENSOR_COLORS.get(sensor, "gray")
         label = _SENSOR_LABELS.get(sensor, sensor)
+        tx = time_s.to_numpy(dtype=float)
+        xm = mask_valid_plot_x(tx)
         for i, (ax, series) in enumerate(zip(axes, (yaw, pitch, roll))):
-            mask = np.isfinite(series)
+            mask = np.isfinite(series) & xm
             if np.any(mask):
-                ax.plot(time_s[mask], series[mask], color=color, linewidth=0.8,
+                ax.plot(tx[mask], series[mask], color=color, linewidth=0.8,
                         alpha=0.85, label=label)
             angle_series_per_ax[i].append(series)
 
@@ -489,8 +496,9 @@ def plot_relative_orientation(
         constrained_layout=True,
     )
 
+    xm = mask_valid_plot_x(t_ref)
     for ax, name, series, color in zip(axes, angle_names, angle_series, colors):
-        mask = np.isfinite(series)
+        mask = np.isfinite(series) & xm
         if np.any(mask):
             ax.plot(t_ref[mask], series[mask], color=color, linewidth=0.8, alpha=0.85)
         _draw_360_refs(ax, series)
@@ -575,10 +583,12 @@ def plot_method_comparison(
             roll = _unwrap_deg(roll)
             color = _METHOD_COLORS.get(method, "gray")
             label = _METHOD_LABELS.get(method, method)
+            tx = time_s.to_numpy(dtype=float)
+            xm = mask_valid_plot_x(tx)
             for i, (ax, series) in enumerate(zip(axes, (yaw, pitch, roll))):
-                mask = np.isfinite(series)
+                mask = np.isfinite(series) & xm
                 if np.any(mask):
-                    ax.plot(time_s[mask], series[mask], color=color, linewidth=0.8,
+                    ax.plot(tx[mask], series[mask], color=color, linewidth=0.8,
                             alpha=0.85, label=label)
                 angle_series_per_ax[i].append(series)
 

@@ -63,6 +63,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 
 from common import load_dataframe, recording_stage_dir
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
 
 log = logging.getLogger(__name__)
 
@@ -325,7 +326,7 @@ def plot_sync(
 
     ax_main = axes[0]
     for sensor, (t, norm) in data.items():
-        fin = np.isfinite(norm)
+        fin = mask_valid_plot_x(t) & np.isfinite(norm)
         ax_main.plot(t[fin], norm[fin], color=_COLORS[sensor], linewidth=0.7,
                      alpha=0.8, label=_LABELS[sensor])
     ax_main.axhline(_GRAVITY, color="k", linestyle="--", linewidth=0.8,
@@ -346,7 +347,7 @@ def plot_sync(
             ax.set_visible(False)
             continue
         t, norm = data[sensor]
-        fin = np.isfinite(norm)
+        fin = mask_valid_plot_x(t) & np.isfinite(norm)
         ax.plot(t[fin], norm[fin], color=_COLORS[sensor], linewidth=0.6, alpha=0.8)
         ax.axhline(_GRAVITY, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
         _shade_phases(ax, phases, t[-1])
@@ -467,8 +468,9 @@ def plot_relative_quat(
 
     # Panel 1: angular distance
     ax = axes[0]
-    ax.fill_between(t_ref, ang_dist, alpha=0.25, color="#555")
-    ax.plot(t_ref, ang_dist, color="#333", linewidth=0.7)
+    ta, ad = nan_mask_invalid_plot_x(t_ref, ang_dist)
+    ax.fill_between(ta, ad, alpha=0.25, color="#555")
+    ax.plot(ta, ad, color="#333", linewidth=0.7)
     _shade_and_zero(ax)
     ax.set_ylabel("Angular distance [°]", fontsize=9)
     ax.text(0.01, 0.95,
@@ -479,19 +481,22 @@ def plot_relative_quat(
 
     # Panel 2: ΔPitch (nodding)
     ax = axes[1]
-    ax.plot(t_ref, pitch_ch, color="#e67e22", linewidth=0.7)
+    tp, pp = nan_mask_invalid_plot_x(t_ref, pitch_ch)
+    ax.plot(tp, pp, color="#e67e22", linewidth=0.7)
     _shade_and_zero(ax)
     ax.set_ylabel("ΔPitch [°]\n(head nod up/down)", fontsize=9)
 
     # Panel 3: ΔRoll (tilting)
     ax = axes[2]
-    ax.plot(t_ref, roll_ch, color="#27ae60", linewidth=0.7)
+    tr, rr = nan_mask_invalid_plot_x(t_ref, roll_ch)
+    ax.plot(tr, rr, color="#27ae60", linewidth=0.7)
     _shade_and_zero(ax)
     ax.set_ylabel("ΔRoll [°]\n(head tilt left/right)", fontsize=9)
 
     # Panel 4: ΔYaw (turning)
     ax = axes[3]
-    ax.plot(t_ref, yaw_ch, color="#8e44ad", linewidth=0.7)
+    ty, yy = nan_mask_invalid_plot_x(t_ref, yaw_ch)
+    ax.plot(ty, yy, color="#8e44ad", linewidth=0.7)
     _shade_and_zero(ax)
     ax.set_ylabel("ΔYaw [°]\n(head turn left/right)", fontsize=9)
     ax.text(0.98, 0.05, "Yaw drifts without\nmagnetometer",
@@ -559,7 +564,7 @@ def plot_az_world_compare(
 
     ax = axes[0]
     for sensor, (t, az) in data.items():
-        fin = np.isfinite(az)
+        fin = mask_valid_plot_x(t) & np.isfinite(az)
         ax.plot(t[fin], az[fin], color=_COLORS[sensor], linewidth=0.6,
                 alpha=0.75, label=_LABELS[sensor])
     ax.axhline(_GRAVITY, color="k", linestyle="--", linewidth=1.0,
@@ -587,7 +592,8 @@ def plot_az_world_compare(
     if s_t is not None and a_t is not None:
         a_interp = np.interp(s_t, a_t[np.isfinite(a_az)], a_az[np.isfinite(a_az)])
         diff = a_interp - s_az
-        axes[1].plot(s_t, diff, color="#555", linewidth=0.6)
+        stp, dfp = nan_mask_invalid_plot_x(s_t, diff)
+        axes[1].plot(stp, dfp, color="#555", linewidth=0.6)
         axes[1].axhline(0, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
         _shade_phases(axes[1], phases, s_t[-1])
         axes[1].set_ylabel("Arduino − Sporsa\n[m/s²]", fontsize=8)
@@ -596,7 +602,7 @@ def plot_az_world_compare(
 
     # Acc-norm panel
     for sensor, (t, norm) in acc_norms.items():
-        fin = np.isfinite(norm)
+        fin = mask_valid_plot_x(t) & np.isfinite(norm)
         axes[2].plot(t[fin], norm[fin], color=_COLORS[sensor],
                      linewidth=0.5, alpha=0.7, label=_LABELS[sensor])
     axes[2].axhline(_GRAVITY, color="k", linestyle="--", linewidth=0.7, alpha=0.4)

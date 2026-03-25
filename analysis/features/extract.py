@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,18 @@ import pandas as pd
 from scipy import stats
 
 from common import load_dataframe
+
+from .schema import write_feature_schema_json
+from .signal_stats import (
+    band_energy_ratio,
+    crest_factor,
+    dominant_frequency_hz,
+    mean_coherence_band,
+    peak_time_difference_s,
+    signal_entropy,
+    vec_disagreement_ms2,
+    zero_crossing_rate,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +43,33 @@ PER_SENSOR_FEATURES = [
     "vertical_acc_std",
 ]
 
+PER_SENSOR_EXTRA = [
+    "acc_norm_rms",
+    "acc_norm_std",
+    "acc_norm_ptp",
+    "gyro_norm_rms",
+    "gyro_norm_std",
+    "gyro_norm_ptp",
+    "dom_freq_acc_norm_hz",
+    "acc_band_low_energy",
+    "acc_band_high_energy",
+    "acc_band_high_fraction",
+    "crest_factor_acc_norm",
+    "entropy_acc_norm",
+    "zcr_acc_norm",
+    "longitudinal_acc_std",
+    "lateral_acc_std",
+]
+
+ORIENT_FEATURE_SUFFIXES = [
+    "pitch_mean_deg",
+    "pitch_std_deg",
+    "roll_mean_deg",
+    "roll_std_deg",
+    "pitch_rate_mean_deg_s",
+    "roll_rate_mean_deg_s",
+]
+
 CROSS_SENSOR_FEATURES = [
     "acc_norm_corr",
     "acc_norm_lag_ms",
@@ -37,6 +77,20 @@ CROSS_SENSOR_FEATURES = [
     "gyro_energy_ratio",
     "pitch_corr",
     "pitch_divergence_std",
+]
+
+CROSS_SENSOR_EXTRA = [
+    "acc_norm_coherence_mean",
+    "gyro_norm_coherence_mean",
+    "peak_time_diff_acc_norm_s",
+    "shock_peak_ratio_bike_to_rider",
+    "shock_peak_ratio_rider_to_bike",
+    "vec_disagreement_mean_ms2",
+    "roll_corr",
+    "roll_divergence_std",
+    "energy_ratio_longitudinal",
+    "energy_ratio_lateral",
+    "energy_ratio_vertical",
 ]
 
 
@@ -52,15 +106,19 @@ def _extract_per_sensor_features(
     acc: np.ndarray,
     gyro: np.ndarray,
     dt: float,
+    fs_hz: float,
 ) -> dict[str, float]:
-    """Extract per-sensor features for one window."""
+    """Extract per-sensor features for one window (legacy + extended)."""
     acc_n = _acc_norm(acc)
     gyro_n = _gyro_norm(gyro)
     vertical_acc = acc[:, 2] if acc.shape[1] > 2 else np.full(len(acc), np.nan)
 
     jerk = np.abs(np.diff(acc_n, prepend=acc_n[0])) / max(dt, 1e-9)
 
-    return {
+    e_lo, e_hi, e_tot = band_energy_ratio(acc_n, fs_hz)
+    high_frac = e_hi / e_tot if np.isfinite(e_tot) and e_tot > 1e-18 else np.nan
+
+    out: dict[str, float] = {
         "acc_norm_mean": float(np.nanmean(acc_n)),
         "acc_norm_max": float(np.nanmax(acc_n)),
         "acc_norm_energy": float(np.nansum(acc_n * acc_n)),
@@ -69,6 +127,54 @@ def _extract_per_sensor_features(
         "gyro_energy": float(np.nansum(gyro_n * gyro_n)),
         "vertical_acc_mean": float(np.nanmean(vertical_acc)),
         "vertical_acc_std": float(np.nanstd(vertical_acc)) if len(vertical_acc) > 1 else 0.0,
+        "acc_norm_rms": float(np.sqrt(np.nanmean(acc_n * acc_n))),
+        "acc_norm_std": float(np.nanstd(acc_n)) if len(acc_n) > 1 else 0.0,
+        "acc_norm_ptp": float(np.nanmax(acc_n) - np.nanmin(acc_n)),
+        "gyro_norm_rms": float(np.sqrt(np.nanmean(gyro_n * gyro_n))),
+        "gyro_norm_std": float(np.nanstd(gyro_n)) if len(gyro_n) > 1 else 0.0,
+        "gyro_norm_ptp": float(np.nanmax(gyro_n) - np.nanmin(gyro_n)),
+        "dom_freq_acc_norm_hz": dominant_frequency_hz(acc_n, fs_hz),
+        "acc_band_low_energy": e_lo,
+        "acc_band_high_energy": e_hi,
+        "acc_band_high_fraction": float(high_frac) if np.isfinite(high_frac) else np.nan,
+        "crest_factor_acc_norm": crest_factor(acc_n),
+        "entropy_acc_norm": signal_entropy(acc_n),
+        "zcr_acc_norm": zero_crossing_rate(acc_n),
+        "longitudinal_acc_std": float(np.nanstd(acc[:, 0])) if acc.shape[1] > 0 else np.nan,
+        "lateral_acc_std": float(np.nanstd(acc[:, 1])) if acc.shape[1] > 1 else np.nan,
+    }
+    return out
+
+
+def _orient_window_features(
+    odf: pd.DataFrame,
+    t0: float,
+    window_start_s: float,
+    window_end_s: float,
+) -> dict[str, float]:
+    """Pitch/roll stats for samples inside [window_start_s, window_end_s] (section time)."""
+    ts = (odf["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
+    mask = (ts >= window_start_s) & (ts <= window_end_s)
+    if np.sum(mask) < 3:
+        return {k: np.nan for k in ORIENT_FEATURE_SUFFIXES}
+    pitch = odf.loc[mask, "pitch_deg"].to_numpy(dtype=float)
+    roll = odf.loc[mask, "roll_deg"].to_numpy(dtype=float)
+    tsub = ts[mask]
+    if len(tsub) < 2:
+        return {k: np.nan for k in ORIENT_FEATURE_SUFFIXES}
+    dp = np.diff(pitch)
+    dr = np.diff(roll)
+    dts = np.diff(tsub)
+    dts = np.where(np.abs(dts) > 1e-9, dts, np.nan)
+    pr = np.abs(dp / dts)
+    rr = np.abs(dr / dts)
+    return {
+        "pitch_mean_deg": float(np.nanmean(pitch)),
+        "pitch_std_deg": float(np.nanstd(pitch)),
+        "roll_mean_deg": float(np.nanmean(roll)),
+        "roll_std_deg": float(np.nanstd(roll)),
+        "pitch_rate_mean_deg_s": float(np.nanmean(pr)),
+        "roll_rate_mean_deg_s": float(np.nanmean(rr)),
     }
 
 
@@ -110,11 +216,48 @@ def _align_to_common_time(
     mask_b = (ts_b >= t_lo) & (ts_b <= t_hi)
     if np.sum(mask_a) < 5 or np.sum(mask_b) < 5:
         return None
-    # Resample to common grid for correlation (use finer grid)
     grid = np.linspace(t_lo, t_hi, max(20, min(np.sum(mask_a), np.sum(mask_b))))
     a_interp = np.interp(grid, ts_a[mask_a], vals_a[mask_a])
     b_interp = np.interp(grid, ts_b[mask_b], vals_b[mask_b])
     return a_interp, b_interp
+
+
+def _align_acc_vectors(
+    ts_a: np.ndarray,
+    acc_a: np.ndarray,
+    ts_b: np.ndarray,
+    acc_b: np.ndarray,
+    t_center: float,
+    half_window_s: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Interpolate 3-axis acc onto common time grid."""
+    t_lo = t_center - half_window_s
+    t_hi = t_center + half_window_s
+    mask_a = (ts_a >= t_lo) & (ts_a <= t_hi)
+    mask_b = (ts_b >= t_lo) & (ts_b <= t_hi)
+    if np.sum(mask_a) < 5 or np.sum(mask_b) < 5:
+        return None
+    n = max(20, min(np.sum(mask_a), np.sum(mask_b)))
+    grid = np.linspace(t_lo, t_hi, n)
+    out_a = np.column_stack([np.interp(grid, ts_a[mask_a], acc_a[mask_a, i]) for i in range(3)])
+    out_b = np.column_stack([np.interp(grid, ts_b[mask_b], acc_b[mask_b, i]) for i in range(3)])
+    return out_a, out_b
+
+
+def _worst_calibration_quality(cal_json: dict[str, Any] | None) -> str:
+    if not cal_json:
+        return "unknown"
+    tiers = {"poor": 0, "marginal": 1, "good": 2, "unknown": -1}
+    worst = "good"
+    worst_v = 3
+    for _k, block in cal_json.items():
+        if not isinstance(block, dict):
+            continue
+        q = str(block.get("calibration_quality", "unknown"))
+        if tiers.get(q, -1) < worst_v:
+            worst_v = tiers.get(q, -1)
+            worst = q
+    return worst
 
 
 def extract_section(
@@ -124,6 +267,11 @@ def extract_section(
     window_s: float = 1.0,
     hop_s: float = 0.5,
     write_plots: bool = True,
+    orientation_variant: str = "complementary_orientation",
+    label_index: Any | None = None,
+    sync_method: str = "",
+    recording_id: str | None = None,
+    section_id: str | None = None,
 ) -> pd.DataFrame:
     """Extract features for a section. Returns DataFrame with one row per window."""
     section_path = Path(section_path)
@@ -132,7 +280,17 @@ def extract_section(
     features_dir = section_path / "features"
     features_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load calibrated data
+    if recording_id is None or section_id is None:
+        parts = section_name.replace("\\", "/").split("/")
+        recording_id = recording_id or parts[0]
+        section_id = section_id or (parts[-1] if len(parts) > 1 else "section_1")
+
+    cal_json: dict[str, Any] | None = None
+    cal_path = calibrated_dir / "calibration.json"
+    if cal_path.exists():
+        cal_json = json.loads(cal_path.read_text(encoding="utf-8"))
+    calib_q = _worst_calibration_quality(cal_json)
+
     dfs: dict[str, pd.DataFrame] = {}
     orient_dfs: dict[str, pd.DataFrame] = {}
     for sensor in ("sporsa", "arduino"):
@@ -141,9 +299,11 @@ def extract_section(
             df = load_dataframe(p)
             df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
             dfs[sensor] = df
-        p_orient = orient_dir / f"{sensor}__complementary_orientation.csv"
+        p_orient = orient_dir / f"{sensor}__{orientation_variant}.csv"
         if p_orient.exists():
             orient_dfs[sensor] = pd.read_csv(p_orient)
+
+    has_orient = bool(orient_dfs)
 
     if not dfs:
         raise FileNotFoundError(f"No calibrated data in {calibrated_dir}")
@@ -163,9 +323,14 @@ def extract_section(
 
         row: dict[str, Any] = {
             "section": section_name,
+            "recording_id": recording_id,
+            "section_id": section_id,
             "window_start_s": window_start_s,
             "window_end_s": window_end_s,
             "window_center_s": t_center_s,
+            "sync_method": sync_method,
+            "orientation_method": orientation_variant,
+            "calibration_quality": calib_q,
         }
 
         for sensor, df in dfs.items():
@@ -173,17 +338,26 @@ def extract_section(
             ts = (ts_raw - t0) / 1000.0
             mask = (ts >= window_start_s) & (ts <= window_end_s)
             if np.sum(mask) < 5:
-                for f in PER_SENSOR_FEATURES:
+                for f in PER_SENSOR_FEATURES + PER_SENSOR_EXTRA:
                     row[f"{sensor}__{f}"] = np.nan
             else:
                 acc = df.loc[mask, ACC_COLS].to_numpy(dtype=float)
                 gyro = df.loc[mask, GYRO_COLS].to_numpy(dtype=float)
                 dt = float(np.nanmean(np.diff(ts_raw[mask]))) / 1000.0 if np.sum(mask) > 1 else 0.01
-                feats = _extract_per_sensor_features(acc, gyro, dt)
+                fs_hz = 1.0 / max(dt, 1e-6)
+                feats = _extract_per_sensor_features(acc, gyro, dt, fs_hz)
                 for k, v in feats.items():
                     row[f"{sensor}__{k}"] = v
 
-        # Cross-sensor features
+            if sensor in orient_dfs:
+                of = orient_dfs[sensor]
+                ofe = _orient_window_features(of, t0, window_start_s, window_end_s)
+                for k, v in ofe.items():
+                    row[f"{sensor}__{k}"] = v
+            elif has_orient:
+                for k in ORIENT_FEATURE_SUFFIXES:
+                    row[f"{sensor}__{k}"] = np.nan
+
         if "sporsa" in dfs and "arduino" in dfs:
             sporsa_df = dfs["sporsa"]
             arduino_df = dfs["arduino"]
@@ -191,7 +365,14 @@ def extract_section(
             ts_a = (arduino_df["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
             acc_n_s = _acc_norm(sporsa_df[ACC_COLS].to_numpy(dtype=float))
             acc_n_a = _acc_norm(arduino_df[ACC_COLS].to_numpy(dtype=float))
-            dt_ms = 1000.0 * float(np.nanmean(np.diff(sporsa_df["timestamp"]))) if len(sporsa_df) > 1 else 10.0
+            gyro_n_s = _gyro_norm(sporsa_df[GYRO_COLS].to_numpy(dtype=float))
+            gyro_n_a = _gyro_norm(arduino_df[GYRO_COLS].to_numpy(dtype=float))
+            dt_ms = (
+                1000.0 * float(np.nanmean(np.diff(sporsa_df["timestamp"])))
+                if len(sporsa_df) > 1
+                else 10.0
+            )
+            fs_hz = 1000.0 / max(dt_ms, 0.1)
 
             aligned = _align_to_common_time(
                 ts_s, acc_n_s, ts_a, acc_n_a, t_center_s, half_window_s
@@ -208,17 +389,72 @@ def extract_section(
                 row["acc_norm_corr"] = corr if np.isfinite(corr) else np.nan
                 dt_interp_ms = 1000.0 * window_s / max(len(a_s), 1)
                 row["acc_norm_lag_ms"] = _cross_corr_lag_ms(a_s, a_a, dt_interp_ms)
+                row["acc_norm_coherence_mean"] = mean_coherence_band(
+                    a_s, a_a, fs_hz=1.0 / max(window_s / max(len(a_s), 1), 1e-6)
+                )
             else:
                 row["acc_norm_corr"] = np.nan
                 row["acc_norm_lag_ms"] = np.nan
+                row["acc_norm_coherence_mean"] = np.nan
+
+            aligned_g = _align_to_common_time(
+                ts_s, gyro_n_s, ts_a, gyro_n_a, t_center_s, half_window_s
+            )
+            if aligned_g is not None:
+                g_s, g_a = aligned_g
+                dt_g = window_s / max(len(g_s), 1)
+                row["gyro_norm_coherence_mean"] = mean_coherence_band(g_s, g_a, fs_hz=1.0 / max(dt_g, 1e-6))
+            else:
+                row["gyro_norm_coherence_mean"] = np.nan
 
             e_s = row.get("sporsa__acc_norm_energy", np.nan)
             e_a = row.get("arduino__acc_norm_energy", np.nan)
             row["acc_energy_ratio"] = e_s / e_a if np.isfinite(e_a) and e_a != 0 else np.nan
 
-            g_s = row.get("sporsa__gyro_energy", np.nan)
-            g_a = row.get("arduino__gyro_energy", np.nan)
-            row["gyro_energy_ratio"] = g_s / g_a if np.isfinite(g_a) and g_a != 0 else np.nan
+            g_s_e = row.get("sporsa__gyro_energy", np.nan)
+            g_a_e = row.get("arduino__gyro_energy", np.nan)
+            row["gyro_energy_ratio"] = g_s_e / g_a_e if np.isfinite(g_a_e) and g_a_e != 0 else np.nan
+
+            acc_pair = _align_acc_vectors(
+                ts_s,
+                sporsa_df[ACC_COLS].to_numpy(dtype=float),
+                ts_a,
+                arduino_df[ACC_COLS].to_numpy(dtype=float),
+                t_center_s,
+                half_window_s,
+            )
+            if acc_pair is not None:
+                va, vb = acc_pair
+                row["vec_disagreement_mean_ms2"] = vec_disagreement_ms2(va, vb)
+                exs = np.nansum(va[:, 0] ** 2)
+                exa = np.nansum(vb[:, 0] ** 2)
+                eys = np.nansum(va[:, 1] ** 2)
+                eya = np.nansum(vb[:, 1] ** 2)
+                ezs = np.nansum(va[:, 2] ** 2)
+                eza = np.nansum(vb[:, 2] ** 2)
+                row["energy_ratio_longitudinal"] = exs / exa if exa > 1e-12 else np.nan
+                row["energy_ratio_lateral"] = eys / eya if eya > 1e-12 else np.nan
+                row["energy_ratio_vertical"] = ezs / eza if eza > 1e-12 else np.nan
+                mxs = float(np.nanmax(acc_n_s[(ts_s >= t_center_s - half_window_s) & (ts_s <= t_center_s + half_window_s)]))
+                mxa = float(np.nanmax(acc_n_a[(ts_a >= t_center_s - half_window_s) & (ts_a <= t_center_s + half_window_s)]))
+                row["shock_peak_ratio_bike_to_rider"] = mxs / mxa if mxa > 1e-9 else np.nan
+                row["shock_peak_ratio_rider_to_bike"] = mxa / mxs if mxs > 1e-9 else np.nan
+                m_s = (ts_s >= t_center_s - half_window_s) & (ts_s <= t_center_s + half_window_s)
+                m_a = (ts_a >= t_center_s - half_window_s) & (ts_a <= t_center_s + half_window_s)
+                row["peak_time_diff_acc_norm_s"] = peak_time_difference_s(
+                    ts_s[m_s],
+                    acc_n_s[m_s],
+                    ts_a[m_a],
+                    acc_n_a[m_a],
+                )
+            else:
+                row["vec_disagreement_mean_ms2"] = np.nan
+                row["energy_ratio_longitudinal"] = np.nan
+                row["energy_ratio_lateral"] = np.nan
+                row["energy_ratio_vertical"] = np.nan
+                row["shock_peak_ratio_bike_to_rider"] = np.nan
+                row["shock_peak_ratio_rider_to_bike"] = np.nan
+                row["peak_time_diff_acc_norm_s"] = np.nan
 
             if "sporsa" in orient_dfs and "arduino" in orient_dfs:
                 od_s = orient_dfs["sporsa"]
@@ -227,6 +463,8 @@ def extract_section(
                 ts_oa = (od_a["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
                 pitch_s = od_s["pitch_deg"].to_numpy(dtype=float)
                 pitch_a = od_a["pitch_deg"].to_numpy(dtype=float)
+                roll_s = od_s["roll_deg"].to_numpy(dtype=float)
+                roll_a = od_a["roll_deg"].to_numpy(dtype=float)
                 al = _align_to_common_time(ts_os, pitch_s, ts_oa, pitch_a, t_center_s, half_window_s)
                 if al is not None:
                     ps, pa = al
@@ -241,14 +479,41 @@ def extract_section(
                 else:
                     row["pitch_corr"] = np.nan
                     row["pitch_divergence_std"] = np.nan
+                alr = _align_to_common_time(ts_os, roll_s, ts_oa, roll_a, t_center_s, half_window_s)
+                if alr is not None:
+                    rs, ra = alr
+                    if len(rs) > 2 and (np.ptp(rs) > 1e-12 or np.ptp(ra) > 1e-12):
+                        try:
+                            row["roll_corr"] = stats.pearsonr(rs, ra)[0]
+                        except Exception:
+                            row["roll_corr"] = np.nan
+                    else:
+                        row["roll_corr"] = np.nan
+                    row["roll_divergence_std"] = float(np.nanstd(rs - ra))
+                else:
+                    row["roll_corr"] = np.nan
+                    row["roll_divergence_std"] = np.nan
             else:
                 row["pitch_corr"] = np.nan
                 row["pitch_divergence_std"] = np.nan
+                row["roll_corr"] = np.nan
+                row["roll_divergence_std"] = np.nan
         else:
-            for f in CROSS_SENSOR_FEATURES:
+            for f in CROSS_SENSOR_FEATURES + CROSS_SENSOR_EXTRA:
                 row[f] = np.nan
 
-        row["scenario_label"] = ""
+        scen = ""
+        src = "none"
+        if label_index is not None:
+            scen, src = label_index.resolve(
+                recording_id,
+                section_id,
+                window_start_s,
+                window_end_s,
+            )
+        row["scenario_label"] = scen
+        row["label_source"] = src
+
         rows.append(row)
 
         t_center_s += hop_s
@@ -257,22 +522,24 @@ def extract_section(
     out_path = features_dir / "features.csv"
     out_df.to_csv(out_path, index=False)
 
-    # features_stats.json
     stats_dict: dict[str, dict[str, float]] = {}
     for col in out_df.select_dtypes(include=[np.number]).columns:
         vals = out_df[col].dropna()
         stats_dict[col] = {
-            "mean": float(vals.mean()),
+            "mean": float(vals.mean()) if len(vals) else float("nan"),
             "std": float(vals.std()) if len(vals) > 1 else 0.0,
-            "min": float(vals.min()),
-            "max": float(vals.max()),
+            "min": float(vals.min()) if len(vals) else float("nan"),
+            "max": float(vals.max()) if len(vals) else float("nan"),
             "nan_fraction": float(out_df[col].isna().mean()),
         }
     with (features_dir / "features_stats.json").open("w", encoding="utf-8") as f:
         json.dump(stats_dict, f, indent=2)
 
+    write_feature_schema_json(features_dir / "feature_schema.json")
+
     if write_plots and len(out_df) > 0:
         from .plots import plot_features_timeline
+
         plot_features_timeline(features_dir, out_df)
 
     return out_df
@@ -288,7 +555,9 @@ def _parse_arg(name: str) -> tuple[str, str | None, bool]:
         if p == "sections" and i + 1 < len(parts):
             sec = parts[i + 1]
             break
-    is_session = "_" not in rec or rec.split("_")[-1].isdigit() is False
+    # New recording naming: <session>_r<idx>. New sections live under data/sections/.
+    # Treat bare session dates (YYYY-MM-DD) as sessions.
+    is_session = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", rec)) or not re.fullmatch(r".+_r\d+", rec)
     return rec, sec, is_session
 
 
@@ -299,16 +568,23 @@ def extract_from_args(
     all_recordings: bool = False,
     window_s: float = 1.0,
     hop_s: float = 0.5,
+    orientation_variant: str = "complementary_orientation",
+    labels_path: Path | str | None = None,
 ) -> list[Path]:
     """Run feature extraction from CLI args."""
     from common import recording_dir, recordings_root
+
+    label_index = None
+    if labels_path is not None:
+        from labels.parser import load_labels_from_path
+
+        label_index = load_labels_from_path(Path(labels_path))
 
     rec, sec, _ = _parse_arg(name)
 
     if all_recordings:
         rec_dirs = sorted(
-            d for d in (recordings_root()).iterdir()
-            if d.is_dir() and d.name.startswith(rec + "_")
+            d for d in (recordings_root()).iterdir() if d.is_dir() and d.name.startswith(rec + "_")
         )
     else:
         rec_dir = recording_dir(rec)
@@ -319,43 +595,80 @@ def extract_from_args(
     done = []
     for rdir in rec_dirs:
         rec_name = rdir.name
-        sections_root = rdir / "sections"
-        if not sections_root.exists():
-            log.warning("No sections in %s", rec_name)
-            continue
+        sync_method = _read_sync_method(rec_name)
+        from common.paths import (
+            iter_sections_for_recording,
+            section_dir,
+            parse_section_folder_name,
+            section_id_for_idx,
+        )
+
         if all_sections or all_recordings:
-            section_dirs = sorted(
-                d for d in sections_root.iterdir()
-                if d.is_dir() and d.name.startswith("section_")
-            )
+            section_dirs = iter_sections_for_recording(rec_name)
         else:
             if sec is None:
                 raise ValueError("Specify section or use --all-sections / --all")
-            section_dirs = [sections_root / sec]
-            if not section_dirs[0].exists():
-                raise FileNotFoundError(f"Section not found: {section_dirs[0]}")
+            sec_s = str(sec).strip()
+            if not sec_s.startswith("section_"):
+                raise ValueError(
+                    f"Expected legacy section id like 'section_<idx>', got {sec_s!r}"
+                )
+            sec_idx = int(sec_s.split("_", 1)[1])
+            section_dirs = [section_dir(rec_name, sec_idx)]
 
         for sdir in section_dirs:
-            section_name = f"{rec_name}/{sdir.name}"
+            _rec, sec_idx = parse_section_folder_name(sdir.name)
+            section_id = section_id_for_idx(sec_idx)
+            section_name = f"{rec_name}/{section_id}"
             cal_dir = sdir / "calibrated"
             if not (cal_dir / "calibration.json").exists():
                 log.warning("Skipping %s (no calibration)", section_name)
                 continue
-            extract_section(sdir, section_name, window_s=window_s, hop_s=hop_s)
+            extract_section(
+                sdir,
+                section_name,
+                window_s=window_s,
+                hop_s=hop_s,
+                orientation_variant=orientation_variant,
+                label_index=label_index,
+                sync_method=sync_method,
+                recording_id=rec_name,
+                section_id=section_id,
+            )
             done.append(sdir)
 
     return done
 
 
+def _read_sync_method(recording_name: str) -> str:
+    from common.paths import recording_dir
+
+    p = recording_dir(recording_name) / "synced" / "all_methods.json"
+    if not p.exists():
+        return ""
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return str(data.get("selected_method", "") or "")
+    except Exception:
+        return ""
+
+
 if __name__ == "__main__":
     import argparse
     import logging
+
     parser = argparse.ArgumentParser(prog="python -m features.extract")
     parser.add_argument("name", help="Section path, recording, or session")
     parser.add_argument("--all-sections", action="store_true")
     parser.add_argument("--all", action="store_true", dest="all_recordings")
     parser.add_argument("--window", type=float, default=1.0)
     parser.add_argument("--hop", type=float, default=0.5)
+    parser.add_argument(
+        "--orientation",
+        default="complementary_orientation",
+        help="Orientation CSV suffix (default complementary_orientation)",
+    )
+    parser.add_argument("--labels", type=str, default=None, help="Path to labels CSV or JSON")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     extract_from_args(
@@ -364,4 +677,6 @@ if __name__ == "__main__":
         all_recordings=args.all_recordings,
         window_s=args.window,
         hop_s=args.hop,
+        orientation_variant=args.orientation,
+        labels_path=args.labels,
     )

@@ -162,8 +162,15 @@ def estimate_section(
     section_path: Path,
     *,
     write_plots: bool = True,
+    variants: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run orientation estimation for a section; write CSVs and stats."""
+    """Run orientation estimation for a section; write CSVs and stats.
+
+    Parameters
+    ----------
+    variants:
+        Subset of :data:`FILTER_VARIANTS` to run. Default ``None`` runs all filters.
+    """
     section_path = Path(section_path)
     calibrated_dir = section_path / "calibrated"
     cal_json = calibrated_dir / "calibration.json"
@@ -207,7 +214,11 @@ def estimate_section(
 
         results[sensor] = {}
 
-        for variant in FILTER_VARIANTS:
+        run_variants = variants if variants is not None else list(FILTER_VARIANTS)
+        for variant in run_variants:
+            if variant not in FILTER_VARIANTS:
+                log.warning("Unknown orientation variant %r — skipping", variant)
+                continue
             if variant == "madgwick_acc_only":
                 quats = madgwick_acc_only(acc_body, gyro_body, dt)
             elif variant == "madgwick_9dof":
@@ -272,30 +283,30 @@ def estimate_sections_from_args(
     name: str,
     *,
     all_sections: bool = False,
+    variants: list[str] | None = None,
 ) -> list[Path]:
     """Run orientation for section(s) from CLI-style args."""
-    from common.paths import recording_dir
-
     rec, sec = _parse_section_arg(name)
-    rec_dir = recording_dir(rec)
-    if not rec_dir.exists():
-        raise FileNotFoundError(f"Recording not found: {rec_dir}")
-
-    sections_root = rec_dir / "sections"
-    if not sections_root.exists():
-        raise FileNotFoundError(f"No sections: {sections_root}")
 
     if all_sections:
-        dirs = sorted(
-            d for d in sections_root.iterdir()
-            if d.is_dir() and d.name.startswith("section_")
-        )
+        from common.paths import iter_sections_for_recording
+
+        dirs = iter_sections_for_recording(rec)
     else:
         if sec is None:
             raise ValueError("Specify section path or use --all-sections")
-        dirs = [sections_root / sec]
-        if not dirs[0].exists():
-            raise FileNotFoundError(f"Section not found: {dirs[0]}")
+        sec_s = str(sec).strip()
+        if not sec_s.startswith("section_"):
+            raise ValueError(
+                f"Expected legacy section id like 'section_<idx>', got {sec_s!r}"
+            )
+        sec_idx = int(sec_s.split("_", 1)[1])
+        from common.paths import section_dir
+
+        d0 = section_dir(rec, sec_idx)
+        if not d0.exists():
+            raise FileNotFoundError(f"Section not found: {d0}")
+        dirs = [d0]
 
     done = []
     for d in dirs:
@@ -303,7 +314,7 @@ def estimate_sections_from_args(
         if not (cal_dir / "calibration.json").exists():
             log.warning("Skipping %s (no calibration)", d.name)
             continue
-        estimate_section(d)
+        estimate_section(d, variants=variants)
         done.append(d)
     return done
 
@@ -314,6 +325,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="python -m orientation.estimate")
     parser.add_argument("name", help="Section path or recording with --all-sections")
     parser.add_argument("--all-sections", action="store_true")
+    parser.add_argument(
+        "--variant",
+        action="append",
+        dest="variants",
+        metavar="NAME",
+        help=(
+            "Orientation filter to run (repeatable). "
+            "One of: madgwick_acc_only, madgwick_9dof, complementary_orientation, ekf_orientation. "
+            "Default: all."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    estimate_sections_from_args(args.name, all_sections=args.all_sections)
+    estimate_sections_from_args(args.name, all_sections=args.all_sections, variants=args.variants)

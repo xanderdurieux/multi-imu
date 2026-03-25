@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from common import load_dataframe
+from visualization._utils import mask_valid_plot_x
 
 
 def _apply_plot_style() -> None:
@@ -74,7 +75,7 @@ def plot_orientation_diagnostics(
             for ax, col in zip(axes, ["roll_deg", "pitch_deg", "yaw_deg"]):
                 if col in df.columns:
                     y = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
-                    mask = np.isfinite(t_sec) & np.isfinite(y)
+                    mask = mask_valid_plot_x(t_sec) & np.isfinite(y)
                     if np.any(mask):
                         ax.plot(t_sec[mask], y[mask], label=sensor, alpha=0.8)
         for ax, name in zip(axes, ["Roll [deg]", "Pitch [deg]", "Yaw [deg]"]):
@@ -101,7 +102,7 @@ def plot_orientation_diagnostics(
                 t0_ref = float(ts[0])
             t_sec = (ts - t0_ref) / 1000.0
             pitch = pd.to_numeric(df["pitch_deg"], errors="coerce").to_numpy(dtype=float)
-            mask = np.isfinite(t_sec) & np.isfinite(pitch)
+            mask = mask_valid_plot_x(t_sec) & np.isfinite(pitch)
             if np.any(mask):
                 ax.plot(t_sec[mask], pitch[mask], label=sensor, alpha=0.8)
         ax.set_xlabel("Time [s]")

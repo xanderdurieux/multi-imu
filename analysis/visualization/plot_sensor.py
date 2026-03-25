@@ -13,6 +13,7 @@ import pandas as pd
 from common import find_sensor_csv, load_dataframe, recording_stage_dir
 from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
 from ._utils import mask_dropout_packets as _mask_dropout_packets
+from ._utils import mask_valid_plot_x
 
 
 def prepare_sensor_axes(num_series: int, num_columns: int = 1, *, sharex: bool = True):
@@ -51,6 +52,8 @@ def _plot_sensor_data(
     """Plot sensor data on a single subplot."""
     data = df[list(SENSOR_COMPONENTS[sensor_type])]
     mask = data.notna().all(axis=1)
+    tx = time_seconds.to_numpy(dtype=float, copy=False)
+    mask = mask.to_numpy(dtype=bool, copy=False) & mask_valid_plot_x(tx)
 
     if norm:
         data = sensor_norm(data, sensor_type)
@@ -58,11 +61,13 @@ def _plot_sensor_data(
     else:
         label = ", ".join(SENSOR_COMPONENTS[sensor_type])
 
-    ax.plot(time_seconds[mask], data[mask], label=label)
+    dy = data.to_numpy(dtype=float, copy=False) if hasattr(data, "to_numpy") else np.asarray(data, dtype=float)
+    ax.plot(tx[mask], dy[mask], label=label)
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     ax.set_xlabel("Time [s]")
-    ax.set_xlim(time_seconds.iloc[0], time_seconds.iloc[-1])
+    if mask.any():
+        ax.set_xlim(float(tx[mask].min()), float(tx[mask].max()))
     ax.set_ylabel(SENSOR_LABELS[sensor_type][1])
     ax.set_title(SENSOR_LABELS[sensor_type][0])
 
@@ -122,9 +127,24 @@ def _resolve_source(
         parser.error("sensor_name is required when source is '<recording_name>/<stage>'")
 
     recording_name, stage = parts
-    stage_dir = recording_stage_dir(recording_name, stage)
+
+    # New layout: section stage strings map to top-level data/sections/<rec>s<idx>/.
+    if stage.startswith("sections/"):
+        from common.paths import section_dir as _section_dir
+
+        sec_s = stage.split("/", 1)[1]
+        if not sec_s.startswith("section_"):
+            parser.error(f"Unrecognized section stage id: {stage!r}")
+        sec_idx = int(sec_s.split("_", 1)[1])
+        stage_dir = _section_dir(recording_name, sec_idx)
+        csv_path = stage_dir / f"{sensor_name}.csv"
+        if not csv_path.exists():
+            print(f"[{recording_name}/{stage}] skipping {sensor_name}: missing {csv_path}")
+            raise SystemExit(0)
+        return csv_path, stage_dir, f"{recording_name} / {stage}", sensor_name
 
     try:
+        stage_dir = recording_stage_dir(recording_name, stage)
         csv_path = find_sensor_csv(recording_name, stage, sensor_name)
     except FileNotFoundError:
         print(f"[{recording_name}/{stage}] skipping {sensor_name}: no CSV found")

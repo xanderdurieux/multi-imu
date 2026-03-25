@@ -37,6 +37,7 @@ import matplotlib.colors as mcolors
 import numpy as np
 
 from common import load_dataframe, recording_stage_dir
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ def plot_gravity_world(csv_path: Path, gravity: float = _GRAVITY) -> Path | None
     for i, (ax, series, label, ref) in enumerate(
         zip(axes[:3], data, labels_w, refs)
     ):
-        finite = np.isfinite(series)
+        finite = mask_valid_plot_x(time_s) & np.isfinite(series)
         ax.plot(time_s[finite], series[finite], linewidth=0.6, color="#444", alpha=0.8)
         ax.axhline(ref, color="#c0392b", linestyle="--", linewidth=1.1,
                    label=f"ref = {ref:.1f}")
@@ -194,13 +195,13 @@ def plot_gravity_world(csv_path: Path, gravity: float = _GRAVITY) -> Path | None
 
     # Bottom panel: acc norm
     ax_norm = axes[3]
-    norm_finite = np.isfinite(acc_norm)
-    ax_norm.plot(time_s[norm_finite], acc_norm[norm_finite],
+    tn, an = nan_mask_invalid_plot_x(time_s, acc_norm)
+    ax_norm.plot(tn, an,
                  linewidth=0.6, color="#555", alpha=0.8, label="‖acc_world‖")
     ax_norm.axhline(gravity, color="#c0392b", linestyle="--", linewidth=1.1,
                     label=f"|g| = {gravity:.2f}")
     ax_norm.fill_between(
-        time_s[norm_finite],
+        tn,
         gravity * 0.9, gravity * 1.1,
         color="#c0392b", alpha=0.07, label="±10 %",
     )

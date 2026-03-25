@@ -33,6 +33,7 @@ import argparse
 from typing import Iterable, Optional
 
 from common import recording_stage_dir, recordings_root
+from common.paths import iter_sections_for_recording, parse_section_folder_name
 from visualization import (
     plot_calibration,
     plot_comparison,
@@ -63,20 +64,22 @@ def _iter_session_recordings(session_name: str) -> Iterable[str]:
 def _iter_recording_stages(recording_name: str) -> Iterable[str]:
     """Yield stage identifiers for a recording.
 
-    The ``sections`` directory is expanded into virtual stages
-    ``sections/section_N``.  Intermediate sync stages are included in the
-    iteration so callers can dispatch them appropriately.
+    The ``sections`` directory (now a top-level ``data/sections/`` root) is
+    expanded into virtual stages ``sections/section_N``.
     """
     rec_dir = recordings_root() / recording_name
     for child in sorted(rec_dir.iterdir()):
         if not child.is_dir() or child.name in _SKIP_STAGES:
             continue
-        if child.name == "sections":
-            for section_dir in sorted(child.iterdir()):
-                if section_dir.is_dir():
-                    yield f"sections/{section_dir.name}"
-        else:
-            yield child.name
+        yield child.name
+
+    # Add per-section virtual stages.
+    section_entries: list[tuple[int, str]] = []
+    for sec_dir in iter_sections_for_recording(recording_name):
+        _rec, sec_idx = parse_section_folder_name(sec_dir.name)
+        section_entries.append((sec_idx, f"sections/section_{sec_idx}"))
+    for _sec_idx, stage in sorted(section_entries, key=lambda t: t[0]):
+        yield stage
 
 
 def _plot_sensor_and_comparison(recording_name: str, stage: str) -> None:

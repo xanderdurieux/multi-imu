@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 from common import find_sensor_csv, load_dataframe, recording_stage_dir
-from ._utils import mask_dropout_packets, acc_norm_series
+from ._utils import acc_norm_series, mask_dropout_packets, mask_valid_plot_x
 
 log = logging.getLogger(__name__)
 
@@ -224,16 +224,17 @@ def plot_pre_post_sync(recording_name: str, *, downsample: int = 5) -> Path | No
         t_ref = min(ts_all) if shared_clock else None
         for sensor, df in dfs.items():
             acc = acc_norm_series(df)
-            valid = np.isfinite(acc)
             ts = df["timestamp"].astype(float)
             if shared_clock:
                 time_s = (ts - t_ref) / 1000.0
             else:
                 time_s = (ts - float(ts.iloc[0])) / 1000.0
 
+            tx = time_s.to_numpy(dtype=float)
+            valid = mask_valid_plot_x(tx) & np.isfinite(acc)
             stride = downsample
             ax.plot(
-                time_s.to_numpy()[valid][::stride],
+                tx[valid][::stride],
                 acc[valid][::stride],
                 color=_SENSOR_COLORS.get(sensor, "gray"),
                 linewidth=0.6, alpha=0.75, label=sensor,

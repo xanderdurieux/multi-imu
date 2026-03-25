@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from visualization._utils import nan_mask_invalid_plot_x
+
 from common.calibration_segments import (
     CalibrationSegment,
     _acc_norm,
@@ -105,10 +107,12 @@ def plot_calibration_segments(
     )
 
     # Top panel: raw and smoothed dynamic acceleration magnitude.
-    ax_signal.plot(time_s, dynamic_raw_display, color="#cccccc", linewidth=0.6, label="|acc_norm - g| (raw)")
+    t_raw, y_raw = nan_mask_invalid_plot_x(time_s, dynamic_raw_display)
+    t_sm, y_sm = nan_mask_invalid_plot_x(time_s, dynamic_smooth)
+    ax_signal.plot(t_raw, y_raw, color="#cccccc", linewidth=0.6, label="|acc_norm - g| (raw)")
     ax_signal.plot(
-        time_s,
-        dynamic_smooth,
+        t_sm,
+        y_sm,
         color="#1f77b4",
         linewidth=1.0,
         alpha=0.9,

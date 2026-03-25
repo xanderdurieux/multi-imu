@@ -11,27 +11,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from visualization.thesis_style import THESIS_COLORS, apply_matplotlib_thesis_style
+from visualization._utils import nan_mask_invalid_plot_x
+
 
 def _apply_plot_style() -> None:
+    apply_matplotlib_thesis_style()
     mpl.rcParams.update(
         {
-            "figure.facecolor": "white",
             "axes.facecolor": "#fafafa",
-            "axes.edgecolor": "#d4d4d4",
-            "axes.labelcolor": "#262626",
-            "axes.titlecolor": "#171717",
-            "text.color": "#171717",
-            "xtick.color": "#404040",
-            "ytick.color": "#404040",
-            "grid.color": "#e5e5e5",
             "axes.grid": True,
             "grid.alpha": 1.0,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
             "legend.frameon": False,
-            "font.size": 9,
-            "axes.titlesize": 10,
-            "axes.labelsize": 9,
         }
     )
 
@@ -43,7 +34,19 @@ def plot_features_timeline(features_dir: Path, df: pd.DataFrame) -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     # Numeric columns only, exclude metadata
-    meta = {"section", "window_start_s", "window_end_s", "window_center_s", "scenario_label"}
+    meta = {
+        "section",
+        "recording_id",
+        "section_id",
+        "window_start_s",
+        "window_end_s",
+        "window_center_s",
+        "scenario_label",
+        "sync_method",
+        "orientation_method",
+        "calibration_quality",
+        "label_source",
+    }
     feat_cols = [c for c in df.columns if c not in meta and pd.api.types.is_numeric_dtype(df[c])]
     if not feat_cols:
         return
@@ -66,8 +69,9 @@ def plot_features_timeline(features_dir: Path, df: pd.DataFrame) -> None:
     for ax, col in zip(axes, top_cols):
         v = df[col].to_numpy(dtype=float)
         v_valid = v[np.isfinite(v)]
-        ax.fill_between(t, v, alpha=0.5)
-        ax.plot(t, v, color="#2563eb", linewidth=1)
+        tp, vp = nan_mask_invalid_plot_x(t, v)
+        ax.fill_between(tp, vp, alpha=0.5)
+        ax.plot(tp, vp, color=THESIS_COLORS[0], linewidth=1)
         ax.set_ylabel(col)
         if len(v_valid) > 0:
             vmin, vmax = np.nanmin(v), np.nanmax(v)

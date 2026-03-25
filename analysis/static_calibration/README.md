@@ -25,7 +25,10 @@ From the **`analysis`** directory (with the project environment, e.g. `uv run`):
 uv run python -m static_calibration
 ```
 
-Optional arguments: `raw_log_paths`, `parsed_dir`, `output_json`, `plots_dir`, `trim_fraction` (default `0.05`), `write_plots` (default `True`).
+This CLI uses the module defaults (inputs/outputs under `analysis/data/calibrations/`).
+
+If you want to override paths or trimming in code, call
+`static_calibration.run.run_calibration_pipeline(raw_log_paths=..., ...)`.
 
 ## Outputs
 

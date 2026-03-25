@@ -35,8 +35,20 @@ def validate(section_path: Path) -> dict[str, str | float]:
 
     # Check for all-NaN cross-sensor columns
     cross_cols = [
-        "acc_norm_corr", "acc_norm_lag_ms", "acc_energy_ratio",
-        "gyro_energy_ratio", "pitch_corr", "pitch_divergence_std",
+        "acc_norm_corr",
+        "acc_norm_lag_ms",
+        "acc_energy_ratio",
+        "gyro_energy_ratio",
+        "pitch_corr",
+        "pitch_divergence_std",
+        "acc_norm_coherence_mean",
+        "gyro_norm_coherence_mean",
+        "peak_time_diff_acc_norm_s",
+        "shock_peak_ratio_bike_to_rider",
+        "vec_disagreement_mean_ms2",
+        "roll_corr",
+        "roll_divergence_std",
+        "energy_ratio_longitudinal",
     ]
     all_nan_count = sum(1 for c in cross_cols if c in df.columns and df[c].isna().all())
     if all_nan_count == len([c for c in cross_cols if c in df.columns]):

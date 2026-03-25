@@ -1,0 +1,83 @@
+"""Human-readable descriptions for feature columns (thesis / data dictionary)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+# Populated alongside extract.py; keys are column names after export prefixes where noted.
+FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
+    # Window geometry
+    "section": "Legacy section path recording/section_N",
+    "recording_id": "Recording folder name",
+    "section_id": "Section folder name section_N",
+    "window_start_s": "Window start relative to section first timestamp (s)",
+    "window_end_s": "Window end relative to section first timestamp (s)",
+    "window_center_s": "Window centre relative to section first timestamp (s)",
+    # Metadata
+    "sync_method": "Synchronization method key (e.g. sda, lida, calibration, online)",
+    "orientation_method": "Orientation filter stem (e.g. complementary_orientation)",
+    "calibration_quality": "Worst per-sensor ride calibration quality in section",
+    "label_source": "Origin of scenario_label (none / manual / rule name)",
+    "scenario_label": "Scenario or disturbance class for this window",
+    # Per-sensor (prefix sporsa__ or arduino__)
+    "acc_norm_mean": "Mean ‖accelerometer‖ in world frame (m/s²)",
+    "acc_norm_max": "Max ‖accelerometer‖",
+    "acc_norm_energy": "Sum of squared ‖accelerometer‖",
+    "jerk_norm_max": "Max norm jerk from ‖acc‖ differences",
+    "gyro_norm_max": "Max ‖gyroscope‖ (rad/s)",
+    "gyro_energy": "Sum of squared ‖gyro‖",
+    "vertical_acc_mean": "Mean Z (vertical) acceleration (m/s²)",
+    "vertical_acc_std": "Std Z acceleration",
+    "acc_norm_rms": "RMS ‖accelerometer‖",
+    "acc_norm_std": "Std ‖accelerometer‖",
+    "acc_norm_ptp": "Peak-to-peak ‖accelerometer‖",
+    "gyro_norm_rms": "RMS ‖gyro‖",
+    "gyro_norm_std": "Std ‖gyro‖",
+    "gyro_norm_ptp": "Peak-to-peak ‖gyro‖",
+    "dom_freq_acc_norm_hz": "Dominant FFT frequency of centred ‖acc‖ (Hz)",
+    "acc_band_low_energy": "FFT energy ‖acc‖ in low band (default 0.5–3 Hz)",
+    "acc_band_high_energy": "FFT energy ‖acc‖ in high band (default 3–15 Hz)",
+    "acc_band_high_fraction": "High-band energy / total AC energy",
+    "crest_factor_acc_norm": "Peak ‖acc‖ / RMS ‖acc‖",
+    "entropy_acc_norm": "Histogram entropy of ‖acc‖",
+    "zcr_acc_norm": "Zero-crossing rate of centred ‖acc‖",
+    "longitudinal_acc_std": "Std deviation of X (longitudinal) acceleration when frame allows",
+    "lateral_acc_std": "Std deviation of Y (lateral) acceleration",
+    "pitch_mean_deg": "Mean pitch from orientation CSV (deg)",
+    "pitch_std_deg": "Std pitch (deg)",
+    "roll_mean_deg": "Mean roll (deg)",
+    "roll_std_deg": "Std roll (deg)",
+    "pitch_rate_mean_deg_s": "Mean absolute pitch rate (deg/s)",
+    "roll_rate_mean_deg_s": "Mean absolute roll rate (deg/s)",
+    # Cross-sensor
+    "acc_norm_corr": "Pearson correlation of ‖acc‖ (interpolated window)",
+    "acc_norm_lag_ms": "Lag at max cross-correlation of ‖acc‖ (ms)",
+    "acc_energy_ratio": "sporsa acc energy / arduino acc energy",
+    "gyro_energy_ratio": "sporsa gyro energy / arduino gyro energy",
+    "pitch_corr": "Pearson correlation of pitch (if orientation available)",
+    "pitch_divergence_std": "Std of pitch difference",
+    "acc_norm_coherence_mean": "Mean magnitude-squared coherence of ‖acc‖ in band",
+    "gyro_norm_coherence_mean": "Mean coherence of ‖gyro‖ in band",
+    "peak_time_diff_acc_norm_s": "Time difference between ‖acc‖ peaks (s)",
+    "shock_peak_ratio_bike_to_rider": "max ‖acc‖ bike / max ‖acc‖ rider (sporsa/arduino)",
+    "shock_peak_ratio_rider_to_bike": "Inverse ratio",
+    "vec_disagreement_mean_ms2": "Mean Euclidean ‖acc_bike − acc_rider‖ after interpolation",
+    "roll_corr": "Pearson correlation of roll",
+    "roll_divergence_std": "Std roll difference",
+    "energy_ratio_longitudinal": "sum(ax²)_bike / sum(ax²)_rider on interpolated grid",
+    "energy_ratio_lateral": "sum(ay²) ratio bike/rider",
+    "energy_ratio_vertical": "sum(az²) ratio bike/rider",
+}
+
+
+def write_feature_schema_json(out_path: Path) -> None:
+    """Write JSON data dictionary for all documented columns."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "description": "Feature column dictionary for dual-IMU cycling analysis",
+        "columns": FEATURE_COLUMN_DESCRIPTIONS,
+    }
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from common import find_sensor_csv, load_dataframe, recording_stage_dir, recordings_root
-from visualization._utils import mask_dropout_packets
+from visualization._utils import mask_dropout_packets, mask_valid_plot_x
 from visualization.labels import SENSOR_COMPONENTS
 
 from .core import add_vector_norms, remove_dropouts, resample_stream
@@ -99,7 +99,7 @@ def _decimate_pair(
 ) -> tuple[np.ndarray, np.ndarray]:
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
-    m = np.isfinite(t) & np.isfinite(y)
+    m = mask_valid_plot_x(t) & np.isfinite(y)
     t, y = t[m], y[m]
     if t.size == 0:
         return t, y
@@ -118,7 +118,7 @@ def _decimate_triple(
     t = np.asarray(t, dtype=float)
     y1 = np.asarray(y1, dtype=float)
     y2 = np.asarray(y2, dtype=float)
-    m = np.isfinite(t) & np.isfinite(y1) & np.isfinite(y2)
+    m = mask_valid_plot_x(t) & np.isfinite(y1) & np.isfinite(y2)
     t, y1, y2 = t[m], y1[m], y2[m]
     if t.size == 0:
         return t, y1, y2
@@ -217,7 +217,7 @@ def plot_methods_norm_grid(
                 ts = df["timestamp"].to_numpy(dtype=float)
                 y = df[ncol].to_numpy(dtype=float)
                 rel = _time_seconds_from_start(ts, t0_ms)
-                mask = (rel >= 0) & (rel <= zoom_s) & np.isfinite(y)
+                mask = (rel >= 0) & (rel <= zoom_s) & mask_valid_plot_x(rel) & np.isfinite(y)
                 rel, y = rel[mask], y[mask]
                 rel, y = _decimate_pair(rel, y)
                 if rel.size == 0:
@@ -400,7 +400,7 @@ def plot_synced_norm_overlay(
         yr = _vector_norm(df_r, kind)
         yt = _vector_norm(df_t, kind)[order]
         yt_i = np.interp(ts_r, ts_t_sorted, yt, left=np.nan, right=np.nan)
-        m = np.isfinite(yr) & np.isfinite(yt_i)
+        m = mask_valid_plot_x(tr) & np.isfinite(yr) & np.isfinite(yt_i)
         tr_p, yr_p, yt_p = _decimate_triple(tr[m], yr[m], yt_i[m])
         ax.plot(tr_p, yr_p, color=_REF_COLOR, lw=0.9, label=reference_sensor, alpha=0.9)
         ax.plot(tr_p, yt_p, color=_TGT_COLOR, lw=0.9, label=target_sensor, alpha=0.85)

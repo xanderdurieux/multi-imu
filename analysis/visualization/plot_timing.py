@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from common import find_sensor_csv, load_dataframe, recording_dir, recording_stage_dir
-from ._utils import time_axis_seconds
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x, time_axis_seconds
 
 log = logging.getLogger(__name__)
 
@@ -208,17 +208,20 @@ def plot_timing_timeline(
         is_gap = intervals > gap_thresh
 
         display_mask = intervals <= max_display_ms
+        xm = mask_valid_plot_x(t_mid)
+        plot_mask = display_mask & xm
         ax.plot(
-            t_mid[display_mask],
-            intervals[display_mask],
+            t_mid[plot_mask],
+            intervals[plot_mask],
             color=_SENSOR_COLORS.get(sensor, "gray"),
             linewidth=0.5,
             alpha=0.7,
             label="interval",
         )
         if is_gap.any():
+            vmask = is_gap & (intervals <= max_display_ms) & xm
             ax.vlines(
-                t_mid[is_gap & (intervals <= max_display_ms)],
+                t_mid[vmask],
                 ymin=0, ymax=gap_thresh * 1.5,
                 colors=_GAP_COLOR,
                 linewidth=0.8,
@@ -302,6 +305,11 @@ def plot_clock_drift(recording_name: str) -> Path | None:
     device_s = (device_ms - device_ms[0]) / 1000.0
     offset_s = (received_ms - device_ms) / 1000.0  # offset: received - device (seconds)
     offset_fit_s = (fit_vals - device_ms) / 1000.0
+    xm_dev = mask_valid_plot_x(device_s)
+    ds_sc = device_s[xm_dev]
+    os_sc = offset_s[xm_dev]
+    ds_line, ofs_line = nan_mask_invalid_plot_x(device_s, offset_fit_s)
+    rs_sc = residuals_ms[xm_dev]
 
     fig, (ax_main, ax_res) = plt.subplots(
         2, 1,
@@ -313,11 +321,11 @@ def plot_clock_drift(recording_name: str) -> Path | None:
 
     # Top: offset over device time
     ax_main.scatter(
-        device_s[::10], offset_s[::10],
+        ds_sc[::10], os_sc[::10],
         s=2, color=_SENSOR_COLORS["arduino"], alpha=0.4, label="received − device offset",
     )
     ax_main.plot(
-        device_s, offset_fit_s,
+        ds_line, ofs_line,
         color="k", linewidth=1.2,
         label=f"linear fit  (drift = {drift_ppm_fit:+.1f} ppm)",
     )
@@ -338,7 +346,7 @@ def plot_clock_drift(recording_name: str) -> Path | None:
 
     # Bottom: residuals
     ax_res.scatter(
-        device_s[::10], residuals_ms[::10],
+        ds_sc[::10], rs_sc[::10],
         s=2, color=_SENSOR_COLORS["arduino"], alpha=0.5,
     )
     ax_res.axhline(0, color="k", linewidth=0.8, linestyle="--")

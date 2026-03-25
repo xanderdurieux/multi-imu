@@ -114,11 +114,21 @@ def calibrate_section(
     variance_threshold: float = 0.5,
     static_calib_path: Path | None = None,
     write_plots: bool = True,
+    frame_alignment: str = "gravity_only",
+    forward_min_motion_ms2: float = 0.35,
 ) -> dict[str, Any]:
     """Calibrate a section: apply static calibration (Arduino), align to world frame.
 
     Reads sporsa.csv and arduino.csv from section_path.
     Writes calibrated/*.csv, calibration.json, and plots to section_path/calibrated/.
+
+    Parameters
+    ----------
+    frame_alignment:
+        ``gravity_only`` (default) or ``gravity_plus_forward`` to add an optional yaw
+        about vertical from mean horizontal specific force (see ``frame_alignment`` module).
+    forward_min_motion_ms2:
+        Motion threshold (m/s²) for forward-axis estimation samples.
 
     Returns calibration metadata dict.
     """
@@ -195,11 +205,40 @@ def calibrate_section(
         gravity_residual = float(np.nanstd(np.abs(acc_norm_static - GRAVITY_M_S2)))
         n_static_samples = end_idx - start_idx
 
-        R = _compute_rotation_matrix(g_hat)
+        R_grav = _compute_rotation_matrix(g_hat)
+        forward_meta: dict[str, Any] = {}
+        R = R_grav
+        alignment_mode = frame_alignment.strip().lower()
+        if alignment_mode == "gravity_plus_forward":
+            from calibration.frame_alignment import estimate_yaw_align_forward
+
+            acc_sensor = df[ACC_COLS].to_numpy(dtype=float)
+            acc_world = (R_grav @ acc_sensor.T).T
+            static_slice = slice(start_idx, end_idx)
+            R_yaw, forward_meta = estimate_yaw_align_forward(
+                acc_world,
+                static_indices=static_slice,
+                min_motion_ms2=forward_min_motion_ms2,
+            )
+            R = R_yaw @ R_grav
+            forward_meta["frame_alignment"] = "gravity_plus_forward"
+        elif alignment_mode != "gravity_only":
+            log.warning("Unknown frame_alignment %r — using gravity_only", frame_alignment)
+            alignment_mode = "gravity_only"
+
         df_cal = _apply_rotation_to_columns(df, R, ACC_COLS, GYRO_COLS)
 
         out_csv = calibrated_dir / f"{sensor}.csv"
         write_dataframe(df_cal, out_csv)
+
+        calib_quality = "good"
+        if gravity_residual > 0.5 or n_static_samples < 100:
+            calib_quality = "marginal"
+        if gravity_residual > 1.0 or n_static_samples < 30:
+            calib_quality = "poor"
+        if alignment_mode == "gravity_plus_forward" and forward_meta.get("fallback"):
+            if calib_quality == "good":
+                calib_quality = "marginal"
 
         result[sensor] = {
             "sensor": sensor,
@@ -209,6 +248,9 @@ def calibrate_section(
             "n_static_samples": n_static_samples,
             "rotation_matrix": R.tolist(),
             "gyro_unit": "rad_per_s",
+            "frame_alignment": alignment_mode,
+            "forward_frame_meta": forward_meta if alignment_mode == "gravity_plus_forward" else {},
+            "calibration_quality": calib_quality,
         }
 
     # Write calibration.json (both sensors)
@@ -246,30 +288,33 @@ def calibrate_sections_from_args(
     all_sections: bool = False,
     static_window_seconds: float = 3.0,
     variance_threshold: float = 0.5,
+    frame_alignment: str = "gravity_only",
+    forward_min_motion_ms2: float = 0.35,
 ) -> list[Path]:
     """Calibrate section(s) based on CLI-style arguments."""
     recording_name, section_name = _parse_section_arg(name)
-    rec_dir = recording_dir(recording_name)
-    if not rec_dir.exists():
-        raise FileNotFoundError(f"Recording directory not found: {rec_dir}")
-
-    sections_root = rec_dir / "sections"
-    if not sections_root.exists():
-        raise FileNotFoundError(f"No sections directory: {sections_root}")
 
     if all_sections:
-        section_dirs = sorted(
-            d for d in sections_root.iterdir()
-            if d.is_dir() and d.name.startswith("section_")
-        )
+        from common.paths import iter_sections_for_recording
+
+        section_dirs = iter_sections_for_recording(recording_name)
         if not section_dirs:
-            raise FileNotFoundError(f"No sections found in {sections_root}")
+            raise FileNotFoundError(f"No sections found for recording: {recording_name}")
     else:
         if section_name is None:
             raise ValueError(
-                "Specify a section (e.g. 2026-02-26_5/sections/section_1) or use --all-sections"
+                "Specify a section (e.g. 2026-02-26_r5/sections/section_1) or use --all-sections"
             )
-        sec_dir = sections_root / section_name
+        # Stage-style arg is expected to use legacy section IDs like "section_1".
+        sec_idx_s = str(section_name).strip()
+        if not sec_idx_s.startswith("section_"):
+            raise ValueError(
+                f"Expected legacy section id like 'section_<idx>', got {section_name!r}"
+            )
+        sec_idx = int(sec_idx_s.split("_", 1)[1])
+        from common.paths import section_dir
+
+        sec_dir = section_dir(recording_name, sec_idx)
         if not sec_dir.exists():
             raise FileNotFoundError(f"Section not found: {sec_dir}")
         section_dirs = [sec_dir]
@@ -280,6 +325,8 @@ def calibrate_sections_from_args(
             sec_path,
             static_window_seconds=static_window_seconds,
             variance_threshold=variance_threshold,
+            frame_alignment=frame_alignment,
+            forward_min_motion_ms2=forward_min_motion_ms2,
         )
         done.append(sec_path)
     return done

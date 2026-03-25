@@ -14,8 +14,11 @@ from .lida_sync import synchronize_recording
 from .online_sync import synchronize_recording_online
 from .sda_sync import synchronize_recording_sda
 from .selection import (
+    ALL_METHODS,
     METHOD_LABELS,
+    METHOD_STAGES,
     SyncSelectionResult,
+    _extract_quality,
     apply_selection,
     compare_sync_models,
     print_comparison,
@@ -61,6 +64,9 @@ _METHOD_RUNNERS = {
     "online": lambda rec, stage: synchronize_recording_online(rec, stage),
 }
 
+#: Valid ``method`` keys for :func:`synchronize_recording_chosen_method`.
+CHOSEN_SYNC_METHODS: tuple[str, ...] = tuple(_METHOD_RUNNERS.keys())
+
 
 def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
     """Run all four sync methods on *recording_name* ``parsed/`` data, then select and apply."""
@@ -104,6 +110,61 @@ def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
         result.selection_error = str(exc)
         log.warning("Selection failed for %s: %s", recording_name, exc)
 
+    return result
+
+
+def synchronize_recording_chosen_method(
+    recording_name: str,
+    method: str,
+    *,
+    stage_in: str = _STAGE_IN,
+    quiet: bool = False,
+) -> SyncSelectionResult:
+    """Run a single sync method, then copy its outputs to flat ``synced/`` (same as selection).
+
+    Use this when the thesis pipeline must pin synchronization to one method instead of
+    running all four and auto-selecting.
+
+    Parameters
+    ----------
+    recording_name:
+        Recording folder name under ``data/recordings/``.
+    method:
+        One of ``"sda"``, ``"lida"``, ``"calibration"``, ``"online"``.
+    stage_in:
+        Input stage passed to the method runners (default ``parsed``).
+    quiet:
+        If ``True``, suppress banner prints (logging still applies).
+
+    Returns
+    -------
+    SyncSelectionResult
+        ``result.method`` equals *method*; ``qualities`` reflects whichever
+        ``sync_info.json`` files exist after the run (typically only *method*).
+    """
+    if method not in _METHOD_RUNNERS:
+        raise ValueError(
+            f"Unknown sync method {method!r}; expected one of {CHOSEN_SYNC_METHODS}"
+        )
+
+    if not quiet:
+        print(
+            f"\n{'━' * 60}\n  {recording_name}  "
+            f"[single sync: {METHOD_LABELS.get(method, method)}]\n{'━' * 60}"
+        )
+
+    runner = _METHOD_RUNNERS[method]
+    runner(recording_name, stage_in)
+
+    cmp = compare_sync_models(recording_name)
+    qualities = {m: _extract_quality(m, cmp[m]) for m in ALL_METHODS}
+    result = SyncSelectionResult(
+        recording_name=recording_name,
+        method=method,  # type: ignore[arg-type]
+        stage=METHOD_STAGES[method],
+        qualities=qualities,
+    )
+    apply_selection(recording_name, result)
     return result
 
 

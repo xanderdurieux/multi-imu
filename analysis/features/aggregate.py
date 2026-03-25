@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from common import recordings_root, sessions_root
+from common import sessions_root
+from common.paths import sections_root, parse_section_folder_name
 
 log = logging.getLogger(__name__)
 
@@ -22,30 +23,37 @@ def aggregate_session(session_name: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "features_all.csv"
 
-    rec_root = recordings_root()
-    prefix = session_name + "_"
+    sec_root = sections_root()
+    prefix = session_name + "_r"
     all_dfs = []
 
-    for rec_dir in sorted(rec_root.iterdir()):
-        if not rec_dir.is_dir() or not rec_dir.name.startswith(prefix):
+    if not sec_root.exists():
+        log.warning("Sections root missing: %s", sec_root)
+        empty = pd.DataFrame()
+        empty.to_csv(out_path, index=False)
+        return out_path
+
+    for sec_dir in sorted(sec_root.iterdir()):
+        if not sec_dir.is_dir():
             continue
-        sections_dir = rec_dir / "sections"
-        if not sections_dir.exists():
+        try:
+            rec_name, _sec_idx = parse_section_folder_name(sec_dir.name)
+        except ValueError:
             continue
-        for sec_dir in sorted(sections_dir.iterdir()):
-            if not sec_dir.is_dir() or not sec_dir.name.startswith("section_"):
-                continue
-            feat_csv = sec_dir / "features" / "features.csv"
-            if not feat_csv.exists():
-                continue
-            try:
-                df = pd.read_csv(feat_csv)
-            except pd.errors.EmptyDataError:
-                continue
-            if df.empty:
-                continue
-            df["recording"] = rec_dir.name
-            all_dfs.append(df)
+        if not rec_name.startswith(prefix):
+            continue
+
+        feat_csv = sec_dir / "features" / "features.csv"
+        if not feat_csv.exists():
+            continue
+        try:
+            df = pd.read_csv(feat_csv)
+        except pd.errors.EmptyDataError:
+            continue
+        if df.empty:
+            continue
+        df["recording"] = rec_name
+        all_dfs.append(df)
 
     if not all_dfs:
         log.warning("No features found for session %s", session_name)

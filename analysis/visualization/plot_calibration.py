@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 
 from common import find_sensor_csv, load_dataframe, recording_stage_dir
+from ._utils import mask_valid_plot_x
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,8 @@ def plot_sensor_world(
         cal = _load_calibration_json(recording_name)
 
     time_s = _time_axis(df)
+    tx = time_s.to_numpy(dtype=float)
+    xm = mask_valid_plot_x(tx)
     stage_dir = recording_stage_dir(recording_name, _STAGE)
 
     sensor_types = ["acc", "gyro", "mag"]
@@ -143,9 +146,9 @@ def plot_sensor_world(
 
             if has_data:
                 series = df[col].astype(float)
-                valid = series.notna()
+                valid = series.notna().to_numpy(dtype=bool) & xm
                 ax.plot(
-                    time_s[valid], series[valid],
+                    tx[valid], series[valid].to_numpy(dtype=float, copy=False),
                     color=colors[col_idx], linewidth=0.6, alpha=0.85,
                 )
 
@@ -241,6 +244,11 @@ def plot_comparison_world(
         time_a = (ts_a - ts_a.min()) / 1000.0
         time_b = (ts_b - ts_b.min()) / 1000.0
 
+    ta = time_a.to_numpy(dtype=float)
+    tb = time_b.to_numpy(dtype=float)
+    mx_a = mask_valid_plot_x(ta)
+    mx_b = mask_valid_plot_x(tb)
+
     sensor_types = ["acc", "gyro"]
     n_cols = 1 if norm else 3
 
@@ -271,22 +279,23 @@ def plot_comparison_world(
         for col_idx, (col, title, ylabel) in enumerate(panels):
             ax = axes[row][col_idx]
 
-            for sensor, df, time_s in (
-                (_SENSORS[0], df_a, time_a),
-                (_SENSORS[1], df_b, time_b),
+            for sensor, df, time_arr, mx in (
+                (_SENSORS[0], df_a, ta, mx_a),
+                (_SENSORS[1], df_b, tb, mx_b),
             ):
                 if not all(c in df.columns for c in cols):
                     continue
                 if norm:
                     data_raw = df[list(cols)].astype(float)
-                    valid = data_raw.notna().all(axis=1)
+                    valid = data_raw.notna().all(axis=1).to_numpy(dtype=bool) & mx
                     series = np.sqrt((data_raw[valid] ** 2).sum(axis=1))
-                    ax.plot(time_s[valid], series, color=sensor_colors[sensor],
+                    ax.plot(time_arr[valid], series, color=sensor_colors[sensor],
                             linewidth=0.7, alpha=0.8, label=sensor)
                 else:
                     series = df[col].astype(float)
-                    valid = series.notna()
-                    ax.plot(time_s[valid], series[valid], color=sensor_colors[sensor],
+                    valid = series.notna().to_numpy(dtype=bool) & mx
+                    ax.plot(time_arr[valid], series[valid].to_numpy(dtype=float, copy=False),
+                            color=sensor_colors[sensor],
                             linewidth=0.7, alpha=0.8, label=sensor)
 
                 # Gravity reference on acc Up (Z) panel

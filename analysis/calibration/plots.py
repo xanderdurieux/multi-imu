@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from common import load_dataframe
+from visualization._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
 
 from .calibrate import _acc_norm, ACC_COLS, GRAVITY_M_S2
 
@@ -67,6 +68,8 @@ def plot_calibration_diagnostics(
 
         t0 = float(df_raw["timestamp"].iloc[0])
         t_sec = (df_raw["timestamp"].astype(float) - t0) / 1000.0
+        t_sec_np = t_sec.to_numpy(dtype=float, copy=False)
+        xm = mask_valid_plot_x(t_sec_np)
 
         n_static = meta.get("n_static_samples", 0)
         acc_norm_raw = _acc_norm(df_raw)
@@ -74,7 +77,8 @@ def plot_calibration_diagnostics(
 
         # Plot 1: acc_norm over full section with static window highlighted
         fig, ax = plt.subplots(figsize=(10, 4), constrained_layout=True)
-        ax.plot(t_sec, acc_norm_raw, color="#2563eb", alpha=0.7, label="Raw acc_norm")
+        t1, y1 = nan_mask_invalid_plot_x(t_sec_np, acc_norm_raw)
+        ax.plot(t1, y1, color="#2563eb", alpha=0.7, label="Raw acc_norm")
         ax.axhline(GRAVITY_M_S2, color="#666", linestyle="--", alpha=0.7, label="g = 9.81")
         if n_static > 0 and len(t_sec) >= n_static:
             ax.axvspan(
@@ -88,7 +92,8 @@ def plot_calibration_diagnostics(
         ax.set_ylabel("acc_norm [m/s²]")
         ax.set_title(f"{sensor.capitalize()} — accelerometer norm (static window highlighted)")
         ax.legend(loc="upper right")
-        ax.set_xlim(t_sec.iloc[0], t_sec.iloc[-1])
+        if xm.any():
+            ax.set_xlim(float(t_sec_np[xm].min()), float(t_sec_np[xm].max()))
         fig.savefig(plots_dir / f"{sensor}_acc_norm_timeline.png", dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -97,17 +102,18 @@ def plot_calibration_diagnostics(
         az_raw = df_raw["az"].to_numpy(dtype=float) if "az" in df_raw.columns else np.full(len(df_raw), np.nan)
         az_cal = df_cal["az"].to_numpy(dtype=float) if "az" in df_cal.columns else np.full(len(df_cal), np.nan)
 
-        mask_raw = np.isfinite(t_sec.to_numpy(dtype=float)) & np.isfinite(az_raw)
+        tsn = t_sec.to_numpy(dtype=float)
+        mask_raw = mask_valid_plot_x(tsn) & np.isfinite(az_raw)
         if np.any(mask_raw):
-            axes[0].plot(t_sec.to_numpy(dtype=float)[mask_raw], az_raw[mask_raw], color="#ca3c3c", alpha=0.7, label="Raw az")
+            axes[0].plot(tsn[mask_raw], az_raw[mask_raw], color="#ca3c3c", alpha=0.7, label="Raw az")
         axes[0].axhline(GRAVITY_M_S2, color="#666", linestyle="--", alpha=0.7)
         axes[0].set_ylabel("az [m/s²]")
         axes[0].set_title("Before calibration")
         axes[0].legend(loc="upper right")
 
-        mask_cal = np.isfinite(t_sec.to_numpy(dtype=float)) & np.isfinite(az_cal)
+        mask_cal = mask_valid_plot_x(tsn) & np.isfinite(az_cal)
         if np.any(mask_cal):
-            axes[1].plot(t_sec.to_numpy(dtype=float)[mask_cal], az_cal[mask_cal], color="#2563eb", alpha=0.7, label="Calibrated az (world frame)")
+            axes[1].plot(tsn[mask_cal], az_cal[mask_cal], color="#2563eb", alpha=0.7, label="Calibrated az (world frame)")
         axes[1].axhline(GRAVITY_M_S2, color="#666", linestyle="--", alpha=0.7)
         axes[1].set_xlabel("Time [s]")
         axes[1].set_ylabel("az [m/s²]")

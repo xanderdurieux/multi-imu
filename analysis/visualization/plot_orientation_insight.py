@@ -49,6 +49,7 @@ import numpy as np
 from scipy.signal import find_peaks
 
 from common import load_dataframe, recording_stage_dir, recordings_root
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
 
 log = logging.getLogger(__name__)
 
@@ -311,10 +312,16 @@ def plot_gravity_accuracy(
 
     for ax_row, (sensor, segs) in zip(axes, results.items()):
         ax = ax_row[0]
-        t_mids = [s["t_mid"] for s in segs]
-        means  = [s["mean"]  for s in segs]
-        stds   = [s["std"]   for s in segs]
+        t_mids = np.array([s["t_mid"] for s in segs], dtype=float)
+        means  = np.array([s["mean"] for s in segs], dtype=float)
+        stds   = np.array([s["std"] for s in segs], dtype=float)
         errors = [s["error"] for s in segs]
+        xm = mask_valid_plot_x(t_mids)
+        if not xm.any():
+            continue
+        t_mids, means, stds = t_mids[xm], means[xm], stds[xm]
+        errors = [errors[i] for i in np.flatnonzero(xm)]
+        segs_good = [segs[i] for i in np.flatnonzero(xm)]
 
         ax.axhline(_GRAVITY, color="k", linestyle="--", linewidth=1.0,
                    label=f"+g = {_GRAVITY:.2f} m/s²")
@@ -335,12 +342,12 @@ def plot_gravity_accuracy(
 
         rms = float(np.sqrt(np.mean([e**2 for e in errors])))
         ax.set_title(
-            f"{_LABELS.get(sensor, sensor)}  |  {len(segs)} static segments  |  "
+            f"{_LABELS.get(sensor, sensor)}  |  {len(segs_good)} static segments  |  "
             f"RMS error vs +g: {rms:.3f} m/s²",
             fontsize=9,
         )
 
-        for s in segs:
+        for s in segs_good:
             c = "#27ae60" if abs(s["error"]) < 0.2 else (
                 "#e67e22" if abs(s["error"]) < 0.5 else "#e74c3c")
             ax.annotate(
@@ -420,8 +427,10 @@ def plot_alignment_quality(
         ]
         for col, (signal, ylabel, color) in enumerate(col_specs):
             ax = axes[row][col]
-            ax.fill_between(tc, signal[m], alpha=0.22, color=color)
-            ax.plot(tc, signal[m], color=color, linewidth=0.8)
+            sig = signal[m]
+            tp, sp = nan_mask_invalid_plot_x(tc, sig)
+            ax.fill_between(tp, sp, alpha=0.22, color=color)
+            ax.plot(tp, sp, color=color, linewidth=0.8)
             ax.axhline(0, color="k", linestyle="--", linewidth=0.7, alpha=0.5)
             mean_v = float(np.nanmean(signal[m]))
             std_v  = float(np.nanstd(signal[m]))
@@ -499,6 +508,7 @@ def plot_head_movement_peaks(
     fig, axes = plt.subplots(3, 1, figsize=(14, 11), sharex=True, constrained_layout=True)
 
     def _draw_panel(ax, signal, peaks, color, ylabel):
+        tp, sp = nan_mask_invalid_plot_x(t_ref, signal)
         # Static shading
         for w0, w1 in static_windows:
             ax.axvspan(w0, w1, color="#aaaaaa", alpha=0.12, zorder=0)
@@ -510,11 +520,13 @@ def plot_head_movement_peaks(
         if phases.get("ride"):
             ax.axvspan(*phases["ride"], color="#3498db", alpha=0.05, zorder=0)
 
-        ax.plot(t_ref, signal, color=color, linewidth=0.75, alpha=0.9)
+        ax.plot(tp, sp, color=color, linewidth=0.75, alpha=0.9)
         ax.axhline(0, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
 
         for idx in peaks:
             val = signal[idx]
+            if not (mask_valid_plot_x(np.array([t_ref[idx]]))[0] and np.isfinite(val)):
+                continue
             ax.axvline(t_ref[idx], color=color, linewidth=0.8, alpha=0.35, linestyle=":")
             ax.annotate(
                 f"{val:+.0f}°",
@@ -538,8 +550,9 @@ def plot_head_movement_peaks(
         axes[2].axvspan(*phases["post_align"], color="#2ecc71", alpha=0.10, zorder=0)
     if phases.get("ride"):
         axes[2].axvspan(*phases["ride"], color="#3498db", alpha=0.05, zorder=0)
-    axes[2].fill_between(t_ref, ang_dist, alpha=0.20, color="#555")
-    axes[2].plot(t_ref, ang_dist, color="#555", linewidth=0.7)
+    ta, ad = nan_mask_invalid_plot_x(t_ref, ang_dist)
+    axes[2].fill_between(ta, ad, alpha=0.20, color="#555")
+    axes[2].plot(ta, ad, color="#555", linewidth=0.7)
     axes[2].set_ylabel("Angular distance [°]", fontsize=9)
     axes[2].grid(True, alpha=0.25)
     axes[2].set_xlabel("Time [s]", fontsize=9)
@@ -623,7 +636,7 @@ def plot_fall_analysis(
 
     t0   = max(t[0], t_fall - context_s)
     t1   = min(t[-1], t_fall + context_s)
-    mask = (t >= t0) & (t <= t1)
+    mask = (t >= t0) & (t <= t1) & mask_valid_plot_x(t)
     tc   = t[mask]
 
     n_panels = 4 if has_gyro else 3
