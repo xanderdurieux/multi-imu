@@ -21,9 +21,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import load_dataframe, recording_stage_dir
+from common import load_dataframe
 from common.quaternion import euler_from_quat, quat_rotate
-from ._utils import mask_valid_plot_x
+from ._utils import mask_valid_plot_x, resolve_stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -284,9 +284,10 @@ def plot_orientation_stage(
     A cross-method comparison plot is also written to the stage root:
     - ``<sensor>_method_comparison.png`` per sensor.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     if not stage_dir.exists():
-        raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
+        log.warning("[%s/%s] stage directory not found — skipping orientation plots.", recording_name, stage)
+        return
 
     method_dirs = sorted(
         d for d in stage_dir.iterdir()
@@ -346,7 +347,7 @@ def plot_orientation_comparison(
     Returns the path of the saved PNG, or ``None`` if fewer than two sensor
     CSVs were found.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     if not stage_dir.exists():
         return None
 
@@ -433,7 +434,7 @@ def plot_relative_orientation(
     Returns the path of the saved PNG, or ``None`` if fewer than two sensor
     CSVs were found.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     if not stage_dir.exists():
         return None
 
@@ -538,7 +539,7 @@ def plot_method_comparison(
 
     Returns a list of paths to the written PNGs (one per sensor).
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     if not stage_dir.exists():
         return []
 

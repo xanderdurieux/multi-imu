@@ -34,8 +34,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import find_sensor_csv, load_dataframe, recording_stage_dir
-from ._utils import mask_valid_plot_x
+from common import load_dataframe
+from ._utils import mask_valid_plot_x, resolve_stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ _GRAVITY_MS2 = 9.81    # expected az in ENU after calibration (specific force po
 # ---------------------------------------------------------------------------
 
 def _load_calibration_json(recording_name: str) -> dict:
-    cal_path = recording_stage_dir(recording_name, _STAGE) / "calibration.json"
+    cal_path = resolve_stage_dir(recording_name, _STAGE) / "calibration.json"
     if not cal_path.exists():
         return {}
     try:
@@ -102,9 +102,9 @@ def plot_sensor_world(
 
     Returns the path of the saved PNG, or ``None`` if the CSV was not found.
     """
-    try:
-        csv_path = find_sensor_csv(recording_name, _STAGE, sensor_name)
-    except FileNotFoundError:
+    stage_dir = resolve_stage_dir(recording_name, _STAGE)
+    csv_path = stage_dir / f"{sensor_name}.csv"
+    if not csv_path.exists():
         log.warning("[%s/%s] no CSV found for %s — skipping.", recording_name, _STAGE, sensor_name)
         return None
 
@@ -118,8 +118,6 @@ def plot_sensor_world(
     time_s = _time_axis(df)
     tx = time_s.to_numpy(dtype=float)
     xm = mask_valid_plot_x(tx)
-    stage_dir = recording_stage_dir(recording_name, _STAGE)
-
     sensor_types = ["acc", "gyro", "mag"]
     n_rows = len(sensor_types)
     n_cols = 3
@@ -210,17 +208,16 @@ def plot_comparison_world(
 
     Returns the path of the saved PNG.
     """
-    stage_dir = recording_stage_dir(recording_name, _STAGE)
+    stage_dir = resolve_stage_dir(recording_name, _STAGE)
 
     dfs: dict[str, pd.DataFrame] = {}
     for sensor in _SENSORS:
-        try:
-            csv_path = find_sensor_csv(recording_name, _STAGE, sensor)
-            df = load_dataframe(csv_path)
-            if not df.empty:
-                dfs[sensor] = df
-        except FileNotFoundError:
-            pass
+        csv_path = stage_dir / f"{sensor}.csv"
+        if not csv_path.exists():
+            continue
+        df = load_dataframe(csv_path)
+        if not df.empty:
+            dfs[sensor] = df
 
     if len(dfs) < 2:
         log.warning(

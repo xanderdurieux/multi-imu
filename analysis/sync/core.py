@@ -515,6 +515,8 @@ def _windowed_lag_refinement(
         empty = np.asarray([], dtype=float)
         return empty, empty, empty, empty
 
+    # NOTE: These times must be expressed in the *target* clock domain because the
+    # subsequent drift fit models offset(t_target) as a function of target time.
     target_times: list[float] = []
     offsets: list[float] = []
     scores: list[float] = []
@@ -555,7 +557,7 @@ def _windowed_lag_refinement(
 
         ref_time = float(ref_ts[center])
         tgt_time = float(tgt_ts[tgt_idx])
-        target_times.append(ref_time)
+        target_times.append(tgt_time)
         offsets.append(ref_time - tgt_time)
         scores.append(best_score)
         lags.append(float(best_lag))

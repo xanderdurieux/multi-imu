@@ -48,8 +48,9 @@ import matplotlib.patches as mpatches
 import numpy as np
 from scipy.signal import find_peaks
 
-from common import load_dataframe, recording_stage_dir, recordings_root
+from common import load_dataframe, recordings_root
 from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
+from ._utils import resolve_stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -187,6 +188,23 @@ def _protocol_phases(t, norm):
 
 
 # ---------------------------------------------------------------------------
+# Quaternion column compatibility
+# ---------------------------------------------------------------------------
+
+
+def _qcols_for_df(df) -> list[str] | None:
+    """Quaternion columns in w,x,y,z order (supports qw..qz and q0..q3)."""
+    cols = getattr(df, "columns", None)
+    if cols is None:
+        return None
+    if all(c in cols for c in ("qw", "qx", "qy", "qz")):
+        return ["qw", "qx", "qy", "qz"]
+    if all(c in cols for c in ("q0", "q1", "q2", "q3")):
+        return ["q0", "q1", "q2", "q3"]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Shared relative-orientation computation
 # ---------------------------------------------------------------------------
 
@@ -208,12 +226,13 @@ def _compute_relative_orientation(recording_name: str, stage_dir: Path):
     df_s, t_s = dfs["sporsa"]
     df_a, t_a = dfs["arduino"]
 
-    qcols = ["qw", "qx", "qy", "qz"]
-    if not all(c in df_s.columns for c in qcols) or not all(c in df_a.columns for c in qcols):
+    qcols_s = _qcols_for_df(df_s)
+    qcols_a = _qcols_for_df(df_a)
+    if qcols_s is None or qcols_a is None:
         return None
 
-    q_s     = _qnorm(df_s[qcols].to_numpy(dtype=float))
-    q_a_raw = df_a[qcols].to_numpy(dtype=float)
+    q_s     = _qnorm(df_s[qcols_s].to_numpy(dtype=float))
+    q_a_raw = df_a[qcols_a].to_numpy(dtype=float)
 
     overlap_min = max(t_s[0], t_a[0])
     overlap_max = min(t_s[-1], t_a[-1])
@@ -234,9 +253,12 @@ def _compute_relative_orientation(recording_name: str, stage_dir: Path):
     ang_dist = 2.0 * np.degrees(np.arccos(np.clip(np.abs(q_change[:, 0]), 0, 1)))
     yaw_ch, pitch_ch, roll_ch = _euler_from_quat(q_change)
 
-    acc_s  = df_s[["ax", "ay", "az"]].to_numpy(dtype=float)
-    norm_s = np.linalg.norm(acc_s, axis=1)
-    phases = _protocol_phases(t_s[mask_s], norm_s[mask_s])
+    phases = {"pre_align": None, "post_align": None, "ride": None, "clusters": []}
+    acc_cols = ["ax", "ay", "az"]
+    if all(c in df_s.columns for c in acc_cols):
+        acc_s = df_s[acc_cols].to_numpy(dtype=float)
+        norm_s = np.linalg.norm(acc_s, axis=1)
+        phases = _protocol_phases(t_s[mask_s], norm_s[mask_s])
 
     return {
         "t_ref": t_ref,
@@ -264,7 +286,7 @@ def plot_gravity_accuracy(
     calibration bias, world-frame rotation issues, or filter initialisation
     problems.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     results: dict[str, list] = {}
 
     for sensor in _SENSORS:
@@ -274,12 +296,15 @@ def plot_gravity_accuracy(
         df, t = _load(p)
         if df is None:
             continue
-        req = ["ax", "ay", "az", "qw", "qx", "qy", "qz"]
-        if not all(c in df.columns for c in req):
+        acc_cols = ["ax", "ay", "az"]
+        if not all(c in df.columns for c in acc_cols):
+            continue
+        qcols = _qcols_for_df(df)
+        if qcols is None:
             continue
 
-        acc      = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-        q        = _qnorm(df[["qw", "qx", "qy", "qz"]].to_numpy(dtype=float))
+        acc = df[acc_cols].to_numpy(dtype=float)
+        q   = _qnorm(df[qcols].to_numpy(dtype=float))
         acc_norm = np.linalg.norm(acc, axis=1)
         aw       = _rotate_vecs(q, acc)
 
@@ -387,7 +412,7 @@ def plot_alignment_quality(
     or filter warm-up drift.  The pre- and post-ride phases are shown
     side by side for comparison.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     result    = _compute_relative_orientation(recording_name, stage_dir)
     if result is None:
         log.warning("[%s/%s] cannot compute relative orientation — skipping alignment quality.", recording_name, stage)
@@ -477,7 +502,7 @@ def plot_head_movement_peaks(
 
     Grey bands mark auto-detected static calibration segments.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     result    = _compute_relative_orientation(recording_name, stage_dir)
     if result is None:
         log.warning("[%s/%s] cannot compute relative orientation — skipping head movement peaks.", recording_name, stage)
@@ -596,7 +621,7 @@ def plot_fall_analysis(
 
     Falls back to the other sensor if the requested one has no data.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     p = _find_csv(stage_dir, sensor)
     if p is None:
         fallback = "sporsa" if sensor == "arduino" else "arduino"
@@ -612,13 +637,17 @@ def plot_fall_analysis(
     if df is None:
         return None
 
-    req = ["ax", "ay", "az", "qw", "qx", "qy", "qz"]
-    if not all(c in df.columns for c in req):
-        log.warning("[%s/%s] missing required columns.", recording_name, stage)
+    acc_cols = ["ax", "ay", "az"]
+    if not all(c in df.columns for c in acc_cols):
+        log.warning("[%s/%s] missing acc columns for fall analysis.", recording_name, stage)
+        return None
+    qcols = _qcols_for_df(df)
+    if qcols is None:
+        log.warning("[%s/%s] missing quaternion columns for fall analysis.", recording_name, stage)
         return None
 
-    acc      = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-    q        = _qnorm(df[["qw", "qx", "qy", "qz"]].to_numpy(dtype=float))
+    acc      = df[acc_cols].to_numpy(dtype=float)
+    q        = _qnorm(df[qcols].to_numpy(dtype=float))
     acc_norm = np.linalg.norm(acc, axis=1)
     aw       = _rotate_vecs(q, acc)
     has_gyro = all(c in df.columns for c in ["gx", "gy", "gz"])

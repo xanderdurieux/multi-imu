@@ -36,8 +36,8 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import numpy as np
 
-from common import load_dataframe, recording_stage_dir
-from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
+from common import load_dataframe
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x, resolve_stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +92,20 @@ def _rotate_vecs(quats: np.ndarray, vecs: np.ndarray) -> np.ndarray:
     )
 
 
+def _quat_cols(df) -> list[str] | None:
+    """Quaternion column names in [w, x, y, z] order.
+
+    Supports both:
+    - ``qw, qx, qy, qz``
+    - ``q0, q1, q2, q3`` (assumed w,x,y,z)
+    """
+    if all(c in df.columns for c in ("qw", "qx", "qy", "qz")):
+        return ["qw", "qx", "qy", "qz"]
+    if all(c in df.columns for c in ("q0", "q1", "q2", "q3")):
+        return ["q0", "q1", "q2", "q3"]
+    return None
+
+
 def _static_mask(acc_body: np.ndarray, gyro_body_deg: np.ndarray) -> np.ndarray:
     """Boolean mask for samples that are likely static (at rest)."""
     acc_norm = np.linalg.norm(acc_body, axis=1)
@@ -143,7 +157,9 @@ def plot_gravity_world(csv_path: Path, gravity: float = _GRAVITY) -> Path | None
     if df.empty or len(time_s) == 0:
         return None
 
-    quat_cols = ["qw", "qx", "qy", "qz"]
+    quat_cols = _quat_cols(df)
+    if quat_cols is None:
+        return None
     acc_cols  = ["ax", "ay", "az"]
     gyro_cols = ["gx", "gy", "gz"]
     if not all(c in df.columns for c in quat_cols + acc_cols):
@@ -245,12 +261,11 @@ def plot_axes_sphere(
     if df.empty or len(time_s) == 0:
         return None
 
-    quat_cols = ["qw", "qx", "qy", "qz"]
+    quat_cols = _quat_cols(df)
+    if quat_cols is None:
+        return None
     acc_cols  = ["ax", "ay", "az"]
     gyro_cols = ["gx", "gy", "gz"]
-    if not all(c in df.columns for c in quat_cols):
-        return None
-
     quats = df[quat_cols].to_numpy(dtype=float)
     acc_body  = df[acc_cols].to_numpy(dtype=float) if all(
         c in df.columns for c in acc_cols
@@ -359,8 +374,8 @@ def plot_3d_frames(
     if df.empty or len(time_s) == 0:
         return None
 
-    quat_cols = ["qw", "qx", "qy", "qz"]
-    if not all(c in df.columns for c in quat_cols):
+    quat_cols = _quat_cols(df)
+    if quat_cols is None:
         return None
 
     quats = df[quat_cols].to_numpy(dtype=float)
@@ -467,7 +482,7 @@ def plot_orientation_verify_stage(
     Iterates over method subdirectories (``complementary/``, ``madgwick/``, …).
     Falls back to the flat layout if no subdirectories contain orientation CSVs.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     if not stage_dir.exists():
         raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
 

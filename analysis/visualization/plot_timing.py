@@ -36,8 +36,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import find_sensor_csv, load_dataframe, recording_dir, recording_stage_dir
-from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x, time_axis_seconds
+from common import find_sensor_csv, load_dataframe, recording_dir
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x, time_axis_seconds, resolve_stage_dir, parse_recording_or_section_id
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +55,15 @@ _GAP_THRESHOLDS = {"sporsa": 15.0, "arduino": 25.5}
 # ---------------------------------------------------------------------------
 
 def _load_timing_stats(recording_name: str) -> dict:
-    stats_path = recording_dir(recording_name) / "session_stats.json"
+    # For section ids we currently don't have per-section timing stats;
+    # just return empty so timing plots are skipped.
+    _rec, sec_idx = parse_recording_or_section_id(recording_name)
+    if sec_idx is not None:
+        return {}
+
+    stats_path = recording_dir(_rec) / "session_stats.json"
     if not stats_path.exists():
-        legacy = recording_stage_dir(recording_name, _STAGE) / "session_stats.json"
+        legacy = resolve_stage_dir(_rec, _STAGE) / "session_stats.json"
         stats_path = legacy if legacy.exists() else stats_path
     if not stats_path.exists():
         return {}
@@ -86,7 +92,10 @@ def plot_timing_intervals(
 
     Returns the path of the saved PNG, or ``None`` if no CSVs were found.
     """
-    stage_dir = recording_stage_dir(recording_name, _STAGE)
+    stage_dir = resolve_stage_dir(recording_name, _STAGE)
+    if not stage_dir.exists():
+        log.warning("[%s/%s] stage directory not found — skipping timing plots.", recording_name, _STAGE)
+        return None
     stats = _load_timing_stats(recording_name)
 
     dfs: dict[str, pd.DataFrame] = {}
@@ -174,7 +183,9 @@ def plot_timing_timeline(
 
     Returns the path of the saved PNG, or ``None`` if no CSVs were found.
     """
-    stage_dir = recording_stage_dir(recording_name, _STAGE)
+    stage_dir = resolve_stage_dir(recording_name, _STAGE)
+    if not stage_dir.exists():
+        return None
 
     dfs: dict[str, pd.DataFrame] = {}
     for sensor in _SENSORS:
@@ -260,7 +271,9 @@ def plot_clock_drift(recording_name: str) -> Path | None:
     Returns the path of the saved PNG, or ``None`` if the Arduino CSV was not
     found or has no ``timestamp_received`` column.
     """
-    stage_dir = recording_stage_dir(recording_name, _STAGE)
+    stage_dir = resolve_stage_dir(recording_name, _STAGE)
+    if not stage_dir.exists():
+        return None
     stats = _load_timing_stats(recording_name)
 
     try:

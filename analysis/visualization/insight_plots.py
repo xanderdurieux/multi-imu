@@ -180,6 +180,103 @@ def plot_cross_sensor_timeseries(df: pd.DataFrame, out_path: Path) -> None:
     plt.close(fig)
 
 
+def plot_feature_label_correlation_heatmap(
+    df: pd.DataFrame,
+    out_path: Path,
+    *,
+    max_labels: int = 8,
+    max_features: int = 16,
+    min_per_label: int = 15,
+) -> None:
+    """Heatmap: scenario_label x feature (one-vs-rest Pearson correlation).
+
+    For each label L we compute correlation(feature, 1{scenario_label == L})
+    over all rows with valid numeric feature values.
+    """
+
+    if "scenario_label" not in df.columns or df.empty:
+        return
+
+    apply_matplotlib_thesis_style()
+
+    labels_raw = df["scenario_label"]
+    mask_labels = labels_raw.notna() & (labels_raw.astype(str).str.strip() != "")
+    labeled = df.loc[mask_labels].copy()
+    if labeled.empty:
+        return
+
+    # Keep at most the most frequent labels for readability.
+    label_counts = labeled["scenario_label"].astype(str).value_counts(dropna=False)
+    if label_counts.empty:
+        return
+    top_labels = label_counts.index.astype(str).tolist()[:max_labels]
+    if not top_labels:
+        return
+
+    # Numeric, non-metadata feature columns.
+    all_feat_cols = _numeric_feature_columns(labeled, max_cols=40)
+    if len(all_feat_cols) < 2:
+        return
+
+    corr = np.full((len(top_labels), len(all_feat_cols)), np.nan, dtype=float)
+
+    # Precompute y indicators so we don't repeat the conversion.
+    y_inds: list[np.ndarray] = []
+    for lab in top_labels:
+        y = (labeled["scenario_label"].astype(str) == lab).astype(float).to_numpy()
+        y_inds.append(y)
+
+    for li, y in enumerate(y_inds):
+        n_ones = int(np.sum(y > 0.5))
+        n_total = int(len(y))
+        if n_ones < min_per_label or n_total < (min_per_label * 2):
+            continue
+
+        for fi, col in enumerate(all_feat_cols):
+            x = pd.to_numeric(labeled[col], errors="coerce").to_numpy(dtype=float)
+            m = np.isfinite(x)
+            if np.sum(m) < max(5, min_per_label):
+                continue
+            if np.nanstd(x[m]) < 1e-12:
+                continue
+            c = np.corrcoef(x[m], y[m])[0, 1]
+            if np.isfinite(c):
+                corr[li, fi] = float(c)
+
+    if not np.isfinite(corr).any():
+        return
+
+    # Select the most label-informative features.
+    max_abs = np.nanmax(np.abs(corr), axis=0)
+    valid = np.isfinite(max_abs)
+    if not np.any(valid):
+        return
+    ordered = np.argsort(np.where(valid, max_abs, -np.inf))[::-1]
+    take = [i for i in ordered[:max_features] if valid[i]]
+    if not take:
+        return
+
+    feat_cols = [all_feat_cols[i] for i in take]
+    corr_sel = corr[:, take]
+
+    fig_h = max(2.6, 0.42 * len(top_labels) + 0.8)
+    fig_w = max(7.2, 0.55 * len(feat_cols) + 2.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
+
+    im = ax.imshow(corr_sel, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+    ax.set_xticks(np.arange(len(feat_cols)))
+    ax.set_xticklabels(feat_cols, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(np.arange(len(top_labels)))
+    ax.set_yticklabels(top_labels, fontsize=9)
+    ax.set_title("Feature vs label association\n(one-vs-rest Pearson correlation)")
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.86, pad=0.02)
+    cbar.set_label("Correlation(feature, label-membership indicator)")
+
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def recording_window_counts(df: pd.DataFrame) -> pd.DataFrame:
     """Rows: recording, n_windows; sorted descending by count."""
     if "recording" not in df.columns:
@@ -218,6 +315,7 @@ def write_static_insight_bundle(df: pd.DataFrame, static_dir: Path) -> None:
         return
     plot_feature_correlation_heatmap(df, static_dir / "feature_correlation.png")
     plot_feature_distributions_grid(df, static_dir / "feature_distributions.png")
+    plot_feature_label_correlation_heatmap(df, static_dir / "feature_label_correlation.png")
     plot_pca_scatter(df, static_dir / "feature_pca.png", color_key="recording" if "recording" in df.columns else None)
     plot_cross_sensor_timeseries(df, static_dir / "cross_sensor_timeseries.png")
     if "recording" in df.columns:

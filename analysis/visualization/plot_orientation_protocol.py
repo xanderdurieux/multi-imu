@@ -62,8 +62,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 
-from common import load_dataframe, recording_stage_dir
-from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x
+from common import load_dataframe
+from ._utils import mask_valid_plot_x, nan_mask_invalid_plot_x, resolve_stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +144,22 @@ def _rotate_vecs(quats: np.ndarray, vecs: np.ndarray) -> np.ndarray:
     cx = y*vz - z*vy;  cy = z*vx - x*vz;  cz = x*vy - y*vx
     cx2 = y*cz - z*cy; cy2 = z*cx - x*cz; cz2 = x*cy - y*cx
     return np.stack([vx+2*(w*cx+cx2), vy+2*(w*cy+cy2), vz+2*(w*cz+cz2)], axis=1)
+
+
+def _qcols_for_df(df: object) -> list[str] | None:
+    """Return quaternion columns in w,x,y,z order.
+
+    Supports both ``qw/qx/qy/qz`` and ``q0/q1/q2/q3`` (assumed w,x,y,z).
+    """
+    # Pandas DataFrame duck-typing: check df.columns.
+    cols = getattr(df, "columns", None)
+    if cols is None:
+        return None
+    if all(c in cols for c in ("qw", "qx", "qy", "qz")):
+        return ["qw", "qx", "qy", "qz"]
+    if all(c in cols for c in ("q0", "q1", "q2", "q3")):
+        return ["q0", "q1", "q2", "q3"]
+    return None
 
 
 def _unwrap_deg(a: np.ndarray) -> np.ndarray:
@@ -297,7 +313,7 @@ def plot_sync(
     stage: str = "orientation",
 ) -> Path | None:
     """Overlay both sensors' acc_body norm with protocol phase shading."""
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     data = {}
     for sensor in _SENSORS:
         p = _find_csv(stage_dir, sensor)
@@ -395,7 +411,7 @@ def plot_relative_quat(
     (both aligned with the handlebar).  Any deviation during the bike ride
     represents actual head rotation relative to the handlebar.
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     dfs: dict[str, tuple] = {}
     for sensor in _SENSORS:
         p = _find_csv(stage_dir, sensor)
@@ -413,8 +429,13 @@ def plot_relative_quat(
     df_s, t_s = dfs["sporsa"]
     df_a, t_a = dfs["arduino"]
 
-    q_s     = _qnorm(df_s[["qw","qx","qy","qz"]].to_numpy(dtype=float))
-    q_a_raw = df_a[["qw","qx","qy","qz"]].to_numpy(dtype=float)
+    qcols_s = _qcols_for_df(df_s)
+    qcols_a = _qcols_for_df(df_a)
+    if qcols_s is None or qcols_a is None:
+        log.warning("[%s] no compatible quaternion columns — skipping.", recording_name)
+        return None
+    q_s = _qnorm(df_s[qcols_s].to_numpy(dtype=float))
+    q_a_raw = df_a[qcols_a].to_numpy(dtype=float)
 
     # Find overlapping time window
     overlap_min = max(t_s[0], t_a[0])
@@ -452,10 +473,13 @@ def plot_relative_quat(
     pitch_ch = _unwrap_deg(pitch_ch)
     roll_ch  = _unwrap_deg(roll_ch)
 
-    # Protocol phases from sporsa acc_norm
-    acc_s    = df_s[["ax","ay","az"]].to_numpy(dtype=float)
-    norm_s   = np.linalg.norm(acc_s, axis=1)
-    phases   = _protocol_phases(t_s, norm_s)
+    # Protocol phases from sporsa acc_norm (optional).
+    phases = {"pre_align": None, "post_align": None, "ride": None, "clusters": []}
+    acc_cols = ["ax", "ay", "az"]
+    if all(c in df_s.columns for c in acc_cols):
+        acc_s = df_s[acc_cols].to_numpy(dtype=float)
+        norm_s = np.linalg.norm(acc_s, axis=1)
+        phases = _protocol_phases(t_s, norm_s)
 
     # --- Plot ---
     fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True,
@@ -533,7 +557,7 @@ def plot_az_world_compare(
     stage: str = "orientation",
 ) -> Path | None:
     """Both sensors' world-frame az (Up) component overlaid with phase shading."""
-    stage_dir = recording_stage_dir(recording_name, stage)
+    stage_dir = resolve_stage_dir(recording_name, stage)
     data = {}
     acc_norms = {}
     for sensor in _SENSORS:
@@ -543,8 +567,9 @@ def plot_az_world_compare(
         df, t = _load(p)
         if df is None:
             continue
-        qcols = ["qw","qx","qy","qz"]; acols = ["ax","ay","az"]
-        if not all(c in df.columns for c in qcols + acols):
+        qcols = _qcols_for_df(df)
+        acols = ["ax", "ay", "az"]
+        if qcols is None or not all(c in df.columns for c in acols):
             continue
         q    = _qnorm(df[qcols].to_numpy(dtype=float))
         acc  = df[acols].to_numpy(dtype=float)
@@ -590,15 +615,26 @@ def plot_az_world_compare(
     s_t, s_az = data.get("sporsa", (None, None))
     a_t, a_az = data.get("arduino", (None, None))
     if s_t is not None and a_t is not None:
-        a_interp = np.interp(s_t, a_t[np.isfinite(a_az)], a_az[np.isfinite(a_az)])
-        diff = a_interp - s_az
-        stp, dfp = nan_mask_invalid_plot_x(s_t, diff)
-        axes[1].plot(stp, dfp, color="#555", linewidth=0.6)
-        axes[1].axhline(0, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
-        _shade_phases(axes[1], phases, s_t[-1])
-        axes[1].set_ylabel("Arduino − Sporsa\n[m/s²]", fontsize=8)
-        axes[1].set_ylim(-20, 20)
-        axes[1].grid(True, alpha=0.2)
+        fin_a = np.isfinite(a_az)
+        if fin_a.sum() < 2:
+            # Avoid crashing when az_world is all-NaN or there are too
+            # few finite Arduino samples for interpolation.
+            diff = None
+        else:
+            a_interp = np.interp(
+                s_t,
+                a_t[fin_a],
+                a_az[fin_a],
+            )
+            diff = a_interp - s_az
+        if diff is not None:
+            stp, dfp = nan_mask_invalid_plot_x(s_t, diff)
+            axes[1].plot(stp, dfp, color="#555", linewidth=0.6)
+            axes[1].axhline(0, color="k", linestyle="--", linewidth=0.7, alpha=0.4)
+            _shade_phases(axes[1], phases, s_t[-1])
+            axes[1].set_ylabel("Arduino − Sporsa\n[m/s²]", fontsize=8)
+            axes[1].set_ylim(-20, 20)
+            axes[1].grid(True, alpha=0.2)
 
     # Acc-norm panel
     for sensor, (t, norm) in acc_norms.items():
