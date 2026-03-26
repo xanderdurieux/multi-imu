@@ -125,8 +125,9 @@ def calibrate_section(
     Parameters
     ----------
     frame_alignment:
-        ``gravity_only`` (default) or ``gravity_plus_forward`` to add an optional yaw
-        about vertical from mean horizontal specific force (see ``frame_alignment`` module).
+        ``gravity_only`` (default), ``gravity_plus_forward`` (per-sensor mean horizontal
+        specific force), or ``section_horizontal_frame`` (recommended; section-level yaw
+        estimated from reference bike sensor horizontal dynamics and transferred to both sensors).
     forward_min_motion_ms2:
         Motion threshold (m/s²) for forward-axis estimation samples.
 
@@ -155,8 +156,14 @@ def calibrate_section(
         log.warning("Static calibration not found at %s; Arduino will use raw values", cal_path)
 
     result: dict[str, Any] = {}
+    prepared: dict[str, dict[str, Any]] = {}
+    sensor_order = ("sporsa", "arduino")
+    alignment_mode = frame_alignment.strip().lower()
+    if alignment_mode not in {"gravity_only", "gravity_plus_forward", "section_horizontal_frame"}:
+        log.warning("Unknown frame_alignment %r — using gravity_only", frame_alignment)
+        alignment_mode = "gravity_only"
 
-    for sensor in ("sporsa", "arduino"):
+    for sensor in sensor_order:
         csv_path = section_path / f"{sensor}.csv"
         if not csv_path.exists():
             log.warning("Missing %s — skipping", csv_path)
@@ -206,25 +213,66 @@ def calibrate_section(
         n_static_samples = end_idx - start_idx
 
         R_grav = _compute_rotation_matrix(g_hat)
+        prepared[sensor] = {
+            "df": df,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "g_hat": g_hat,
+            "gravity_residual": gravity_residual,
+            "n_static_samples": n_static_samples,
+            "R_grav": R_grav,
+        }
+
+    if not prepared:
+        return result
+
+    section_frame_meta: dict[str, Any] = {
+        "frame_alignment": alignment_mode,
+        "reference_sensor": "sporsa",
+        "fallback": False,
+        "fallback_reason": "",
+    }
+    R_section_yaw = np.eye(3)
+    if alignment_mode == "section_horizontal_frame":
+        from calibration.frame_alignment import estimate_section_horizontal_frame
+
+        ref_sensor = "sporsa" if "sporsa" in prepared else next(iter(prepared.keys()))
+        ref = prepared[ref_sensor]
+        acc_ref = ref["df"][ACC_COLS].to_numpy(dtype=float)
+        acc_ref_world = (ref["R_grav"] @ acc_ref.T).T
+        R_section_yaw, section_frame_meta = estimate_section_horizontal_frame(
+            acc_ref_world,
+            static_indices=slice(ref["start_idx"], ref["end_idx"]),
+            min_motion_ms2=forward_min_motion_ms2,
+        )
+        section_frame_meta["frame_alignment"] = "section_horizontal_frame"
+        section_frame_meta["reference_sensor"] = ref_sensor
+
+    for sensor in sensor_order:
+        if sensor not in prepared:
+            continue
+        block = prepared[sensor]
+        df = block["df"]
+        R = block["R_grav"]
         forward_meta: dict[str, Any] = {}
-        R = R_grav
-        alignment_mode = frame_alignment.strip().lower()
         if alignment_mode == "gravity_plus_forward":
             from calibration.frame_alignment import estimate_yaw_align_forward
 
             acc_sensor = df[ACC_COLS].to_numpy(dtype=float)
-            acc_world = (R_grav @ acc_sensor.T).T
-            static_slice = slice(start_idx, end_idx)
+            acc_world = (R @ acc_sensor.T).T
+            static_slice = slice(block["start_idx"], block["end_idx"])
             R_yaw, forward_meta = estimate_yaw_align_forward(
                 acc_world,
                 static_indices=static_slice,
                 min_motion_ms2=forward_min_motion_ms2,
             )
-            R = R_yaw @ R_grav
+            R = R_yaw @ R
             forward_meta["frame_alignment"] = "gravity_plus_forward"
-        elif alignment_mode != "gravity_only":
-            log.warning("Unknown frame_alignment %r — using gravity_only", frame_alignment)
-            alignment_mode = "gravity_only"
+        elif alignment_mode == "section_horizontal_frame":
+            R = R_section_yaw @ R
+            forward_meta = dict(section_frame_meta)
+            forward_meta["frame_alignment"] = "section_horizontal_frame"
+            forward_meta["applied_sensor"] = sensor
 
         df_cal = _apply_rotation_to_columns(df, R, ACC_COLS, GYRO_COLS)
 
@@ -232,24 +280,26 @@ def calibrate_section(
         write_dataframe(df_cal, out_csv)
 
         calib_quality = "good"
+        gravity_residual = float(block["gravity_residual"])
+        n_static_samples = int(block["n_static_samples"])
         if gravity_residual > 0.5 or n_static_samples < 100:
             calib_quality = "marginal"
         if gravity_residual > 1.0 or n_static_samples < 30:
             calib_quality = "poor"
-        if alignment_mode == "gravity_plus_forward" and forward_meta.get("fallback"):
+        if alignment_mode in {"gravity_plus_forward", "section_horizontal_frame"} and forward_meta.get("fallback"):
             if calib_quality == "good":
                 calib_quality = "marginal"
 
         result[sensor] = {
             "sensor": sensor,
             "static_window_seconds": static_window_seconds,
-            "g_hat_sensor_frame": g_hat.tolist(),
+            "g_hat_sensor_frame": block["g_hat"].tolist(),
             "gravity_residual_m_per_s2": gravity_residual,
             "n_static_samples": n_static_samples,
             "rotation_matrix": R.tolist(),
             "gyro_unit": "rad_per_s",
             "frame_alignment": alignment_mode,
-            "forward_frame_meta": forward_meta if alignment_mode == "gravity_plus_forward" else {},
+            "forward_frame_meta": forward_meta if alignment_mode != "gravity_only" else {},
             "calibration_quality": calib_quality,
         }
 
@@ -257,6 +307,11 @@ def calibrate_section(
     cal_json_path = calibrated_dir / "calibration.json"
     with cal_json_path.open("w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
+
+    if alignment_mode == "section_horizontal_frame":
+        section_frame_path = calibrated_dir / "section_frame.json"
+        with section_frame_path.open("w", encoding="utf-8") as f:
+            json.dump(section_frame_meta, f, indent=2)
 
     if write_plots and result:
         from .plots import plot_calibration_diagnostics

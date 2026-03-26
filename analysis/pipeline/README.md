@@ -25,7 +25,7 @@ uv run python -m pipeline --session <session_name> \
   `parser.split_sections` (default: `synced`).
 - `--orientation-filter <variant>`: which orientation variant CSV is used for
   feature extraction (default: `complementary_orientation`).
-- `--frame-alignment {gravity_only,gravity_plus_forward}`: calibration frame
+- `--frame-alignment {gravity_only,gravity_plus_forward,section_horizontal_frame}`: calibration frame
   alignment mode passed to `calibration.calibrate_section`.
 - `--no-plots`: disable diagnostic plots.
 - `--force`: re-run steps even when outputs already exist.
@@ -46,4 +46,3 @@ Run-level summaries:
 
 If `--skip-exports` is not set, consolidated exports are written to:
 - `analysis/data/exports/` (thesis-ready feature tables + QC summary CSVs)
-

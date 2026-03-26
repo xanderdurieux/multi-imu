@@ -336,9 +336,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--frame-alignment",
-        choices=("gravity_only", "gravity_plus_forward"),
+        choices=("gravity_only", "gravity_plus_forward", "section_horizontal_frame"),
         default="gravity_only",
-        help="Ride-level frame: gravity only or add yaw from mean horizontal motion.",
+        help="Ride-level frame: gravity only, per-sensor forward yaw, or section-level reference frame.",
     )
     parser.add_argument("--skip-exports", action="store_true", help="Skip consolidated export CSVs.")
     args = parser.parse_args(argv)
