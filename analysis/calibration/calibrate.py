@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -329,17 +330,29 @@ def calibrate_section(
     return result
 
 
-def _parse_section_arg(arg: str) -> tuple[str, str | None]:
-    """Parse CLI argument into (recording_name, section_name or None)."""
-    arg = arg.strip().rstrip("/")
-    parts = arg.replace("\\", "/").split("/")
-    recording_name = parts[0]
-    section_name: str | None = None
-    for i, p in enumerate(parts):
-        if p == "sections" and i + 1 < len(parts):
-            section_name = parts[i + 1]
-            break
-    return recording_name, section_name
+def _resolve_section_dir(arg: str) -> Path | None:
+    """Resolve a CLI argument to an existing section directory.
+
+    Accepted forms:
+    - A direct path to a section dir (absolute or relative), e.g. ``data/sections/2026-02-26_r2s1``
+    - A section folder name, e.g. ``2026-02-26_r2s1`` (resolved under ``data/sections``)
+    """
+    raw = arg.strip().rstrip("/")
+    if not raw:
+        return None
+
+    p = Path(raw)
+    if p.is_dir():
+        return p.resolve()
+
+    # Accept bare section folder names under data/sections/
+    from common.paths import sections_root
+
+    cand = sections_root() / raw
+    if cand.is_dir():
+        return cand.resolve()
+
+    return None
 
 
 def calibrate_sections_from_args(
@@ -352,31 +365,27 @@ def calibrate_sections_from_args(
     forward_min_motion_ms2: float = 0.35,
 ) -> list[Path]:
     """Calibrate section(s) based on CLI-style arguments."""
-    recording_name, section_name = _parse_section_arg(name)
-
     if all_sections:
         from common.paths import iter_sections_for_recording
+
+        recording_name = name.strip().rstrip("/")
+        if "/" in recording_name or "\\" in recording_name:
+            raise ValueError(
+                "When using --all-sections, pass a recording folder name like "
+                "'2026-02-26_r2' (not a path)."
+            )
 
         section_dirs = iter_sections_for_recording(recording_name)
         if not section_dirs:
             raise FileNotFoundError(f"No sections found for recording: {recording_name}")
     else:
-        if section_name is None:
+        sec_dir = _resolve_section_dir(name)
+        if sec_dir is None:
             raise ValueError(
-                "Specify a section (e.g. 2026-02-26_r5/sections/section_1) or use --all-sections"
+                "Specify a section directory like 'data/sections/2026-02-26_r2s1' "
+                "(or just '2026-02-26_r2s1'), or use --all-sections with a recording "
+                "name like '2026-02-26_r2'."
             )
-        # Stage-style arg is expected to use legacy section IDs like "section_1".
-        sec_idx_s = str(section_name).strip()
-        if not sec_idx_s.startswith("section_"):
-            raise ValueError(
-                f"Expected legacy section id like 'section_<idx>', got {section_name!r}"
-            )
-        sec_idx = int(sec_idx_s.split("_", 1)[1])
-        from common.paths import section_dir
-
-        sec_dir = section_dir(recording_name, sec_idx)
-        if not sec_dir.exists():
-            raise FileNotFoundError(f"Section not found: {sec_dir}")
         section_dirs = [sec_dir]
 
     done: list[Path] = []

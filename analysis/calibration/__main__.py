@@ -9,7 +9,13 @@ if __name__ == "__main__":
     import argparse
     import logging
     parser = argparse.ArgumentParser(prog="python -m calibration")
-    parser.add_argument("name", help="Section path or recording name with --all-sections")
+    parser.add_argument(
+        "name",
+        help=(
+            "Section directory (e.g. 'data/sections/2026-02-26_r2s1' or '2026-02-26_r2s1'). "
+            "With --all-sections, pass a recording name like '2026-02-26_r2'."
+        ),
+    )
     parser.add_argument("--all-sections", action="store_true")
     parser.add_argument("--static-window", type=float, default=3.0)
     parser.add_argument("--variance-threshold", type=float, default=0.5)

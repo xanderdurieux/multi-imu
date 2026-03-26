@@ -68,9 +68,9 @@ Input is always ``data/recordings/<recording>/parsed/`` (Sporsa + Arduino CSVs).
 
 ```bash
 # One recording: run all four methods, select best, flat synced/ + plots
-uv run -m sync 2026-02-26_5
+uv run -m sync 2026-02-26_r5
 
-# Whole session (every folder 2026-02-26_*)
+# Whole session (every folder 2026-02-26_r*)
 uv run -m sync 2026-02-26 --all
 ```
 
@@ -83,7 +83,7 @@ comparison figures and ``all_methods.json``.
 ```python
 from sync.pipeline import synchronize_recording_all_methods, synchronize_session
 
-result = synchronize_recording_all_methods("2026-02-26_5")
+result = synchronize_recording_all_methods("2026-02-26_r5")
 results = synchronize_session("2026-02-26")
 ```
 

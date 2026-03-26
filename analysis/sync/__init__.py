@@ -2,7 +2,7 @@
 
 From ``analysis/``::
 
-    python -m sync 2026-02-26_5
+    python -m sync 2026-02-26_r5
     python -m sync 2026-02-26 --all
 
 Runs every method on ``parsed/``, selects the best, writes flat ``synced/`` with plots.

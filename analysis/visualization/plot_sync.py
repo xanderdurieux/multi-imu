@@ -23,8 +23,8 @@ directory:
 
 CLI::
 
-    python -m visualization.plot_sync 2026-02-26_5
-    python -m visualization.plot_sync 2026-02-26_5 --no-alignment
+    python -m visualization.plot_sync 2026-02-26_r5
+    python -m visualization.plot_sync 2026-02-26_r5 --no-alignment
 """
 
 from __future__ import annotations
@@ -292,7 +292,7 @@ def _build_arg_parser():
     parser.add_argument(
         "recording_names",
         nargs="+",
-        help="One or more recording names (e.g. 2026-02-26_5).",
+        help="One or more recording names (e.g. 2026-02-26_r5).",
     )
     parser.add_argument(
         "--no-alignment",

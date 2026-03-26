@@ -1,4 +1,4 @@
 scope,recording_id,section_id,window_start_s,window_end_s,scenario_label,label_source
-recording,2026-02-26_1,,,,cruise_flat,manual_template
-section,2026-02-26_1,section_2,,,rough_surface,manual_template
-interval,2026-02-26_1,section_1,12.0,18.0,braking_event,manual_template
+recording,2026-02-26_r1,,,,cruise_flat,manual_template
+section,2026-02-26_r1,2026-02-26_r1s2,,,rough_surface,manual_template
+interval,2026-02-26_r1,2026-02-26_r1s1,12.0,18.0,braking_event,manual_template

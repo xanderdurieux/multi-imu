@@ -28,17 +28,15 @@ def _all_recording_names() -> list[str]:
 
 
 def _session_prefixes(recording_names: list[str]) -> list[str]:
-    """Derive session date strings like ``2026-02-26`` from ``2026-02-26_5``."""
+    """Derive session date strings like ``2026-02-26`` from ``2026-02-26_r5``."""
     seen: set[str] = set()
     for n in recording_names:
-        if "_" in n:
-            head, tail = n.rsplit("_", 1)
-            if tail.isdigit():
+        if "_r" in n:
+            head, tail = n.rsplit("_r", 1)
+            if tail.isdigit() and head:
                 seen.add(head)
-            else:
-                seen.add(n)
-        else:
-            seen.add(n)
+                continue
+        seen.add(n)
     return sorted(seen)
 
 
@@ -87,7 +85,7 @@ def main() -> None:
     _fall = frozenset({"9", "10"})
     _head = frozenset({"4", "5"})
     for rec in names:
-        suffix = rec.split("_")[-1]
+        suffix = rec.split("_r")[-1] if "_r" in rec else rec
         try:
             log.info("plot_orientation_insight %s", rec)
             plot_insight_stage(

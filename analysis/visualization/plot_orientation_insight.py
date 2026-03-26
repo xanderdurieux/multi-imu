@@ -30,10 +30,10 @@ CLI::
     uv run python -m visualization.plot_orientation_insight 2026-02-26 --all
 
     # Head-movement peaks for recording 4
-    uv run python -m visualization.plot_orientation_insight 2026-02-26_4 --head-movements
+    uv run python -m visualization.plot_orientation_insight 2026-02-26_r4 --head-movements
 
     # Fall analysis for recording 9
-    uv run python -m visualization.plot_orientation_insight 2026-02-26_9 --fall
+    uv run python -m visualization.plot_orientation_insight 2026-02-26_r9 --fall
 """
 
 from __future__ import annotations

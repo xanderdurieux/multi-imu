@@ -54,11 +54,6 @@ def section_dir(recording_name: str, section_idx: int) -> Path:
     return sections_root() / f"{recording_name}s{section_idx}"
 
 
-def section_id_for_idx(section_idx: int) -> str:
-    """Return the legacy section identifier used inside feature/label tables."""
-    return f"section_{section_idx}"
-
-
 def parse_section_folder_name(section_folder_name: str) -> tuple[str, int]:
     """Parse ``<recording_name>s<section_idx>`` into (recording_name, section_idx)."""
     name = section_folder_name.strip().rstrip("/")

@@ -48,7 +48,7 @@ orientation_az_compare.png
 
 Usage
 -----
-    uv run -m visualization.plot_orientation_protocol 2026-02-26_2
+    uv run -m visualization.plot_orientation_protocol 2026-02-26_r2
 """
 
 from __future__ import annotations
@@ -654,7 +654,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("recording_names", nargs="+",
-                        help="Recording names (e.g. 2026-02-26_2).")
+                        help="Recording names (e.g. 2026-02-26_r2).")
     parser.add_argument("--stage", default="orientation")
     return parser
 

@@ -5,7 +5,8 @@ Labels exported from the event labeler under ``<recording>/<stage>/`` use
 timestamp in that stage folder** (same origin as the labeler). When
 ``parser.split_sections`` cuts the recording into sections, this module
 rewrites overlapping intervals in **section-relative** seconds (first sporsa
-timestamp in the section CSV) and sets ``section_id`` to ``section_<n>``.
+timestamp in the section CSV) and sets ``section_id`` to the section folder
+name (e.g. ``2026-02-26_r2s1``).
 
 Source files: any ``labels*.csv`` in the stage directory (e.g.
 ``labels_intervals_*.csv``). Only rows with ``scope=interval`` and matching
@@ -38,26 +39,6 @@ INTERVAL_CSV_COLUMNS = [
 ]
 
 
-def _recording_id_aliases(recording_id: str) -> set[str]:
-    """Return acceptable label CSV recording_id spellings.
-
-    The project historically used both:
-    - ``2026-02-26_r2`` (current pipeline naming)
-    - ``2026-02-26_2``  (legacy naming from earlier exports)
-
-    When transferring labels into sections we accept either spelling.
-    """
-    rid = recording_id.strip()
-    out = {rid}
-    m = re.match(r"^(.+)_r(\d+)$", rid)
-    if m:
-        out.add(f"{m.group(1)}_{m.group(2)}")
-    m2 = re.match(r"^(.+)_([0-9]+)$", rid)
-    if m2:
-        out.add(f"{m2.group(1)}_r{m2.group(2)}")
-    return out
-
-
 def _recording_slug(recording_id: str) -> str:
     s = recording_id.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
@@ -85,7 +66,6 @@ def load_recording_interval_rows_for_transfer(
         "scenario_label",
     )
     out: list[dict[str, Any]] = []
-    aliases = _recording_id_aliases(recording_id)
     for path in discover_label_csvs(stage_dir):
         try:
             df = pd.read_csv(path)
@@ -99,7 +79,7 @@ def load_recording_interval_rows_for_transfer(
             if str(row["scope"]).strip().lower() != "interval":
                 continue
             rid = str(row["recording_id"]).strip()
-            if rid not in aliases:
+            if rid != recording_id:
                 continue
             try:
                 t0 = float(row["window_start_s"])
@@ -145,7 +125,7 @@ def write_section_labels_from_recording_intervals(
     if not intervals or sporsa_section_df.empty or "timestamp" not in sporsa_section_df.columns:
         return None
     section_origin_ms = float(sporsa_section_df["timestamp"].iloc[0])
-    section_id = f"section_{section_idx}"
+    section_id = section_dir.name
     rows_out: list[dict[str, Any]] = []
 
     for it in intervals:

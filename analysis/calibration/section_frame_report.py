@@ -3,8 +3,8 @@
 Usage (from ``analysis/``):
 
     uv run python -m calibration.section_frame_report \
-        2026-02-26_2/sections/section_1 \
-        2026-02-26_3/sections/section_4
+        data/sections/2026-02-26_r2s1 \
+        data/sections/2026-02-26_r3s4
 
 This script re-runs calibration with ``section_horizontal_frame`` for provided
 sections, then exports a compact CSV/JSON summary of section-frame confidence.
@@ -18,14 +18,17 @@ from pathlib import Path
 from typing import Any
 
 from calibration.calibrate import calibrate_section
-from common import recordings_root
+from common.paths import sections_root
 
 
 def _resolve_section_arg(arg: str) -> Path:
     p = Path(arg.strip())
     if p.is_absolute():
         return p
-    return (recordings_root() / p).resolve()
+    # Accept direct relative paths (e.g. data/sections/...) and bare folder names.
+    if p.exists():
+        return p.resolve()
+    return (sections_root() / p).resolve()
 
 
 def run_report(section_args: list[str], *, force_recalibrate: bool = True) -> dict[str, Any]:

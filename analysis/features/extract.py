@@ -281,9 +281,17 @@ def extract_section(
     features_dir.mkdir(parents=True, exist_ok=True)
 
     if recording_id is None or section_id is None:
-        parts = section_name.replace("\\", "/").split("/")
-        recording_id = recording_id or parts[0]
-        section_id = section_id or (parts[-1] if len(parts) > 1 else "section_1")
+        sec = Path(section_name.replace("\\", "/")).name
+        section_id = section_id or sec
+        if recording_id is None:
+            try:
+                from common.paths import parse_section_folder_name
+
+                rec, _idx = parse_section_folder_name(section_id)
+                recording_id = rec
+            except Exception:
+                parts = section_name.replace("\\", "/").split("/")
+                recording_id = parts[0] if parts else ""
 
     cal_json: dict[str, Any] | None = None
     cal_path = calibrated_dir / "calibration.json"
@@ -545,20 +553,44 @@ def extract_section(
     return out_df
 
 
-def _parse_arg(name: str) -> tuple[str, str | None, bool]:
-    """Return (recording, section, is_session)."""
-    name = name.strip().rstrip("/").replace("\\", "/")
-    parts = name.split("/")
-    rec = parts[0]
-    sec = None
-    for i, p in enumerate(parts):
-        if p == "sections" and i + 1 < len(parts):
-            sec = parts[i + 1]
-            break
-    # New recording naming: <session>_r<idx>. New sections live under data/sections/.
-    # Treat bare session dates (YYYY-MM-DD) as sessions.
-    is_session = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", rec)) or not re.fullmatch(r".+_r\d+", rec)
-    return rec, sec, is_session
+def _resolve_target(name: str) -> tuple[str, Path | None, bool]:
+    """Resolve CLI argument into (recording_or_session, section_dir_or_none, is_session).
+
+    Accepted:
+    - section directory path (e.g. data/sections/2026-02-26_r2s1)
+    - section folder name (e.g. 2026-02-26_r2s1)
+    - recording name (e.g. 2026-02-26_r2) with --all-sections
+    - session name (e.g. 2026-02-26) with --all
+    """
+    s = name.strip().rstrip("/").replace("\\", "/")
+    if not s:
+        raise ValueError("name must be a non-empty section path, section folder, recording name, or session name")
+
+    p = Path(s)
+    if p.is_dir():
+        return "", p.resolve(), False
+
+    from common.paths import parse_section_folder_name, sections_root
+
+    try:
+        rec, _idx = parse_section_folder_name(s)
+    except Exception:
+        rec = ""
+    else:
+        sec_dir = sections_root() / s
+        if sec_dir.is_dir():
+            return rec, sec_dir.resolve(), False
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s, None, True
+    if re.fullmatch(r".+_r\d+", s):
+        return s, None, False
+
+    raise ValueError(
+        f"Unrecognized name {name!r}. Expected a section folder like '2026-02-26_r2s1', "
+        f"a section path like 'data/sections/2026-02-26_r2s1', a recording like '2026-02-26_r2', "
+        f"or a session date like '2026-02-26'."
+    )
 
 
 def extract_from_args(
@@ -580,46 +612,68 @@ def extract_from_args(
 
         label_index = load_labels_from_path(Path(labels_path))
 
-    rec, sec, _ = _parse_arg(name)
+    rec, section_dir, is_session = _resolve_target(name)
 
     if all_recordings:
+        if not is_session:
+            raise ValueError("--all expects a session name like '2026-02-26'")
         rec_dirs = sorted(
-            d for d in (recordings_root()).iterdir() if d.is_dir() and d.name.startswith(rec + "_")
+            d
+            for d in (recordings_root()).iterdir()
+            if d.is_dir() and d.name.startswith(rec + "_r")
         )
     else:
-        rec_dir = recording_dir(rec)
-        if not rec_dir.exists():
-            raise FileNotFoundError(f"Recording not found: {rec_dir}")
-        rec_dirs = [rec_dir]
+        if section_dir is not None:
+            rec_dirs = []
+        else:
+            rec_dir = recording_dir(rec)
+            if not rec_dir.exists():
+                raise FileNotFoundError(f"Recording not found: {rec_dir}")
+            rec_dirs = [rec_dir]
 
     done = []
+    if section_dir is not None:
+        section_id = section_dir.name
+        try:
+            from common.paths import parse_section_folder_name
+
+            rec_name, _idx = parse_section_folder_name(section_id)
+        except Exception:
+            rec_name = rec or ""
+        sync_method = _read_sync_method(rec_name) if rec_name else ""
+        section_name = section_id
+        cal_dir = section_dir / "calibrated"
+        if not (cal_dir / "calibration.json").exists():
+            log.warning("Skipping %s (no calibration)", section_name)
+            return []
+        extract_section(
+            section_dir,
+            section_name,
+            window_s=window_s,
+            hop_s=hop_s,
+            orientation_variant=orientation_variant,
+            label_index=label_index,
+            sync_method=sync_method,
+            recording_id=rec_name or None,
+            section_id=section_id,
+        )
+        return [section_dir]
+
     for rdir in rec_dirs:
         rec_name = rdir.name
         sync_method = _read_sync_method(rec_name)
-        from common.paths import (
-            iter_sections_for_recording,
-            section_dir,
-            parse_section_folder_name,
-            section_id_for_idx,
-        )
+        from common.paths import iter_sections_for_recording
 
-        if all_sections or all_recordings:
-            section_dirs = iter_sections_for_recording(rec_name)
-        else:
-            if sec is None:
-                raise ValueError("Specify section or use --all-sections / --all")
-            sec_s = str(sec).strip()
-            if not sec_s.startswith("section_"):
-                raise ValueError(
-                    f"Expected legacy section id like 'section_<idx>', got {sec_s!r}"
-                )
-            sec_idx = int(sec_s.split("_", 1)[1])
-            section_dirs = [section_dir(rec_name, sec_idx)]
+        if not (all_sections or all_recordings):
+            raise ValueError(
+                "Pass a section folder/path, or use --all-sections with a recording, or --all with a session."
+            )
+
+        section_dirs = iter_sections_for_recording(rec_name)
 
         for sdir in section_dirs:
-            _rec, sec_idx = parse_section_folder_name(sdir.name)
-            section_id = section_id_for_idx(sec_idx)
-            section_name = f"{rec_name}/{section_id}"
+            section_id = sdir.name
+            section_name = section_id
             cal_dir = sdir / "calibrated"
             if not (cal_dir / "calibration.json").exists():
                 log.warning("Skipping %s (no calibration)", section_name)
