@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
+
+from common.paths import recording_stage_dir as _recording_stage_dir
+from common.paths import section_dir as _section_dir
 
 
 def mask_dropout_packets(df: pd.DataFrame, epsilon_fraction: float = 0.1) -> pd.DataFrame:
@@ -77,3 +82,34 @@ def nan_mask_invalid_plot_x(
     ya = np.asarray(y, dtype=float)
     xm = mask_valid_plot_x(xa)
     return np.where(xm, xa, np.nan), np.where(xm, ya, np.nan)
+
+
+_SECTION_RE = re.compile(r"^(?P<rec>.+_r\d+)s(?P<idx>\d+)$")
+
+
+def parse_recording_or_section_id(name: str) -> tuple[str, int | None]:
+    """Parse either a recording id or a section id.
+
+    - recording: ``<session>_r<idx>`` (e.g. ``2026-02-26_r2``) → ``(name, None)``
+    - section:   ``<recording>s<section_idx>`` (e.g. ``2026-02-26_r2s1``) → ``(<recording>, section_idx)``
+    """
+    n = name.strip()
+    m = _SECTION_RE.match(n)
+    if not m:
+        return n, None
+    return str(m.group("rec")), int(m.group("idx"))
+
+
+def resolve_stage_dir(recording_or_section_id: str, stage: str):
+    """Resolve a stage directory for both recording-level and section-level layouts.
+
+    This lets visualization scripts accept either:
+    - a recording id (e.g. ``2026-02-26_r2``) with stages like ``orientation`` / ``calibrated`` / ``synced``
+    - a section id (e.g. ``2026-02-26_r2s1``) with the same stage names, located under ``data/sections/``.
+    """
+    from pathlib import Path
+
+    rec, section_idx = parse_recording_or_section_id(recording_or_section_id)
+    if section_idx is None:
+        return _recording_stage_dir(rec, stage)
+    return _section_dir(rec, section_idx) / stage

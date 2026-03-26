@@ -39,8 +39,9 @@ import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
-from common import find_sensor_csv, load_dataframe, recording_stage_dir
+from common import find_sensor_csv, load_dataframe
 from ._utils import acc_norm_series, mask_dropout_packets, mask_valid_plot_x
+from ._utils import resolve_stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ _SELECTED_EDGE = "#d62728"
 # ---------------------------------------------------------------------------
 
 def _load_all_methods(recording_name: str) -> dict:
-    path = recording_stage_dir(recording_name, "synced") / "all_methods.json"
+    path = resolve_stage_dir(recording_name, "synced") / "all_methods.json"
     if not path.exists():
         return {}
     try:
@@ -94,7 +95,7 @@ def plot_sync_method_comparison(recording_name: str) -> Path | None:
     Returns the path of the saved PNG, or ``None`` if ``all_methods.json``
     was not found.
     """
-    synced_dir = recording_stage_dir(recording_name, "synced")
+    synced_dir = resolve_stage_dir(recording_name, "synced")
     data = _load_all_methods(recording_name)
     if not data:
         log.warning("[%s/synced] all_methods.json not found — skipping sync comparison.", recording_name)
@@ -189,7 +190,7 @@ def plot_pre_post_sync(recording_name: str, *, downsample: int = 5) -> Path | No
     Returns the path of the saved PNG, or ``None`` if the necessary CSVs
     were not found.
     """
-    synced_dir = recording_stage_dir(recording_name, "synced")
+    synced_dir = resolve_stage_dir(recording_name, "synced")
     if not synced_dir.exists():
         log.warning("[%s] synced/ directory not found — skipping alignment plot.", recording_name)
         return None
