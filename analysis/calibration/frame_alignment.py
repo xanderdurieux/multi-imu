@@ -24,7 +24,8 @@ Candidate approaches considered (no heavy magnetometer reliance)
 
 Default strategy in this module combines (2) + (3): estimate a section frame from the
 reference (bike) sensor using PCA and optional mean-force fallback, then apply the same
-yaw to all sensors. If confidence is low we gracefully fall back to gravity-only.
+yaw to all sensors. Magnetometer is used only as a weak auxiliary cue when available;
+if confidence is low we still gracefully fall back to gravity-only.
 """
 
 from __future__ import annotations
@@ -162,6 +163,7 @@ def _mean_heading_from_horiz(h: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
 def estimate_section_horizontal_frame(
     acc_world_ref: np.ndarray,
     *,
+    mag_world_ref: np.ndarray | None = None,
     static_indices: slice | np.ndarray,
     min_motion_ms2: float = 0.35,
     min_samples: int = 40,
@@ -188,6 +190,8 @@ def estimate_section_horizontal_frame(
         "straight_motion_confidence": 0.0,
         "heading_stability": 0.0,
         "horizontal_axis_reliability": 0.0,
+        "magnetometer_reliability": 0.0,
+        "magnetometer_used": False,
         "confidence_score": 0.0,
         "yaw_deg": 0.0,
     }
@@ -239,7 +243,28 @@ def estimate_section_horizontal_frame(
 
     mean_strength = float(np.clip(mean_mag / max(min_motion_ms2, 1e-6), 0.0, 2.0) / 2.0)
     horizontal_reliability = float(0.5 * straight_conf + 0.5 * mean_strength)
-    confidence = float(0.45 * straight_conf + 0.35 * heading_stability + 0.20 * horizontal_reliability)
+    mag_reliability = 0.0
+    mag_axis = np.array([np.nan, np.nan], dtype=float)
+    if mag_world_ref is not None and len(mag_world_ref) == n:
+        mag = np.asarray(mag_world_ref, dtype=float)
+        mag_h = mag[:, :2]
+        mag_valid = np.all(np.isfinite(mag_h), axis=1) & (~mask_static)
+        if np.sum(mag_valid) >= min_samples:
+            mag_mean = np.nanmean(mag_h[mag_valid], axis=0)
+            mag_norm = float(np.linalg.norm(mag_mean))
+            if mag_norm > 1e-6:
+                mag_axis = mag_mean / mag_norm
+                mag_u = mag_h[mag_valid] / np.clip(np.linalg.norm(mag_h[mag_valid], axis=1, keepdims=True), 1e-9, None)
+                mag_align = np.abs(mag_u @ mag_axis.reshape(2, 1)).ravel()
+                mag_reliability = float(np.nanmean(mag_align))
+    meta["magnetometer_reliability"] = mag_reliability
+
+    confidence = float(
+        0.43 * straight_conf
+        + 0.33 * heading_stability
+        + 0.19 * horizontal_reliability
+        + 0.05 * mag_reliability
+    )
 
     meta["straight_motion_confidence"] = straight_conf
     meta["heading_stability"] = heading_stability
@@ -255,7 +280,17 @@ def estimate_section_horizontal_frame(
 
     use_mean = mean_mag >= min_motion_ms2 and heading_stability >= 0.55 and straight_conf < 0.25
     chosen = mean_unit if use_mean else axis
-    meta["chosen_axis_source"] = "mean_horizontal" if use_mean else "horizontal_pca"
+    chosen_source = "mean_horizontal" if use_mean else "horizontal_pca"
+    # Optional magnetometer nudge: only when motion-derived frame is uncertain.
+    if np.isfinite(mag_axis).all() and confidence < 0.45 and mag_reliability >= 0.55:
+        blend = float(np.clip((0.55 - confidence) / 0.55, 0.0, 1.0) * 0.35)
+        candidate = (1.0 - blend) * chosen + blend * mag_axis
+        c_norm = float(np.linalg.norm(candidate))
+        if c_norm > 1e-9:
+            chosen = candidate / c_norm
+            chosen_source = f"{chosen_source}_magnetometer_blend"
+            meta["magnetometer_used"] = True
+    meta["chosen_axis_source"] = chosen_source
 
     ang = float(np.arctan2(chosen[1], chosen[0]))
     yaw = -ang

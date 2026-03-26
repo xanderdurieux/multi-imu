@@ -64,6 +64,8 @@ def run_report(section_args: list[str], *, force_recalibrate: bool = True) -> di
                 "frame_confidence": ff.get("confidence_score", None),
                 "heading_stability": ff.get("heading_stability", None),
                 "axis_reliability": ff.get("horizontal_axis_reliability", None),
+                "magnetometer_reliability": ff.get("magnetometer_reliability", None),
+                "magnetometer_used": ff.get("magnetometer_used", False),
                 "straight_motion_confidence": ff.get("straight_motion_confidence", None),
                 "fallback": ff.get("fallback", False),
                 "fallback_reason": ff.get("fallback_reason", ""),

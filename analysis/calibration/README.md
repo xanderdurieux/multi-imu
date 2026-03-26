@@ -49,12 +49,14 @@ uv run python -m pipeline --frame-alignment section_horizontal_frame ...
    - `straight_motion_confidence`,
    - `heading_stability`,
    - `horizontal_axis_reliability`,
+   - `magnetometer_reliability` (auxiliary only),
    - `confidence_score`.
 5. If reliability is too low, fall back to gravity-only yaw (`identity` yaw rotation).
 
 Assumptions and limitations:
 - No strong claim of true geodetic heading.
 - Axis is *section-local motion interpretability* frame, not an absolute compass frame.
+- Magnetometer, when present, is used only as a weak cue and never as the sole dependency.
 - Reliability drops for very short/static sections or highly symmetric turning patterns.
 
 ## Validation / QC helper

@@ -240,8 +240,13 @@ def calibrate_section(
         ref = prepared[ref_sensor]
         acc_ref = ref["df"][ACC_COLS].to_numpy(dtype=float)
         acc_ref_world = (ref["R_grav"] @ acc_ref.T).T
+        mag_ref_world: np.ndarray | None = None
+        if all(c in ref["df"].columns for c in ("mx", "my", "mz")):
+            mag_ref = ref["df"][["mx", "my", "mz"]].to_numpy(dtype=float)
+            mag_ref_world = (ref["R_grav"] @ mag_ref.T).T
         R_section_yaw, section_frame_meta = estimate_section_horizontal_frame(
             acc_ref_world,
+            mag_world_ref=mag_ref_world,
             static_indices=slice(ref["start_idx"], ref["end_idx"]),
             min_motion_ms2=forward_min_motion_ms2,
         )

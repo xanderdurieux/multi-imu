@@ -131,6 +131,7 @@ def plot_calibration_diagnostics(
         heading_stability = float(ff.get("heading_stability", np.nan)) if isinstance(ff, dict) else np.nan
         axis_rel = float(ff.get("horizontal_axis_reliability", np.nan)) if isinstance(ff, dict) else np.nan
         straight_conf = float(ff.get("straight_motion_confidence", np.nan)) if isinstance(ff, dict) else np.nan
+        mag_rel = float(ff.get("magnetometer_reliability", np.nan)) if isinstance(ff, dict) else np.nan
 
         fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True, constrained_layout=True)
         acc_cols = ["ax", "ay", "az"]
@@ -158,8 +159,8 @@ def plot_calibration_diagnostics(
         axes[1].set_title("Original vs transformed horizontal direction proxy")
         axes[1].legend(loc="upper right")
 
-        names = ["straight_motion_conf", "heading_stability", "axis_reliability", "confidence"]
-        vals = [straight_conf, heading_stability, axis_rel, confidence]
+        names = ["straight_motion_conf", "heading_stability", "axis_reliability", "mag_reliability", "confidence"]
+        vals = [straight_conf, heading_stability, axis_rel, mag_rel, confidence]
         axes[2].bar(names, [0 if not np.isfinite(v) else v for v in vals], color="#16a34a", alpha=0.8)
         axes[2].set_ylim(0, 1.05)
         axes[2].set_ylabel("score [0-1]")
