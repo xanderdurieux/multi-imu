@@ -18,7 +18,28 @@ already exist on disk (this repository does not generate them).
 | `plot_sync` | `synced/` | Sync method comparison, pre/post alignment |
 | `plot_calibration` | `calibrated/` | World-frame sensor signals, calibration quality |
 | `plot_orientation` | `orientation/` | Euler angles, linear acceleration, relative head-bike orientation |
+| `plot_derived` | `derived/` | Physically interpretable derived-signal overview (residual/shock/tilt-rate) |
 | `plot_session` | all | Orchestrator — runs all of the above for a full session |
+
+---
+
+
+## `plot_derived` — derived-signal overview
+
+**Saved in:** `derived/`
+
+```bash
+python -m visualization.plot_derived 2026-02-26_r5s1
+python -m visualization.plot_derived data/sections/2026-02-26_r5s1 --recompute
+```
+
+Creates `derived/derived_signals_overview.png` with:
+- bike vs rider vertical gravity-compensated acceleration,
+- rider-minus-bike residual motion (vertical + longitudinal/lateral when trustworthy),
+- shock transmission gain (bike→rider),
+- roll/pitch tilt-rate derivatives for both sensors.
+
+If derived CSVs are missing, this module can recompute them from calibrated/orientation outputs.
 
 ---
 

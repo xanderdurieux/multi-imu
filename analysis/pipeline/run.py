@@ -112,6 +112,7 @@ def run_pipeline(
     statuses: list[RecordingStatus] = []
 
     from calibration.calibrate import calibrate_section
+    from derived.compute import derive_section_signals
     from features.extract import extract_section
     from orientation.estimate import estimate_section
     from parser.split_sections import split_recording
@@ -185,6 +186,18 @@ def run_pipeline(
                         ss.steps["orientation"] = "ok"
                     else:
                         ss.steps["orientation"] = "skipped"
+
+                    # derived signals
+                    derived_meta = sdir / "derived" / "derived_signals_meta.json"
+                    if force or not derived_meta.is_file():
+                        derive_section_signals(
+                            sdir.resolve(),
+                            orientation_variant=orientation_filter,
+                            include_normalized=True,
+                        )
+                        ss.steps["derived"] = "ok"
+                    else:
+                        ss.steps["derived"] = "skipped"
 
                     # features
                     feat_csv = sdir / "features" / "features.csv"
