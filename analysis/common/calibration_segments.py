@@ -245,6 +245,8 @@ def find_calibration_segments(
     peak_max_count: int = 6,
     peak_max_gap_s: float = 3.0,
     static_gap_max_s: float = 5.0,
+    static_overlap_max_s: float = 1.0,
+    static_min_start_fraction: float = 0.75,
 ) -> list[CalibrationSegment]:
     """Find calibration sequences in an IMU DataFrame.
 
@@ -261,6 +263,16 @@ def find_calibration_segments(
     The flanking static regions must also lie within ``static_gap_max_s``
     seconds of the first/last peak, which prevents exercise-activity clusters
     from being matched to a static run that is many minutes away.
+
+    ``static_overlap_max_s`` allows a small overlap between the flanking
+    static windows and the first/last detected peak indices when the
+    static classifier and peak detector disagree slightly around threshold
+    crossings (a common issue near recording boundaries).
+
+    ``static_min_start_fraction`` relaxes the required pre-static duration
+    when the flanking static window begins exactly at the first sample of
+    the recording (static classifier noise can otherwise truncate the initial
+    static period just below ``static_min_s``).
 
     *peak_max_count* caps the number of peaks per cluster.  Clusters with
     more peaks than this are skipped.  This is useful to reject continuous
@@ -324,6 +336,8 @@ def find_calibration_segments(
 
     static_min_samples = int(sample_rate_hz * static_min_s)
     static_gap_max_samples = int(sample_rate_hz * static_gap_max_s)
+    static_overlap_max_samples = int(sample_rate_hz * static_overlap_max_s)
+    static_min_start_samples = max(1, int(static_min_samples * static_min_start_fraction))
 
     static_runs: list[tuple[int, int, int]] = []
     run_start: int | None = None
@@ -343,12 +357,18 @@ def find_calibration_segments(
 
         pre_run: tuple[int, int] | None = None
         for rs, re, rl in reversed(static_runs):
-            if re >= c_start:
-                continue
-            if rl < static_min_samples:
+            min_pre = static_min_samples
+            if rs == 0:
+                min_pre = static_min_start_samples
+            if rl < min_pre:
                 continue
             if (c_start - re) > static_gap_max_samples:
                 break
+            # Allow a small overlap where static classification still labels
+            # a few samples as static even though peak detection already
+            # started.
+            if (re - c_start) > static_overlap_max_samples:
+                continue
             pre_run = (rs, re)
             break
 
@@ -357,11 +377,13 @@ def find_calibration_segments(
 
         post_run: tuple[int, int] | None = None
         for rs, re, rl in static_runs:
-            if rs <= c_end:
+            if rl < static_min_samples:
                 continue
             if (rs - c_end) > static_gap_max_samples:
                 break
-            if rl < static_min_samples:
+            # Allow a small overlap where static classification extends
+            # slightly into the last-peak region.
+            if (c_end - rs) > static_overlap_max_samples:
                 continue
             post_run = (rs, re)
             break

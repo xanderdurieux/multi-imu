@@ -31,6 +31,10 @@ import pandas as pd
 from common.csv_schema import load_dataframe, write_dataframe
 from common.paths import find_sensor_csv, recording_dir
 from common.calibration_segments import CalibrationSegment, find_calibration_segments
+from labels.section_transfer import (
+    load_recording_interval_rows_for_transfer,
+    write_section_labels_from_recording_intervals,
+)
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +150,24 @@ def split_recording(
     sections_base = _sections_root()
     available_sensors = list(sensor_dfs)
 
-    def _write_section(section_idx: int, sensor_slices: dict[str, pd.DataFrame]) -> list[Path]:
+    recording_stage_dir = recording_dir(recording_name) / stage
+    recording_origin_ms = float(ref_df["timestamp"].iloc[0])
+    source_interval_rows = load_recording_interval_rows_for_transfer(
+        recording_stage_dir, recording_name
+    )
+    if source_interval_rows:
+        log.info(
+            "Label transfer: loaded %d recording-level interval row(s) from %s",
+            len(source_interval_rows),
+            recording_stage_dir,
+        )
+
+    def _write_section(
+        section_idx: int,
+        sensor_slices: dict[str, pd.DataFrame],
+        ts_start: float,
+        ts_end: float,
+    ) -> list[Path]:
         section_stage = f"section_{section_idx}"  # used for stage-ref strings to plotting
         section_dir = sections_base / f"{recording_name}s{section_idx}"
         section_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +177,17 @@ def split_recording(
             write_dataframe(df, out_path)
             paths.append(out_path)
             log.info("Wrote %s/%s (%d rows)", section_stage, out_path.name, len(df))
+        if source_interval_rows and reference_sensor in sensor_slices:
+            write_section_labels_from_recording_intervals(
+                recording_name=recording_name,
+                section_idx=section_idx,
+                section_dir=section_dir,
+                recording_origin_ms=recording_origin_ms,
+                section_abs_start_ms=ts_start,
+                section_abs_end_ms=ts_end,
+                sporsa_section_df=sensor_slices[reference_sensor],
+                intervals=source_interval_rows,
+            )
         if plot:
             _plot_section(recording_name, f"sections/{section_stage}", available_sensors)
         return paths
@@ -166,7 +198,9 @@ def split_recording(
             "(%d found) — saving full streams as section_1",
             recording_name, stage, reference_sensor, len(calibrations),
         )
-        return _write_section(1, sensor_dfs)
+        ts_full_0 = float(ref_df["timestamp"].iloc[0])
+        ts_full_1 = float(ref_df["timestamp"].iloc[-1])
+        return _write_section(1, sensor_dfs, ts_full_0, ts_full_1)
 
     written: list[Path] = []
     for i, (c_open, c_close) in enumerate(zip(calibrations, calibrations[1:]), start=1):
@@ -178,7 +212,7 @@ def split_recording(
             mask = (df["timestamp"] >= ts_start) & (df["timestamp"] <= ts_end)
             slices[sensor] = df.loc[mask].reset_index(drop=True)
 
-        written.extend(_write_section(i, slices))
+        written.extend(_write_section(i, slices, ts_start, ts_end))
 
     if sync and reference_sensor in sensor_dfs:
         target_sensors = [s for s in available_sensors if s != reference_sensor]

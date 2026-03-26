@@ -236,15 +236,23 @@ def parse_gps_csv(
         ("speed", ("speed", "velocity", "ground_speed", "speed_m_s"), "speed_m_s"),
     ):
         col = None
+        selected_variant: str | None = None
         for v in variants:
             if v in norm:
                 col = norm[v]
+                selected_variant = v
                 break
         if col is not None:
             if target == "time_utc":
                 out[target] = pd.to_datetime(df[col], utc=True, errors="coerce")
             else:
-                out[target] = pd.to_numeric(df[col], errors="coerce")
+                spd = pd.to_numeric(df[col], errors="coerce")
+                # Many GPS exports store speed in km/h while this code exposes it
+                # as `speed_m_s`. Convert unless the source column already looks
+                # like m/s.
+                if target == "speed_m_s" and selected_variant != "speed_m_s":
+                    spd = spd / 3.6
+                out[target] = spd
 
     return out.dropna(subset=["latitude", "longitude"]).reset_index(drop=True)
 

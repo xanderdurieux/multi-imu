@@ -34,10 +34,9 @@ from plotly.utils import PlotlyJSONEncoder
 
 import plotly
 from common import load_dataframe
-from common.paths import session_input_dir
+from common.paths import session_input_dir, recording_stage_dir
 from parser.gps import parse_gps_csv
 from visualization._utils import mask_dropout_packets, mask_valid_plot_x
-from visualization.labeling_acc_explorer import resolve_labeling_data_dir
 from visualization.thesis_style import THESIS_COLORS, plotly_template_layout
 
 log = logging.getLogger(__name__)
@@ -75,6 +74,53 @@ def session_name_from_recording_id(recording_id: str) -> str | None:
     rid = recording_id.strip()
     m = re.match(r"^(.+)_r(\d+)$", rid)
     return m.group(1) if m else None
+
+
+def resolve_labeling_data_dir(target: str | Path) -> Path:
+    """Resolve ``recording/<stage>`` or a section-folder name or a directory path.
+
+    Supported shorthand inputs (relative to ``analysis/``):
+    - ``<recording>/<stage>`` (e.g. ``2026-02-26_r5/parsed``)
+    - ``<recording>s<section_idx>`` (e.g. ``2026-02-26_r5s1``)
+    """
+    if isinstance(target, Path):
+        p = target.resolve()
+        if p.is_dir() and (p / "sporsa.csv").is_file():
+            return p
+        raise FileNotFoundError(f"Not a directory with sporsa.csv: {p}")
+
+    s = str(target).strip().rstrip("/").replace("\\", "/")
+    parts = s.split("/")
+
+    # Section-folder shorthand: <recording>s<section_idx> (e.g. 2026-02-26_r5s1).
+    if len(parts) == 1:
+        from common.paths import parse_section_folder_name, sections_root
+
+        try:
+            _rec_name, _sec_idx = parse_section_folder_name(parts[0])
+        except Exception:
+            _rec_name = None
+        else:
+            d = sections_root() / parts[0]
+            if d.is_dir() and (d / "sporsa.csv").is_file():
+                return d
+
+    if len(parts) >= 2:
+        rec = parts[0]
+        stage = "/".join(parts[1:])
+        d = recording_stage_dir(rec, stage)
+        if d.is_dir() and (d / "sporsa.csv").is_file():
+            return d
+
+    p = Path(s)
+    if p.is_dir() and (p / "sporsa.csv").is_file():
+        return p.resolve()
+
+    raise FileNotFoundError(
+        f"Could not resolve {target!r}. Try e.g. '2026-02-26_r5/parsed' or "
+        f"'2026-02-26_r5s1' (from analysis/)."
+    )
+
 
 
 def _nan_where_bad_time_x(t: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
