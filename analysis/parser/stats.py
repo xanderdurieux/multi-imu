@@ -247,7 +247,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "recording_name",
-        help="Recording name under data/recordings/ (e.g. 2026-02-26_5).",
+        help="Recording name under data/recordings/ (e.g. 2026-02-26_r5).",
     )
     parser.add_argument(
         "--stage",

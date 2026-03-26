@@ -14,8 +14,8 @@ configured sensors into matching time windows saved under::
 
 CLI usage::
 
-    python -m parser.split_sections 2026-02-26_5/synced_lida
-    python -m parser.split_sections 2026-02-26_5/synced_cal --no-plot
+    python -m parser.split_sections 2026-02-26_r5/synced_lida
+    python -m parser.split_sections 2026-02-26_r5/synced_cal --no-plot
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def split_recording(
             *.png  (if plot=True)
 
     If fewer than two calibration sequences are found a warning is logged and
-    the full streams are saved under ``sections/section_1/``.
+    the full streams are saved as the first section.
 
     Parameters
     ----------
@@ -168,7 +168,8 @@ def split_recording(
         ts_start: float,
         ts_end: float,
     ) -> list[Path]:
-        section_stage = f"section_{section_idx}"  # used for stage-ref strings to plotting
+        # Used only for visualization stage-ref strings (not on-disk naming).
+        section_stage = f"{recording_name}s{section_idx}"
         section_dir = sections_base / f"{recording_name}s{section_idx}"
         section_dir.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []
@@ -195,7 +196,7 @@ def split_recording(
     if len(calibrations) < 2:
         log.warning(
             "Fewer than 2 calibration sequences found in %s/%s/%s "
-            "(%d found) — saving full streams as section_1",
+            "(%d found) — saving full streams as first section",
             recording_name, stage, reference_sensor, len(calibrations),
         )
         ts_full_0 = float(ref_df["timestamp"].iloc[0])
@@ -247,7 +248,7 @@ def sync_sections(
     Parameters
     ----------
     recording_name:
-        Name of the recording (e.g. ``"2026-02-26_5"``).
+        Name of the recording (e.g. ``"2026-02-26_r5"``).
     reference_sensor:
         Sensor used as the time reference.
     target_sensor:
@@ -311,11 +312,7 @@ def sync_sections(
             from common.paths import parse_section_folder_name
 
             _rec_name, sec_idx = parse_section_folder_name(section_dir.name)
-            _plot_section(
-                recording_name,
-                f"sections/section_{sec_idx}",
-                [reference_sensor, target_sensor],
-            )
+            _plot_section(recording_name, f"sections/{section_dir.name}", [reference_sensor, target_sensor])
 
 
 # ---------------------------------------------------------------------------

@@ -238,7 +238,7 @@ def process_session(session_name: str) -> None:
         # Optional section-level timing summaries (if sections already exist).
         if n_sections > 0:
             section_details: list[dict] = []
-            from common.paths import parse_section_folder_name, section_id_for_idx
+            from common.paths import parse_section_folder_name
 
             for section_dir in section_dirs:
                 section_streams: dict[str, dict] = {}
@@ -259,8 +259,7 @@ def process_session(session_name: str) -> None:
                     _rec_name, sec_idx = parse_section_folder_name(section_dir.name)
                     section_details.append(
                         {
-                            # Keep legacy section id in the JSON summary (e.g. "section_1").
-                            "name": section_id_for_idx(sec_idx),
+                            "name": section_dir.name,
                             "streams": section_streams,
                         }
                     )

@@ -18,8 +18,8 @@ Produces two figure types per recording:
 
 CLI::
 
-    python -m visualization.plot_calibration 2026-02-26_5
-    python -m visualization.plot_calibration 2026-02-26_5 --no-comparison
+    python -m visualization.plot_calibration 2026-02-26_r5
+    python -m visualization.plot_calibration 2026-02-26_r5 --no-comparison
 """
 
 from __future__ import annotations
@@ -355,7 +355,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "recording_names",
         nargs="+",
-        help="One or more recording names (e.g. 2026-02-26_5).",
+        help="One or more recording names (e.g. 2026-02-26_r5).",
     )
     parser.add_argument(
         "--no-comparison",

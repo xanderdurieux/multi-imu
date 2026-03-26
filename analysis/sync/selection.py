@@ -29,16 +29,16 @@ Usage
 
     from sync.selection import compare_sync_models, select_best_sync_method
 
-    cmp = compare_sync_models("2026-02-26_5")
+    cmp = compare_sync_models("2026-02-26_r5")
     print_comparison(cmp)
 
-    result = select_best_sync_method("2026-02-26_5")
+    result = select_best_sync_method("2026-02-26_r5")
     print(result.method)   # e.g. "calibration"
     print(result.stage)    # e.g. "synced/cal" (intermediate; flattened to synced/ after apply)
 
 Command line::
 
-    python -m sync 2026-02-26_5
+    python -m sync 2026-02-26_r5
     python -m sync 2026-02-26 --all
 """
 

@@ -78,7 +78,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "source",
         type=str,
         help=(
-            "Either '<recording_name>/<stage>' (e.g. '2026-02-26_5/parsed') "
+            "Either '<recording_name>/<stage>' (e.g. '2026-02-26_r5/parsed'), "
+            "'sections/<section_folder>' (e.g. 'sections/2026-02-26_r5s1'), "
             "or a direct CSV path."
         ),
     )
@@ -128,15 +129,14 @@ def _resolve_source(
 
     recording_name, stage = parts
 
-    # New layout: section stage strings map to top-level data/sections/<rec>s<idx>/.
+    # Sections live under the top-level data/sections/<recording_name>s<section_idx>/.
     if stage.startswith("sections/"):
-        from common.paths import section_dir as _section_dir
+        from common.paths import sections_root as _sections_root
 
-        sec_s = stage.split("/", 1)[1]
-        if not sec_s.startswith("section_"):
-            parser.error(f"Unrecognized section stage id: {stage!r}")
-        sec_idx = int(sec_s.split("_", 1)[1])
-        stage_dir = _section_dir(recording_name, sec_idx)
+        sec_folder = stage.split("/", 1)[1]
+        stage_dir = _sections_root() / sec_folder
+        if not stage_dir.is_dir():
+            parser.error(f"Section directory not found: {stage_dir}")
         csv_path = stage_dir / f"{sensor_name}.csv"
         if not csv_path.exists():
             print(f"[{recording_name}/{stage}] skipping {sensor_name}: missing {csv_path}")

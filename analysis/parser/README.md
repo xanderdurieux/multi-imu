@@ -35,7 +35,7 @@ uv run -m parser.session 2026-02-26
 ```
 
 - **Input**: `data/sessions/2026-02-26/{arduino,sporsa}/*.txt`
-- **Output** per recording `2026-02-26_k`:
+- **Output** per recording `2026-02-26_r<k>`:
   - `session_stats.json` — stream timing stats (recording root)
   - `parsed/sporsa.csv`
   - `parsed/arduino.csv`

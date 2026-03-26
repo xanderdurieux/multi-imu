@@ -63,10 +63,11 @@ def infer_recording_section_ids(data_dir: Path) -> tuple[str, str]:
         i = parts.index("sections")
         if i + 1 < len(parts):
             maybe_section_folder = parts[i + 1]
-            from common.paths import parse_section_folder_name, section_id_for_idx
+            from common.paths import parse_section_folder_name
 
             rec_name, sec_idx = parse_section_folder_name(maybe_section_folder)
-            return rec_name, section_id_for_idx(sec_idx)
+            _ = sec_idx
+            return rec_name, maybe_section_folder
     return p.parent.name, ""
 
 
@@ -923,7 +924,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="panel">
       <div class="row">
         <div><label>Recording ID<br/><input type="text" id="recId" value="{recording_id_esc}"/></label></div>
-        <div><label>Section ID<br/><input type="text" id="secId" placeholder="section_1" value="{section_id_esc}"/></label></div>
+        <div><label>Section ID<br/><input type="text" id="secId" placeholder="2026-02-26_r2s1" value="{section_id_esc}"/></label></div>
         <div><label>Label (scenario)<br/><input type="text" id="scenario" placeholder="e.g. braking_event"/></label></div>
         <div><label>Label source<br/><input type="text" id="labelSrc" value="manual_event_labeler"/></label></div>
       </div>

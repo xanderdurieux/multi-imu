@@ -5,8 +5,8 @@ Resolution order (most specific wins): interval → section → recording.
 CSV columns (header required):
 
 - ``scope``: ``recording`` | ``section`` | ``interval``
-- ``recording_id``: e.g. ``2026-02-26_5``
-- ``section_id``: e.g. ``section_1`` (required for ``section`` and ``interval``)
+- ``recording_id``: e.g. ``2026-02-26_r5``
+- ``section_id``: e.g. ``2026-02-26_r5s1`` (required for ``section`` and ``interval``)
 - ``window_start_s``, ``window_end_s``: section-relative seconds for ``interval`` rows
 - ``scenario_label``: class name / scenario string
 - ``label_source`` (optional): free text, e.g. ``manual_v1``

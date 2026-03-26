@@ -10,8 +10,8 @@ Use either:
 
 Required CSV fields:
 - `scope`: `recording` | `section` | `interval`
-- `recording_id`: e.g. `2026-02-26_5`
-- `section_id`: e.g. `section_1` (required for `section` and `interval`)
+- `recording_id`: e.g. `2026-02-26_r5`
+- `section_id`: e.g. `2026-02-26_r5s1` (required for `section` and `interval`)
 - `window_start_s`, `window_end_s`: section-relative seconds (required for `interval`)
 - `scenario_label`: the class / scenario name
 - `label_source`: optional free text (e.g. `manual_v1`)
@@ -45,8 +45,8 @@ Generate an HTML browser with synced IMU plots (+ optional GPS track) so you
 can click intervals/peaks and download a label CSV:
 
 ```bash
-uv run python -m labels.event_labeler 2026-02-26_2/synced
-uv run python -m labels.event_labeler 2026-02-26_2/sections/section_1 out.html
+uv run python -m labels.event_labeler 2026-02-26_r2/synced
+uv run python -m labels.event_labeler sections/2026-02-26_r2s1 out.html
 ```
 
 If `out.html` is omitted, it writes `event_labeler.html` next to the provided

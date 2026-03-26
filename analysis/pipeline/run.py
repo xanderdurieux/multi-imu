@@ -159,7 +159,7 @@ def run_pipeline(
 
             for sdir in iter_sections_for_recording(rec_id):
                 _rec, sec_idx = parse_section_folder_name(sdir.name)
-                section_id = f"section_{sec_idx}"
+                section_id = sdir.name
                 ss = SectionStatus(section_id=section_id)
                 try:
                     # calibrate
@@ -191,7 +191,7 @@ def run_pipeline(
                     if force or not feat_csv.is_file():
                         extract_section(
                             sdir,
-                            f"{rec_id}/{section_id}",
+                            section_id,
                             write_plots=not no_plots,
                             orientation_variant=orientation_filter,
                             label_index=label_index,
@@ -307,7 +307,7 @@ def main(argv: list[str] | None = None) -> None:
         metavar="ID",
         help=(
             "Process only this recording folder (repeat flag for several), "
-            "e.g. --recording 2026-02-26_2"
+            "e.g. --recording 2026-02-26_r2"
         ),
     )
     parser.add_argument("--force", action="store_true", help="Re-run steps even if outputs exist.")
@@ -336,9 +336,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--frame-alignment",
-        choices=("gravity_only", "gravity_plus_forward"),
+        choices=("gravity_only", "gravity_plus_forward", "section_horizontal_frame"),
         default="gravity_only",
-        help="Ride-level frame: gravity only or add yaw from mean horizontal motion.",
+        help="Ride-level frame: gravity only, per-sensor forward yaw, or section-level reference frame.",
     )
     parser.add_argument("--skip-exports", action="store_true", help="Skip consolidated export CSVs.")
     args = parser.parse_args(argv)

@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "name",
-        help="Recording (e.g. 2026-02-26_5) or session date with --all (e.g. 2026-02-26).",
+        help="Recording (e.g. 2026-02-26_r5) or session date with --all (e.g. 2026-02-26).",
     )
     parser.add_argument(
         "--all",
