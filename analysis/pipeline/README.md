@@ -1,19 +1,18 @@
-# `pipeline/` — End-to-end thesis preprocessing
+# `pipeline/` — Stage orchestrator used by `workflow`
 
-This module orchestrates the full dual-IMU preprocessing chain:
+`pipeline` orchestrates the full dual-IMU preprocessing chain and is called by the higher-level `workflow` config runner.
 
 `parser.session` → `sync` → `parser.split_sections` → `calibration` →
 `orientation` → `derived` → `events` → `features` → QC (`qc_section.json`) → consolidated exports.
 
 ## Recommended entry point
-Run from the `analysis/` directory:
+For reproducible thesis runs, use:
 
 ```bash
-uv run python -m pipeline --session <session_name> \
-  --sync-method best \
-  --orientation-filter complementary_orientation \
-  [--labels path/to/labels.csv]
+uv run python -m workflow --config configs/workflow.thesis.json
 ```
+
+Use `python -m pipeline` only for direct stage-level control.
 
 ## When to use flags
 - `--session <session_name>`: parse raw logs for that session before syncing.

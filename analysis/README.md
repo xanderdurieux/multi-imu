@@ -1,462 +1,125 @@
-# master-thesis/analysis
+# Multi-IMU Thesis Analysis Workflow
 
-Python toolkit for offline analysis, synchronization, calibration, and
-visualization of multi-IMU cycling data used in the thesis.
+This repository contains the offline processing stack for dual-IMU cycling data (bike-mounted Sporsa + rider-mounted Arduino).
 
-The code turns raw logs from a bicycle-mounted Sporsa IMU and a rider-mounted
-Arduino IMU into synchronized, calibrated, world-frame signals and diagnostic
-plots that can be used for motion and fall / incident analysis.
+## 1) Reproducible entry point (recommended)
 
-**What lives in this directory:** `common/`, `parser/`, `sync/`, `calibration/`, `orientation/`, `features/`, `labels/`, `validation/`, `evaluation/`, `pipeline/`, `visualization/`, and **`static_calibration/`** (standalone six-pose Arduino IMU calibration).
-
-## Terminology
-
-- **Session**: one acquisition day containing multiple recordings, identified
-  by a date string such as `2026-02-26`. Raw logs live under
-  `analysis/data/sessions/<session_name>/`.
-- **Recording**: one continuous multi-IMU file pair, stored under
-  `analysis/data/recordings/<session_name>_r<index>/`, for example
-  `2026-02-26_r5`. All intermediate processing stages are per-recording.
-- **Section**: a contiguous sub-interval of a recording between two detected
-  calibration sequences. Sections live under
-  `analysis/data/sections/<recording_name>s<section_idx>/` and are the main unit
-  for detailed motion and incident analysis.
-
-Wherever the code or README refers to these concepts, it uses the above
-definitions.
-
----
-
-## Project layout
-
-- **`common/`**
-  - CSV schema utilities and helpers for loading/writing DataFrames with a
-    consistent column layout.
-  - Path helpers (`paths.py`) for locating data directories
-    (`sessions/`, `recordings/`, per-stage folders).
-  - Convenience helpers such as `find_sensor_csv(recording_name, stage, sensor_name)`.
-
-- **`parser/`**
-  - High-level session parsing (`parser.session`) from raw logs to per-recording
-    `parsed/` CSVs.
-  - Device-specific parsers for Arduino (new + legacy) and Sporsa logs.
-  - Recording-level statistics (`parser.stats`) for timing and quality analysis.
-  - Calibration-based sectioning (`parser.split_sections`) that detects
-    calibration sequences and splits recordings into sections.
-
-- **`static_calibration/`**
-  - Standalone **six static poses** Arduino calibration: parse raw logs, estimate
-    accelerometer bias/scale and gyro bias, write JSON and diagnostic plots under
-    `data/calibrations/`. See [`static_calibration/README.md`](static_calibration/README.md).
-  - Run: `uv run python -m static_calibration` from `analysis/`.
-
-- **`sync/`**
-  - Four synchronization methods for aligning Sporsa and Arduino IMU streams:
-    - **SDA only** (`sync.sda_sync` → `synced/sda/`): offset-only, no drift.
-    - **SDA + LIDA** (`sync.lida_sync` → `synced/lida/`): offset + drift from windowed refinement.
-    - **Calibration sync** (`sync.calibration_sync` → `synced/cal/`): offset + drift from tap-burst anchors.
-    - **Online sync** (`sync.online_sync` → `synced/online/`): causal single-anchor + pre-characterised drift.
-  - Full pipeline entry point: `python -m sync` runs all four methods, selects the best, copies to flat `synced/`, and writes comparison plots.
-  - Shared primitives live in `sync.core` (streams, SDA alignment, LIDA `SyncModel`, correlation metrics).
-  - See [`sync/README.md`](sync/README.md) for full algorithm and API documentation.
-
-- **`visualization/`**
-  - Plotting tools for single-stream analysis and multi-stream comparison:
-    - Sensor plots (`visualization.plot_sensor`).
-    - Sporsa–Arduino comparison plots (`visualization.plot_comparison`).
-    - Calibration segment diagnostic plots (`visualization.plot_calibration_segments`).
-    - Orientation and calibration plots (`visualization.plot_calibration`,
-      `visualization.plot_orientation`).
-  - Session-level orchestration (`visualization.plot_session`) that iterates
-    all recordings and stages and regenerates plots.
-
-- **`calibration/`**
-  - Ride-level world-frame calibration per section: static Arduino correction,
-    gravity alignment, and optional forward-frame (yaw) alignment.
-- **`orientation/`**
-  - Section-level orientation estimation from calibrated sensor CSVs.
-- **`features/`**
-  - Windowed feature extraction from calibrated + orientation outputs and
-    thesis-ready export tables.
-- **`labels/`**
-  - Manual scenario labeling workflow: CSV/JSON parser, scaffold generator,
-    and an interactive Plotly HTML labeler.
-- **`validation/`**
-  - Section-level QC tiering (`qc_section.json`) used by the pipeline exports.
-- **`evaluation/`**
-  - Feature-table evaluation report and simple leave-one-recording-out baselines.
-- **`pipeline/`**
-  - End-to-end orchestrator that runs the full preprocessing chain.
-
----
-
-## Setup
-
-- **Python**: `>= 3.13`
-- **Recommended**: `uv` for dependency management and running tools.
-
-From the repository root:
+Run the full workflow via a single config file:
 
 ```bash
-cd master-thesis/analysis
+cd analysis
+uv sync
+uv run python -m workflow --config configs/workflow.thesis.json
+```
+
+- `workflow` is the top-level orchestrator for thesis-quality reruns.
+- `pipeline` remains the lower-level stage runner.
+
+---
+
+## 2) Workflow stages (clear separation)
+
+| Stage | Responsibility | Main module(s) |
+|---|---|---|
+| Data loading | Parse raw session files to normalized per-recording CSVs | `parser/` |
+| Preprocessing | Recording-level checks and section splitting | `parser/stats.py`, `parser/split_sections.py` |
+| Synchronization | Align Sporsa/Arduino streams (SDA/LIDA/Calibration/Online) | `sync/` |
+| Calibration / orientation | World-frame calibration and orientation estimation | `calibration/`, `orientation/` |
+| Feature extraction | Window features + exports | `features/`, `derived/` |
+| Event analysis | Candidate event extraction from derived/orientation streams | `events/` |
+| Evaluation | Baselines and experiment runs | `evaluation/` |
+| Visualization / reporting | Plots, QC views, and section summary artifacts | `visualization/`, `pipeline/section_summary.py` |
+
+---
+
+## 3) Concise workflow diagram
+
+```mermaid
+flowchart LR
+    A[Raw session logs\ndata/sessions] --> B[parser.session\nrecording parsed CSVs]
+    B --> C[sync.pipeline\naligned recording streams]
+    C --> D[parser.split_sections\nsection folders]
+    D --> E[calibration.calibrate\nworld-frame signals]
+    E --> F[orientation.estimate\nattitude variants]
+    F --> G[derived.compute\ninterpretable signals]
+    G --> H[events.extract\nevent candidates]
+    G --> I[features.extract\nwindow/event features]
+    H --> I
+    I --> J[validation + exports\nqc_section + tables]
+    J --> K[visualization + reports]
+```
+
+---
+
+## 4) Configuration handling
+
+Use `configs/workflow.thesis.json` to control:
+- dataset root (`data_root`),
+- method choices (`sync_method`, `orientation_filter`, `frame_alignment`),
+- run behavior (`force`, `no_plots`, `skip_exports`),
+- event thresholds (`event_config_path`, `min_event_confidence`),
+- reproducible subset selection (`session`, `recordings`).
+
+Example:
+
+```bash
+uv run python -m workflow --config configs/workflow.thesis.json
+```
+
+Optional one-off override:
+
+```bash
+uv run python -m workflow --config configs/workflow.thesis.json --sync-method calibration
+```
+
+---
+
+## 5) Environment and dependency setup
+
+Requirements:
+- Python `>=3.13`
+- `uv` (recommended)
+
+Setup:
+
+```bash
+cd analysis
 uv sync
 ```
 
-This creates an isolated environment with all required dependencies
-(`pandas`, `numpy`, `matplotlib`, etc.).
+The project dependencies are defined in `pyproject.toml`.
 
 ---
 
-## Data layout
+## 6) Module quick links
 
-The analysis code expects the following directory structure relative to
-`analysis/`:
-
-- **Raw input (per session)**  
-  `analysis/data/sessions/<session_name>/`  
-  Each session directory contains device-specific subfolders, typically:
-  - `arduino/*.txt`
-  - `sporsa/*.txt`
-
-- **Static Arduino calibration (standalone)**  
-  `analysis/data/calibrations/` — raw logs in `raw/`, parsed CSVs in `parsed/`,
-  `arduino_imu_calibration.json`, and plots in `plots/`. Populated by
-  `static_calibration` (see [`static_calibration/README.md`](static_calibration/README.md)).
-
-- **Processed recordings**  
-  `analysis/data/recordings/<recording_name>/` where
-  `<recording_name> = "<session_name>_r<index>"`, for example:
-  - `analysis/data/recordings/2026-02-26_r2/`
-  - `analysis/data/recordings/2026-02-26_r5/`
-
-  Within each recording directory, a full thesis run can populate several *stages* (availability depends on which tools you run):
-
-  - `parsed/` – normalized per-sensor CSVs and basic plots.
-  - `synced/` – after `python -m sync`, the chosen alignment plus `all_methods.json` and comparison PNGs (per-method subfolders exist only briefly during the run).
-  - per-section CSVs and plots live under the top-level `analysis/data/sections/`
-    directory (see “Section” above); section folders are named
-    `<recording_name>s<section_idx>/`.
- - `calibrated/`, `orientation/`, `features/` – only appear after running the
-    corresponding thesis pipeline stages (Stage 4–6 below).
-
-- **Run logs** (optional)  
-  `analysis/data/run_logs/<session_name>_pipeline_run.json` — if you use a
-  session orchestrator that writes them.
+- `workflow/`: config-driven orchestration (`python -m workflow`)
+- `pipeline/`: lower-level stage orchestration (`python -m pipeline`)
+- `parser/`: raw log parsing and section splitting
+- `sync/`: multi-method stream synchronization
+- `calibration/`, `orientation/`: world-frame and attitude
+- `derived/`, `events/`, `features/`: signal derivation, events, and feature tables
+- `validation/`, `evaluation/`: QC tiers and experiment evaluation
+- `visualization/`: diagnostics and thesis plots
 
 ---
 
-## Thesis pipeline (reference)
+## 7) Dead code / abandoned path review (suggested cleanup)
 
-The steps below describe the **intended** end-to-end chain (parse → sync →
-sections → world calibration → orientation → features). **This checkout**
-includes the individual stages as well as the single-command orchestrator
-(`python -m pipeline`).
+The following items look like likely cleanup candidates in the **main branch** and should be reviewed before deletion:
 
-**Typical usage (recommended):**
-
-1. Ensure standalone Arduino calibration exists:
-   `uv run python -m static_calibration`
-2. Run the full preprocessing pipeline:
-   `uv run python -m pipeline --session <session_name> --sync-method best --orientation-filter complementary_orientation [--labels path/to/labels.csv]`
-
-Or run stages manually (Stages 1–6 below) if you want fine-grained control.
+1. Legacy parser variants (`parser/arduino.py` vs `parser/arduino_batched.py`) — keep one canonical parser path if both are no longer required.
+2. Multiple overlapping visualization runners (`visualization/run_all_recordings.py`, ad-hoc plotting scripts) — converge into one reporting entry point.
+3. Legacy convenience entry (`main.py`) — currently retained for backward compatibility; can be removed after migration to `python -m workflow`.
+4. Historical notes (`orientation/THESIS_DYNAMIC_ORIENTATION_NOTES.md`) — consider moving to `docs/archive/` if no longer actively used.
 
 ---
 
-## Stage 1 – Parse raw session logs (`parser.session`)
-
-**Goal**: Convert device-specific logs into standardized per-recording IMU
-CSVs with a consistent schema and units.
-
-```bash
-uv run -m parser.session <session_name>
-# e.g. uv run -m parser.session 2026-02-26
-```
-
-- **Input**:  
-  `data/sessions/<session_name>/{arduino,sporsa}/*.txt`
-
-- **Output** (per recording `2026-02-26_k`):  
-  - `data/recordings/2026-02-26_r<k>/session_stats.json` (timing stats)  
-  - `data/recordings/2026-02-26_r<k>/parsed/` — `sporsa.csv`, `arduino.csv`, plots  
-- **Output** (session): `data/sessions/<session_name>/session_stats.json`
-
----
-
-## Static Arduino IMU calibration (`static_calibration/`)
-
-Six **short, stationary** Arduino logs—one approximate pose per gravity direction
-(±X, ±Y, ±Z)—are used to estimate **accelerometer bias and per-axis scale** and
-**gyroscope bias**. This is **independent** of ride recordings; data lives under
-`data/calibrations/`.
-
-From `analysis/`:
-
-```bash
-uv run python -m static_calibration
-```
-
-This runs the full pipeline: parse each `raw/*.txt` → write `parsed/*.csv` →
-estimate parameters → write `arduino_imu_calibration.json` → generate plots
-(overview, per-face detail figures, calibration-parameter summary with boxplots).
-
-Details, JSON fields, and applying the calibration to other CSVs:
-[`static_calibration/README.md`](static_calibration/README.md).
-
-**What to inspect**
-
-- `arduino_imu_calibration.json` — fitted parameters, `face_counts`, `warnings`, `per_recording`.
-- `plots/recordings_overview.png` — per-axis accelerometer panels (separate y-scales) plus gyro.
-- `plots/recordings/<dominant_face>/` — one detail plot per recording.
-- `plots/calibration_parameters.png` — fitted parameters vs per-recording means and within-window spread.
-
-Exclude logs with empty parses, extreme dropouts, or poses that do not match the six-face model.
-
----
-
-## Stage 2 – Synchronize IMU streams (`sync/`)
-
-Four methods run internally (SDA, LIDA, calibration windows, online); the pipeline picks the best and flattens the result into `synced/`.
-
-| Method | Module | Drift? |
-|---|---|---|
-| SDA only | `sync.sda_sync` | No |
-| SDA + LIDA | `sync.lida_sync` | Yes |
-| Calibration anchors | `sync.calibration_sync` | Yes |
-| Online (single anchor) | `sync.online_sync` | Pre-characterised |
-
-```bash
-uv run -m sync 2026-02-26_r5
-uv run -m sync 2026-02-26 --all
-```
-
-The selected winner is written to `synced/` with `sync_info.json`,
-`all_methods.json`, and a comparison plot.
-
-See [`sync/README.md`](sync/README.md) for a full description of each method,
-algorithm details, `sync_info.json` schema, and selection heuristics.
-
----
-
-## Stage 3 – Split into calibration-bounded sections (`parser.split_sections`)
-
-**Goal**: Turn each synchronized recording into multiple **sections**, each
-bounded by two calibration sequences (opening and closing). These sections
-are the atomic units for detailed motion and incident analysis.
-
-```bash
-uv run -m parser.split_sections <recording_name>/synced_cal
-# e.g. uv run -m parser.split_sections 2026-02-26_r5/synced_cal
-```
-
-- **Output**: `data/sections/<recording_name>s<section_idx>/`
-  - `sporsa.csv`, `arduino.csv`
-  - Per-section sensor and comparison plots
-  - Optional per-section `sync_info.json` when `sync=True`
-
-Each section includes the closing calibration of the previous section and the
-opening calibration of the next, making it suitable for:
-
-- Local incident analysis.
-- Comparing bicycle vs rider dynamics within a stable calibration window.
-
-**Section inclusion hints**:
-
-- Discard sections where:
-  - Calibration detection fails or only one calibration sequence is present.
-  - Plots show large gaps or obvious desynchronization.
-- Prefer sections that:
-  - Contain rich dynamic content (sprints, braking, bumps).
-  - Have clean calibration motions at the boundaries.
-
----
-
-## Stage 4 – Ride-level world-frame calibration (`calibration/`)
-
-**Goal**: Convert each section’s Sporsa/Arduino CSVs into world-frame signals by
-applying static Arduino calibration (if available) and rotating so +Z matches
-gravity (+Z-up convention). Forward-frame yaw alignment is controlled by the
-`pipeline` stage.
-
-Run:
-
-```bash
-uv run python -m calibration <section_path>
-uv run python -m calibration <recording_name> --all-sections
-```
-
-Outputs per section:
-
-- `calibrated/sporsa.csv`, `calibrated/arduino.csv`
-- `calibrated/calibration.json`
-
----
-## Stage 5 – Orientation estimation (`orientation/`)
-
-**Goal**: Estimate attitude (Euler angles) from calibrated sensor signals.
-
-Run:
-
-```bash
-uv run python -m orientation <section_path>
-uv run python -m orientation <recording_name> --all-sections
-```
-
-Outputs per section:
-
-- `orientation/<sensor>__<variant>.csv`
-- `orientation/orientation_stats.json`
-
----
-## Stage 6 – Feature extraction and exports (`features/`)
-
-**Goal**: Compute thesis features by sliding a fixed-size window over each
-section timeline (using calibrated + orientation outputs, and optionally manual
-scenario labels).
-
-Run:
-
-```bash
-uv run python -m features.extract <section_or_recording> --window 1.0 --hop 0.5 --orientation complementary_orientation
-uv run python -m features.extract <recording_name> --all-sections --orientation complementary_orientation --labels path/to/labels.csv
-uv run python -m features.extract <session_name> --all --orientation complementary_orientation --labels path/to/labels.csv
-```
-
-Outputs per section:
-
-- `features/features.csv` (window rows)
-- `features/features_stats.json`
-- `features/feature_schema.json`
-
-Thesis-ready export tables and QC summaries are produced by `pipeline` via
-`features.exports` into `analysis/data/exports/`.
-
----
-
-## Stage 7 – Visualization (`visualization/`)
-
-Plots are produced automatically by the pipeline, but can also be regenerated
-manually. Modules such as `plot_calibration` and `plot_orientation` expect the
-corresponding stage directories to exist (from this pipeline or external
-processing if needed).
-
-### Plot a single sensor stream
-
-```bash
-uv run -m visualization.plot_sensor <recording_name>/<stage> <sensor_name> [--norm] [--split]
-```
-
-- **Examples**:
-  - `uv run -m visualization.plot_sensor 2026-02-26_r5/parsed sporsa --norm`
-  - `uv run -m visualization.plot_sensor 2026-02-26_r5/calibrated arduino --norm`
-
-### Compare two streams
-
-```bash
-uv run -m visualization.plot_comparison <recording_name>/<stage> [sensor_name_a] [sensor_name_b] [--norm]
-```
-
-Useful for visually validating synchronization (`parsed` vs `synced_*`) and
-for comparing bicycle vs rider dynamics.
-
-### Plot all recordings for a session
-
-```bash
-uv run -m visualization.plot_session <session_name> [--stage STAGE]
-```
-
-This iterates all recordings whose name starts with `<session_name>_` and
-regenerates plots for each stage (including sections, calibrated, and
-orientation).
-
----
-
-## Data-quality criteria for motion and incident analysis
-
-Use this section when your recording tree includes the corresponding JSON
-artifacts (`sync_info.json`, `calibration.json`, `orientation_stats.json`).
-Downstream motion and incident detection experiments should only use
-recordings and sections that meet basic quality criteria derived from those
-files when present.
-
-### Recording-level flags (suggested)
-
-For each recording:
-
-- **`sync_quality`**:
-  - **good**:
-    - Calibration-based sync available (`synced_cal/`).
-    - `correlation.offset_and_drift ≥ 0.2`.
-    - `|drift_seconds_per_second| ≤ 2e-3` (≤ 2000 ppm).
-  - **marginal**:
-    - Correlation between 0.05 and 0.2, or drift up to 5000 ppm.
-  - **poor**:
-    - Correlation < 0.05 or drift > 5000 ppm.
-
-- **`calibration_quality`**:
-  - **good**:
-    - `gravity_residual_m_per_s2 ≤ 0.2`.
-    - `n_static_samples ≥ 500`.
-  - **marginal**:
-    - Residual between 0.2 and 0.5, or fewer static samples.
-  - **poor**:
-    - Residual > 0.5 or calibration fails.
-
-- **`orientation_quality`**:
-  - Based on `orientation_stats.json` for the `__complementary_orientation`
-    variant:
-    - `g_err_abs_mean ≤ 0.3` and static pitch/roll std ≤ 2° → **good**.
-    - up to 5° std → **marginal**.
-    - larger deviations → **poor**.
-
-These thresholds are intentionally conservative and can be tuned as more data
-are analysed. For thesis figures, focus on **good** and at most **marginal**
-recordings; treat **poor** ones as diagnostic examples, not as training data.
-
-### Section-level inclusion criteria
-
-For each `sections/section_N/`:
-
-- Both sensors present and non-empty.
-- No long gaps or discontinuities in `timestamp`.
-- If per-section sync is used, per-section `sync_info.json` should meet the
-  same qualitative checks as at the recording level.
-- Section contains sufficient dynamic content for the intended analysis
-  (e.g. non-trivial energy in `acc_norm` for incident-like events).
-
-Sections failing these checks are best excluded from incident / fall
-modelling, but can still be used for qualitative inspection.
-
----
-
-## Visual pipeline overview
-
-The following diagram summarizes the main flow for a single recording:
-
-```mermaid
-flowchart TD
-  rawSession["Raw session logs (sporsa + arduino)"] --> parseSession["parser.session"]
-  parseSession --> parsedStage["parsed/"]
-  parsedStage --> syncSDA["sync.sda_sync"]
-  parsedStage --> syncLIDA["sync.lida_sync"]
-  parsedStage --> syncCal["sync.calibration_sync"]
-  parsedStage --> syncOnline["sync.online_sync"]
-  syncSDA --> syncedSDA["synced/sda/"]
-  syncLIDA --> syncedLida["synced/lida/"]
-  syncCal --> syncedCal["synced/cal/"]
-  syncOnline --> syncedOnline["synced/online/"]
-  syncedSDA & syncedLida & syncedCal & syncedOnline --> selection["sync.selection"]
-  selection --> syncedBest["synced/"]
-  syncedBest --> splitSections["parser.split_sections"]
-  splitSections --> sectionsStage["sections/section_*/"]
-  sectionsStage --> calibrated["calibrated/ (calibration)"]
-  calibrated --> orientation["orientation/ (orientation)"]
-  orientation --> features["features/ (features)"]
-  rawCalib["data/calibrations/raw/*.txt"] --> staticCal["python -m static_calibration"]
-  staticCal --> calibOut["data/calibrations/*.json + plots"]
-```
-
-**In this repository:** `parser`, `sync`, `calibration`, `orientation`, `features`,
-`pipeline`, `visualization`, and **`static_calibration`** are available.
-The usual workflow is parse → sync (choose best) → split sections → calibration →
-orientation → feature extraction → visualization/exports.
+## 8) Remaining technical debt checklist
+
+- [ ] Add schema validation for `configs/workflow.thesis.json` (JSON Schema + CI check).
+- [ ] Add smoke tests for `python -m workflow` on a tiny fixture dataset.
+- [ ] Standardize logging output per stage (structured JSON log option).
+- [ ] Add deterministic seeds where randomness appears in evaluation workflows.
+- [ ] Move one-off visualization scripts into `visualization/tools/` and keep `visualization/` import-safe.
+- [ ] Add formal deprecation policy for legacy modules to avoid branch drift.

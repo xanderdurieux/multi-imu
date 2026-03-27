@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -11,6 +12,9 @@ def analysis_root() -> Path:
 
 
 def _data_root() -> Path:
+    override = os.environ.get("MULTI_IMU_DATA_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     return analysis_root() / "data"
 
 
