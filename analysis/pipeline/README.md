@@ -51,3 +51,43 @@ Run-level summaries:
 
 If `--skip-exports` is not set, consolidated exports are written to:
 - `analysis/data/exports/` (thesis-ready feature tables + QC summary CSVs)
+
+
+## Compact section summary artifacts
+Generate one scan-friendly summary per processed section (Markdown or HTML).
+
+```bash
+uv run python -m pipeline.section_summary <section_id_or_recording> \
+  [--all-sections | --all] \
+  [--format markdown|html] \
+  [--output-root data/section_summaries] \
+  [--write-examples]
+```
+
+Each summary includes:
+- identifiers (recording + section), duration, quality category,
+- sync/calibration/orientation confidence,
+- trustworthy derived signal families,
+- top event candidates,
+- salient feature values,
+- dual-IMU comparison metrics,
+- warnings and an automatic narrative paragraph,
+- small interpretable quick plots.
+
+### Proposed summary folder structure
+```text
+data/section_summaries/
+  <recording_id>/
+    <section_id>/
+      summary.json
+      summary.md or summary.html
+      plots/
+        plot_01.png
+        plot_02.png
+        plot_03.png
+  examples/
+    example_good_section_summary.md
+    example_marginal_section_summary.md
+```
+
+Markdown output is PDF-friendly via standard Markdown-to-PDF conversion tooling.
