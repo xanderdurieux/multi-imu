@@ -16,6 +16,9 @@ if __name__ == "__main__":
     parser.add_argument("--all", action="store_true", dest="all_recordings")
     parser.add_argument("--window", type=float, default=1.0)
     parser.add_argument("--hop", type=float, default=0.5)
+    parser.add_argument("--event-centered", action="store_true")
+    parser.add_argument("--event-types", type=str, default="")
+    parser.add_argument("--min-event-confidence", type=float, default=0.0)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     extract_from_args(
@@ -24,4 +27,7 @@ if __name__ == "__main__":
         all_recordings=args.all_recordings,
         window_s=args.window,
         hop_s=args.hop,
+        event_centered=args.event_centered,
+        event_types={x.strip() for x in args.event_types.split(",") if x.strip()} or None,
+        min_event_confidence=args.min_event_confidence,
     )
