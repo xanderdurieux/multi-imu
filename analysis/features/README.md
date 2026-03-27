@@ -27,6 +27,11 @@ uv run python -m features.extract <section_or_recording> \
   --window 1.0 --hop 0.5 \
   --orientation complementary_orientation \
   [--labels path/to/labels.csv]
+
+# Event-centered windows (from events/event_candidates.csv)
+uv run python -m features.extract <section_or_recording> \
+  --event-centered --min-event-confidence 0.4 \
+  [--event-types braking_burst,swerve_roll_rate_candidate]
 ```
 
 Run all sections for a recording:

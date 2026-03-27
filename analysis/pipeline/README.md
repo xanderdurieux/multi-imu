@@ -3,7 +3,7 @@
 This module orchestrates the full dual-IMU preprocessing chain:
 
 `parser.session` → `sync` → `parser.split_sections` → `calibration` →
-`orientation` → `derived` → `features` → QC (`qc_section.json`) → consolidated exports.
+`orientation` → `derived` → `events` → `features` → QC (`qc_section.json`) → consolidated exports.
 
 ## Recommended entry point
 Run from the `analysis/` directory:
@@ -31,6 +31,9 @@ uv run python -m pipeline --session <session_name> \
 - `--force`: re-run steps even when outputs already exist.
 - `--labels <path>`: optional labels CSV/JSON used to resolve
   `scenario_label` on feature windows.
+- `--event-config <path>`: optional JSON thresholds for event candidate extraction.
+- `--event-centered-features`: use event-centered windows in `features` instead of uniform sliding windows.
+- `--min-event-confidence`: confidence cutoff when `--event-centered-features` is enabled.
 - `--skip-exports`: skip writing consolidated export CSVs/manifest files.
 
 ## Outputs
@@ -38,6 +41,7 @@ Per section, the pipeline writes:
 - `calibrated/` (world-frame sensor CSVs + `calibration.json`)
 - `orientation/` (orientation variant CSVs + `orientation_stats.json`)
 - `derived/` (physically interpretable time-series + dependency/quality metadata)
+- `events/` (`event_candidates.csv`, threshold config, summary, diagnostics)
 - `features/` (`features.csv`, `features_stats.json`, `feature_schema.json`)
 - `qc_section.json` (tiered QC reasons via `validation.comprehensive`)
 

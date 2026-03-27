@@ -64,6 +64,9 @@ def run_pipeline(
     labels_path: Path | None = None,
     frame_alignment: str = "gravity_only",
     skip_exports: bool = False,
+    event_config_path: Path | None = None,
+    event_centered_features: bool = False,
+    min_event_confidence: float = 0.0,
 ) -> list[RecordingStatus]:
     """Execute pipeline steps for all recordings. Returns status objects (also written to JSON/CSV).
 
@@ -113,6 +116,7 @@ def run_pipeline(
 
     from calibration.calibrate import calibrate_section
     from derived.compute import derive_section_signals
+    from events.extract import extract_event_candidates_section, load_event_windows
     from features.extract import extract_section
     from orientation.estimate import estimate_section
     from parser.split_sections import split_recording
@@ -201,7 +205,27 @@ def run_pipeline(
 
                     # features
                     feat_csv = sdir / "features" / "features.csv"
+                    evt_csv = sdir / "events" / "event_candidates.csv"
+                    if force or not evt_csv.is_file():
+                        config_override = None
+                        if event_config_path is not None and event_config_path.exists():
+                            config_override = json.loads(event_config_path.read_text(encoding="utf-8"))
+                        extract_event_candidates_section(
+                            sdir.resolve(),
+                            config_override=config_override,
+                            write_plots=not no_plots,
+                        )
+                        ss.steps["events"] = "ok"
+                    else:
+                        ss.steps["events"] = "skipped"
+
                     if force or not feat_csv.is_file():
+                        event_windows = None
+                        if event_centered_features:
+                            event_windows = load_event_windows(
+                                sdir.resolve(),
+                                min_confidence=min_event_confidence,
+                            )
                         extract_section(
                             sdir,
                             section_id,
@@ -211,6 +235,7 @@ def run_pipeline(
                             sync_method=sync_method,
                             recording_id=rec_id,
                             section_id=section_id,
+                            event_windows=event_windows,
                         )
                         from labels.parser import warn_unlabeled_windows
 
@@ -354,6 +379,23 @@ def main(argv: list[str] | None = None) -> None:
         help="Ride-level frame: gravity only, per-sensor forward yaw, or section-level reference frame.",
     )
     parser.add_argument("--skip-exports", action="store_true", help="Skip consolidated export CSVs.")
+    parser.add_argument(
+        "--event-config",
+        type=Path,
+        default=None,
+        help="Optional JSON threshold override for event candidate extraction.",
+    )
+    parser.add_argument(
+        "--event-centered-features",
+        action="store_true",
+        help="Feed event-centered windows into feature extraction instead of sliding windows.",
+    )
+    parser.add_argument(
+        "--min-event-confidence",
+        type=float,
+        default=0.0,
+        help="Minimum event confidence used when --event-centered-features is enabled.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -373,6 +415,9 @@ def main(argv: list[str] | None = None) -> None:
         labels_path=args.labels,
         frame_alignment=args.frame_alignment,
         skip_exports=args.skip_exports,
+        event_config_path=args.event_config,
+        event_centered_features=args.event_centered_features,
+        min_event_confidence=args.min_event_confidence,
     )
 
 

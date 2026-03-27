@@ -17,6 +17,10 @@ FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
     "window_start_s": "Window start relative to section first timestamp (s)",
     "window_end_s": "Window end relative to section first timestamp (s)",
     "window_center_s": "Window centre relative to section first timestamp (s)",
+    "window_source": "Windowing strategy used for this row (sliding or event_centered)",
+    "event_type": "Event type when window_source=event_centered; empty for sliding windows",
+    "event_confidence": "Event detector confidence [0,1] when event_centered",
+    "event_timestamp": "Original event timestamp in sensor epoch ms (if available)",
     # Metadata
     "sync_method": "Synchronization method key (e.g. sda, lida, calibration, online)",
     "orientation_method": "Orientation filter stem (e.g. complementary_orientation)",

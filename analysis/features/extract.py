@@ -312,6 +312,7 @@ def extract_section(
     sync_method: str = "",
     recording_id: str | None = None,
     section_id: str | None = None,
+    event_windows: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Extract features for a section. Returns DataFrame with one row per window."""
     section_path = Path(section_path)
@@ -363,8 +364,13 @@ def extract_section(
     half_window_s = window_s / 2.0
     rows = []
 
-    t_center_s = half_window_s
-    while t_center_s + half_window_s <= duration_s:
+    if event_windows is not None and len(event_windows):
+        centers = pd.to_numeric(event_windows["window_center_s"], errors="coerce").dropna().to_numpy(dtype=float)
+        centers = np.array([c for c in centers if c - half_window_s >= 0 and c + half_window_s <= duration_s], dtype=float)
+    else:
+        centers = np.arange(half_window_s, duration_s - half_window_s + 1e-12, hop_s, dtype=float)
+
+    for t_center_s in centers:
         t_center_ms = t0 + t_center_s * 1000.0
         window_start_s = (t_center_ms - t0) / 1000.0 - half_window_s
         window_end_s = window_start_s + window_s
@@ -379,7 +385,18 @@ def extract_section(
             "sync_method": sync_method,
             "orientation_method": orientation_variant,
             "calibration_quality": calib_q,
+            "window_source": "event_centered" if event_windows is not None else "sliding",
+            "event_type": "",
+            "event_confidence": np.nan,
+            "event_timestamp": np.nan,
         }
+        if event_windows is not None and len(event_windows):
+            # Nearest event center metadata (exact in common case).
+            idx_evt = int(np.nanargmin(np.abs(pd.to_numeric(event_windows["window_center_s"], errors="coerce").to_numpy(dtype=float) - t_center_s)))
+            evt = event_windows.iloc[idx_evt]
+            row["event_type"] = str(evt.get("event_type", "") or "")
+            row["event_confidence"] = float(evt.get("confidence")) if pd.notna(evt.get("confidence")) else np.nan
+            row["event_timestamp"] = float(evt.get("event_timestamp")) if pd.notna(evt.get("event_timestamp")) else np.nan
 
         for sensor, df in dfs.items():
             ts_raw = df["timestamp"].to_numpy(dtype=float)
@@ -646,8 +663,6 @@ def extract_section(
 
         rows.append(row)
 
-        t_center_s += hop_s
-
     out_df = pd.DataFrame(rows)
     out_path = features_dir / "features.csv"
     out_df.to_csv(out_path, index=False)
@@ -725,6 +740,9 @@ def extract_from_args(
     hop_s: float = 0.5,
     orientation_variant: str = "complementary_orientation",
     labels_path: Path | str | None = None,
+    event_centered: bool = False,
+    event_types: set[str] | None = None,
+    min_event_confidence: float = 0.0,
 ) -> list[Path]:
     """Run feature extraction from CLI args."""
     from common import recording_dir, recordings_root
@@ -769,6 +787,15 @@ def extract_from_args(
         if not (cal_dir / "calibration.json").exists():
             log.warning("Skipping %s (no calibration)", section_name)
             return []
+        event_windows = None
+        if event_centered:
+            from events.extract import load_event_windows
+
+            event_windows = load_event_windows(
+                section_dir,
+                event_types=event_types,
+                min_confidence=min_event_confidence,
+            )
         extract_section(
             section_dir,
             section_name,
@@ -779,6 +806,7 @@ def extract_from_args(
             sync_method=sync_method,
             recording_id=rec_name or None,
             section_id=section_id,
+            event_windows=event_windows,
         )
         return [section_dir]
 
@@ -801,6 +829,15 @@ def extract_from_args(
             if not (cal_dir / "calibration.json").exists():
                 log.warning("Skipping %s (no calibration)", section_name)
                 continue
+            event_windows = None
+            if event_centered:
+                from events.extract import load_event_windows
+
+                event_windows = load_event_windows(
+                    sdir,
+                    event_types=event_types,
+                    min_confidence=min_event_confidence,
+                )
             extract_section(
                 sdir,
                 section_name,
@@ -811,6 +848,7 @@ def extract_from_args(
                 sync_method=sync_method,
                 recording_id=rec_name,
                 section_id=section_id,
+                event_windows=event_windows,
             )
             done.append(sdir)
 
@@ -846,6 +884,23 @@ if __name__ == "__main__":
         help="Orientation CSV suffix (default complementary_orientation)",
     )
     parser.add_argument("--labels", type=str, default=None, help="Path to labels CSV or JSON")
+    parser.add_argument(
+        "--event-centered",
+        action="store_true",
+        help="Use event-centered windows from section events/event_candidates.csv instead of sliding windows.",
+    )
+    parser.add_argument(
+        "--event-types",
+        type=str,
+        default="",
+        help="Comma-separated event types to keep when --event-centered is used.",
+    )
+    parser.add_argument(
+        "--min-event-confidence",
+        type=float,
+        default=0.0,
+        help="Minimum event confidence to keep for event-centered extraction.",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     extract_from_args(
@@ -856,4 +911,7 @@ if __name__ == "__main__":
         hop_s=args.hop,
         orientation_variant=args.orientation,
         labels_path=args.labels,
+        event_centered=args.event_centered,
+        event_types={x.strip() for x in args.event_types.split(",") if x.strip()} or None,
+        min_event_confidence=args.min_event_confidence,
     )
