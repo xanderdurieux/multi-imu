@@ -1,0 +1,16 @@
+{
+  "session": "2026-02-26",
+  "recordings": null,
+  "data_root": "data",
+  "sync_method": "best",
+  "split_stage": "synced",
+  "orientation_filter": "complementary_orientation",
+  "frame_alignment": "gravity_only",
+  "no_plots": false,
+  "force": false,
+  "skip_exports": false,
+  "labels_path": null,
+  "event_config_path": null,
+  "event_centered_features": false,
+  "min_event_confidence": 0.0
+}
