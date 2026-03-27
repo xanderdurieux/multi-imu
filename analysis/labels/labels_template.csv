@@ -1,4 +1,5 @@
-scope,recording_id,section_id,window_start_s,window_end_s,scenario_label,label_source
-recording,2026-02-26_r1,,,,cruise_flat,manual_template
-section,2026-02-26_r1,2026-02-26_r1s2,,,rough_surface,manual_template
-interval,2026-02-26_r1,2026-02-26_r1s1,12.0,18.0,braking_event,manual_template
+scope,recording_id,section_id,window_start_s,window_end_s,event_id,event_type,event_time_s,scenario_label,label_source,labeler,labeled_at_utc,label_confidence,label_notes,label_status,label_schema_version,suggestion_source,suggestion_rank
+recording,2026-02-26_r1,,,,,,,steady_state,manual_template,,,,,unknown,thesis_v1,,
+section,2026-02-26_r1,2026-02-26_r1s2,,,,,,surface_disturbance,manual_template,reviewer_a,2026-03-27T10:00:00Z,0.7,rough section baseline,confirmed,thesis_v1,,
+interval,2026-02-26_r1,2026-02-26_r1s1,12.0,18.0,,,,hard_braking,manual_template,reviewer_a,2026-03-27T10:02:00Z,0.9,clear braking burst,confirmed,thesis_v1,,
+event,2026-02-26_r1,2026-02-26_r1s1,,,,evt_0001,braking_burst,13.2,hard_braking,event_candidate_suggestion,reviewer_a,2026-03-27T10:03:00Z,0.8,reviewed candidate,suggested,thesis_v1,events.event_candidates,1
