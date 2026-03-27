@@ -1,21 +1,30 @@
-"""Load manual labels from CSV or JSON and resolve them onto feature windows.
+"""Load manual labels from CSV/JSON and resolve them onto windows/events.
 
-Resolution order (most specific wins): interval → section → recording.
+Resolution precedence for feature windows (most specific wins):
+``interval`` → ``section`` → ``recording``.
 
-CSV columns (header required):
+CSV/JSON fields (required unless noted):
 
-- ``scope``: ``recording`` | ``section`` | ``interval``
-- ``recording_id``: e.g. ``2026-02-26_r5``
-- ``section_id``: e.g. ``2026-02-26_r5s1`` (required for ``section`` and ``interval``)
-- ``window_start_s``, ``window_end_s``: section-relative seconds for ``interval`` rows
-- ``scenario_label``: class name / scenario string
-- ``label_source`` (optional): free text, e.g. ``manual_v1``
+- ``scope``: ``recording`` | ``section`` | ``interval`` | ``event``
+- ``recording_id``
+- ``section_id`` (required for ``section``/``interval``/``event``)
+- ``window_start_s``/``window_end_s`` (required for ``interval``)
+- ``event_id`` (preferred for ``event`` when matching events)
+- ``event_type``/``event_time_s`` (fallback event matching keys)
+- ``scenario_label``
+- ``label_source`` (optional)
 
-JSON: a list of objects with the same field names.
+Provenance metadata (all optional):
+- ``labeler``
+- ``labeled_at_utc`` (ISO 8601 string)
+- ``label_confidence`` (0..1)
+- ``label_notes``
+- ``label_status`` (for example: ``confirmed``, ``unknown``, ``ambiguous``, ``mixed``)
+- ``label_schema_version``
+- ``suggestion_source``
+- ``suggestion_rank``
 
-Interval bounds are treated as half-open ``[start, end)`` in section-relative seconds,
-consistent with feature ``window_start_s`` / ``window_end_s`` (inclusive-exclusive
-matching uses overlap: window overlaps interval if not (win_end <= int_start or win_start >= int_end)).
+JSON format is a list of objects with the same fields.
 """
 
 from __future__ import annotations
@@ -26,11 +35,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
 
-Scope = Literal["recording", "section", "interval"]
+Scope = Literal["recording", "section", "interval", "event"]
+
+PROVENANCE_FIELDS = [
+    "labeler",
+    "labeled_at_utc",
+    "label_confidence",
+    "label_notes",
+    "label_status",
+    "label_schema_version",
+    "suggestion_source",
+    "suggestion_rank",
+]
 
 
 @dataclass
@@ -42,13 +63,17 @@ class LabelRule:
     section_id: str | None
     window_start_s: float | None
     window_end_s: float | None
+    event_id: str | None
+    event_type: str | None
+    event_time_s: float | None
     scenario_label: str
     label_source: str
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class LabelIndex:
-    """Fast lookup for (recording, section, window interval)."""
+    """Fast lookup for (recording, section, window interval) + event tables."""
 
     rules: list[LabelRule] = field(default_factory=list)
 
@@ -59,9 +84,25 @@ class LabelIndex:
         window_start_s: float,
         window_end_s: float,
     ) -> tuple[str, str]:
-        """Return ``(scenario_label, label_source)``; empty label if unknown."""
-        best_label = ""
-        best_source = "none"
+        """Backward-compatible tuple return: ``(scenario_label, label_source)``."""
+        meta = self.resolve_window_metadata(
+            recording_id=recording_id,
+            section_id=section_id,
+            window_start_s=window_start_s,
+            window_end_s=window_end_s,
+        )
+        return str(meta["scenario_label"]), str(meta["label_source"])
+
+    def resolve_window_metadata(
+        self,
+        *,
+        recording_id: str,
+        section_id: str,
+        window_start_s: float,
+        window_end_s: float,
+    ) -> dict[str, Any]:
+        """Resolve label+provenance for one feature window."""
+        best: LabelRule | None = None
         best_rank = -1
 
         for r in self.rules:
@@ -75,7 +116,6 @@ class LabelIndex:
             elif r.scope == "interval" and r.section_id == section_id:
                 if r.window_start_s is None or r.window_end_s is None:
                     continue
-                # overlap [ws, we) style: treat window as [start, end]
                 if window_end_s <= r.window_start_s or window_start_s >= r.window_end_s:
                     continue
                 rank = 3
@@ -84,31 +124,139 @@ class LabelIndex:
 
             if rank > best_rank:
                 best_rank = rank
-                best_label = r.scenario_label
-                best_source = r.label_source
+                best = r
 
-        return best_label, best_source
+        if best is None:
+            return _blank_metadata()
+        return _metadata_from_rule(best)
+
+    def apply_to_events(
+        self,
+        events_df: pd.DataFrame,
+        *,
+        event_match_tolerance_s: float = 0.5,
+    ) -> pd.DataFrame:
+        """Attach labels/provenance to an event table.
+
+        Event matching precedence:
+        1. ``event_id`` exact match (if present in both rule and row).
+        2. ``event_type`` + ``event_time_s`` within tolerance (same section+recording).
+        """
+        if events_df.empty:
+            out = events_df.copy()
+            _ensure_label_columns(out)
+            return out
+
+        out = events_df.copy()
+        _ensure_label_columns(out)
+
+        for idx, row in out.iterrows():
+            rec = str(row.get("recording_id", "")).strip()
+            sec = str(row.get("section_id", "")).strip()
+            if not rec:
+                continue
+            event_id = str(row.get("event_id", "")).strip() or None
+            event_type = str(row.get("event_type", "")).strip() or None
+            event_time_s = _as_float(row.get("time_s"))
+            if event_time_s is None:
+                event_time_s = _as_float(row.get("event_time_s"))
+
+            best: LabelRule | None = None
+            best_rank = -1
+            for r in self.rules:
+                if r.scope != "event":
+                    continue
+                if r.recording_id != rec:
+                    continue
+                if r.section_id and sec and r.section_id != sec:
+                    continue
+
+                rank = 0
+                if event_id and r.event_id and event_id == r.event_id:
+                    rank = 3
+                elif event_type and r.event_type and event_type == r.event_type:
+                    if event_time_s is not None and r.event_time_s is not None:
+                        if abs(event_time_s - r.event_time_s) <= event_match_tolerance_s:
+                            rank = 2
+                if rank > best_rank:
+                    best_rank = rank
+                    best = r
+
+            if best is None:
+                continue
+            meta = _metadata_from_rule(best)
+            for k, v in meta.items():
+                out.at[idx, k] = v
+
+        return out
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(f):
+        return None
+    return f
+
+
+def _clean_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _blank_metadata() -> dict[str, Any]:
+    base = {
+        "scenario_label": "",
+        "label_source": "none",
+        "label_scope": "none",
+    }
+    for f in PROVENANCE_FIELDS:
+        base[f] = "" if f != "label_confidence" else np.nan
+    return base
+
+
+def _metadata_from_rule(rule: LabelRule) -> dict[str, Any]:
+    out = _blank_metadata()
+    out["scenario_label"] = rule.scenario_label
+    out["label_source"] = rule.label_source
+    out["label_scope"] = rule.scope
+    for f in PROVENANCE_FIELDS:
+        if f in rule.provenance:
+            out[f] = rule.provenance[f]
+    return out
+
+
+def _ensure_label_columns(df: pd.DataFrame) -> None:
+    base_cols = ["scenario_label", "label_source", "label_scope", *PROVENANCE_FIELDS]
+    for c in base_cols:
+        if c not in df.columns:
+            df[c] = np.nan if c == "label_confidence" else ""
 
 
 def _row_to_rule(row: dict[str, Any]) -> LabelRule:
     scope = str(row.get("scope", "")).strip().lower()
-    if scope not in ("recording", "section", "interval"):
+    if scope not in ("recording", "section", "interval", "event"):
         raise ValueError(f"Invalid scope {scope!r} in row {row!r}")
 
     rec = str(row.get("recording_id", "")).strip()
     if not rec:
         raise ValueError(f"Missing recording_id in row {row!r}")
 
-    sec = row.get("section_id")
-    if sec is None or (isinstance(sec, float) and pd.isna(sec)):
-        sec_s = None
-    else:
-        sec_s = str(sec).strip() or None
+    sec_s = _clean_optional_text(row.get("section_id"))
+    wsf = _as_float(row.get("window_start_s"))
+    wef = _as_float(row.get("window_end_s"))
 
-    ws = row.get("window_start_s")
-    we = row.get("window_end_s")
-    wsf = float(ws) if ws is not None and str(ws).strip() != "" else None
-    wef = float(we) if we is not None and str(we).strip() != "" else None
+    event_id = _clean_optional_text(row.get("event_id"))
+    event_type = _clean_optional_text(row.get("event_type"))
+    event_time_s = _as_float(row.get("event_time_s"))
 
     label = str(row.get("scenario_label", "")).strip()
     if not label:
@@ -116,10 +264,36 @@ def _row_to_rule(row: dict[str, Any]) -> LabelRule:
 
     src = str(row.get("label_source", "manual")).strip() or "manual"
 
-    if scope in ("section", "interval") and not sec_s:
+    if scope in ("section", "interval", "event") and not sec_s:
         raise ValueError(f"section_id required for scope={scope} in row {row!r}")
     if scope == "interval" and (wsf is None or wef is None):
         raise ValueError(f"window_start_s/window_end_s required for interval in row {row!r}")
+    if scope == "event" and not event_id and not (event_type and event_time_s is not None):
+        raise ValueError(
+            "event scope requires event_id or (event_type + event_time_s) "
+            f"in row {row!r}"
+        )
+
+    prov: dict[str, Any] = {}
+    for f in PROVENANCE_FIELDS:
+        if f not in row:
+            continue
+        val = row.get(f)
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            continue
+        if f == "label_confidence":
+            fv = _as_float(val)
+            if fv is not None:
+                prov[f] = float(np.clip(fv, 0.0, 1.0))
+        elif f == "suggestion_rank":
+            try:
+                prov[f] = int(val)
+            except (TypeError, ValueError):
+                continue
+        else:
+            sval = str(val).strip()
+            if sval:
+                prov[f] = sval
 
     return LabelRule(
         scope=scope,  # type: ignore[arg-type]
@@ -127,8 +301,12 @@ def _row_to_rule(row: dict[str, Any]) -> LabelRule:
         section_id=sec_s,
         window_start_s=wsf,
         window_end_s=wef,
+        event_id=event_id,
+        event_type=event_type,
+        event_time_s=event_time_s,
         scenario_label=label,
         label_source=src,
+        provenance=prov,
     )
 
 
@@ -175,6 +353,7 @@ def warn_unlabeled_windows(
     section_col: str = "section_id",
 ) -> int:
     """Log a warning for rows with empty ``scenario_label``; return count."""
+    _ = recording_col, section_col
     if "scenario_label" not in df.columns:
         return 0
     empty = df["scenario_label"].isna() | (df["scenario_label"].astype(str).str.strip() == "")

@@ -908,17 +908,27 @@ def extract_section(
             )
             exclude_features.update(CROSS_SENSOR_FEATURES + CROSS_SENSOR_EXTRA + GROUPED_FEATURES)
 
-        scen = ""
-        src = "none"
+        label_meta = {
+            "scenario_label": "",
+            "label_source": "none",
+            "label_scope": "none",
+            "labeler": "",
+            "labeled_at_utc": "",
+            "label_confidence": np.nan,
+            "label_notes": "",
+            "label_status": "",
+            "label_schema_version": "",
+            "suggestion_source": "",
+            "suggestion_rank": "",
+        }
         if label_index is not None:
-            scen, src = label_index.resolve(
-                recording_id,
-                section_id,
-                window_start_s,
-                window_end_s,
+            label_meta = label_index.resolve_window_metadata(
+                recording_id=recording_id,
+                section_id=section_id,
+                window_start_s=window_start_s,
+                window_end_s=window_end_s,
             )
-        row["scenario_label"] = scen
-        row["label_source"] = src
+        row.update(label_meta)
         # Window sanity checks from per-sensor windows if available.
         if "sporsa" in dfs:
             sdf = dfs["sporsa"]

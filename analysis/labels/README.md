@@ -1,54 +1,123 @@
-# `labels/` — Manual scenario labeling utilities
+# `labels/` — Manual + semi-automatic scenario labeling workflow
 
-These tools help you attach human scenario labels (scenario labels / fall or
-incident events, etc.) to the automatically created feature windows.
+This package adds a lightweight semantic layer that can be joined to both:
+- `features/features.csv` (window rows), and
+- `events/event_candidates.csv` (event rows).
 
-## Label file format (CSV or JSON)
-Use either:
-- `*.csv` with a required header
-- `*.json` as a list of objects with the same fields
+The workflow intentionally stays simple:
+1. Start with section-level manual labels.
+2. Add interval/event-level manual refinements where needed.
+3. Optionally generate event suggestions from detected candidates, then confirm/edit.
 
-Required CSV fields:
-- `scope`: `recording` | `section` | `interval`
-- `recording_id`: e.g. `2026-02-26_r5`
-- `section_id`: e.g. `2026-02-26_r5s1` (required for `section` and `interval`)
-- `window_start_s`, `window_end_s`: section-relative seconds (required for `interval`)
-- `scenario_label`: the class / scenario name
-- `label_source`: optional free text (e.g. `manual_v1`)
+## Supported label scopes
+- `recording`: one label rule for all sections/windows in a recording.
+- `section`: one manual label per section.
+- `interval`: manual label over a section-relative time span `[window_start_s, window_end_s)`.
+- `event`: label tied to event candidates (`event_id` preferred; fallback `event_type + event_time_s`).
 
-Interval matching uses an overlap rule consistent with feature windows:
-windows are treated as half-open `[start, end)` in section-relative seconds.
+Window resolution precedence is:
+`interval > section > recording`.
 
-Use `labels/labels_template.csv` as the starting point for your own sheet.
+## CSV/JSON format
+Use either CSV (header required) or JSON list-of-objects.
 
-## Generate a scaffold CSV
-Typical workflow:
+Required fields:
+- `scope`
+- `recording_id`
+- `scenario_label`
 
-1. Parse raw logs so each recording has `parsed/<sensor>.csv`:
-   `uv run python -m parser.session <session_name>`
-2. Create scaffold labels:
-   `uv run python -m labels.scaffold labels/generated_scaffold.csv`
-3. Fill `scenario_label`, then run the pipeline with:
-   `uv run python -m pipeline --session <session_name> --labels labels/generated_scaffold.csv ...`
+Conditionally required:
+- `section_id` for `section`, `interval`, `event`
+- `window_start_s`, `window_end_s` for `interval`
+- `event_id` OR (`event_type` + `event_time_s`) for `event`
 
-Scaffold commands:
+Recommended provenance metadata:
+- `label_source`
+- `labeler`
+- `labeled_at_utc`
+- `label_confidence`
+- `label_notes`
+- `label_status`
+- `label_schema_version`
+- `suggestion_source`
+- `suggestion_rank`
+
+Special semantic values are supported directly in `scenario_label` or `label_status`:
+- `unknown`
+- `ambiguous`
+- `mixed`
+
+No fixed enum is hardcoded in parser logic, so taxonomy can evolve over time.
+
+Use `labels/labels_template.csv` as a starting point.
+
+## Join behavior
+### Join to feature windows
+`features.extract` now attaches:
+- `scenario_label`, `label_source`, `label_scope`
+- all provenance fields above
+
+for each window row by resolving label rules.
+
+### Join to event tables
+Use:
+```bash
+uv run python -m labels.workflow apply-event-labels data/sections/<section_id> --labels labels/event_labels.csv
+```
+This writes:
+- `events/event_candidates_labeled.csv`
+
+Matching precedence for `scope=event` rules:
+1. exact `event_id`
+2. same `event_type` + `event_time_s` within tolerance
+
+## Lightweight commands
+From `analysis/`:
 
 ```bash
-uv run python -m labels.scaffold overview
-uv run python -m labels.scaffold overview sections
-uv run python -m labels.scaffold labels/generated_scaffold.csv
-uv run python -m labels.scaffold labels/generated_scaffold.csv --recording-only
+# 1) Section-level scaffold (manual baseline)
+uv run python -m labels.workflow scaffold-sections 2026-02-26_r1 --out labels/section_labels.csv --labeler reviewer_a
+
+# 2) Suggest event labels from event candidates (semi-automatic)
+uv run python -m labels.workflow suggest-events 2026-02-26_r1 --out labels/event_suggestions.csv --min-confidence 0.35
+
+# 3) Human edits suggestions -> final labels, then apply to event table
+uv run python -m labels.workflow apply-event-labels data/sections/2026-02-26_r1s1 --labels labels/event_labels_final.csv
 ```
 
-## Interactive event labeler (Plotly HTML)
-Generate an HTML browser with synced IMU plots (+ optional GPS track) so you
-can click intervals/peaks and download a label CSV:
+## Proposed taxonomy for thesis scenarios
+See:
+- `labels/taxonomy_thesis_scenarios.json`
 
-```bash
-uv run python -m labels.event_labeler 2026-02-26_r2/synced
-uv run python -m labels.event_labeler sections/2026-02-26_r2s1 out.html
-```
+Suggested top-level labels:
+- `steady_state`
+- `surface_disturbance`
+- `hard_braking`
+- `rapid_swerve`
+- `rider_bicycle_mismatch`
+- `fall_or_drop`
+- plus `unknown`, `ambiguous`, `mixed`
 
-If `out.html` is omitted, it writes `event_labeler.html` next to the provided
-folder.
+## Example labeled files
+- `labels/examples/section_labels_example.csv`
+- `labels/examples/event_labels_example.csv`
+- `labels/examples/event_suggestions_example.csv`
+
+## Small evaluation dataset annotation protocol (consistent + low effort)
+Use this process for ~5–10 sections first:
+
+1. **Freeze taxonomy version**
+   - Set `label_schema_version` (for example `thesis_v1`) before annotation.
+2. **Section pass (fast baseline)**
+   - Fill one section-level row per section with `scenario_label` and `label_confidence`.
+3. **Event pass (targeted refinement)**
+   - Generate suggestions from event candidates, then confirm/edit each suggested row.
+4. **Ambiguity policy**
+   - Use `unknown` when evidence is insufficient.
+   - Use `ambiguous` when multiple classes plausible and undecidable.
+   - Use `mixed` when distinct classes co-occur clearly in a single interval/section.
+5. **Provenance discipline**
+   - Always populate `labeler`, `labeled_at_utc`, and `label_notes` for non-obvious cases.
+6. **Inter-rater consistency check (recommended)**
+   - Double-label ~20% of rows by a second reviewer, compare agreement, and refine guidelines before scaling.
 

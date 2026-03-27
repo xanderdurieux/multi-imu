@@ -1,0 +1,60 @@
+{
+  "schema_version": "thesis_v1",
+  "updated_at_utc": "2026-03-27T00:00:00Z",
+  "description": "Proposed lightweight taxonomy for thesis scenario labeling. Keep editable; labels are not hardcoded in parser.",
+  "status_values": ["confirmed", "unknown", "ambiguous", "mixed", "suggested", "rejected"],
+  "top_level_labels": [
+    {
+      "label": "steady_state",
+      "aliases": ["cruise", "normal"],
+      "notes": "Nominal riding segments with low disturbance."
+    },
+    {
+      "label": "surface_disturbance",
+      "aliases": ["bump", "rough_surface"],
+      "notes": "Road irregularities and shocks."
+    },
+    {
+      "label": "hard_braking",
+      "aliases": ["braking_event"],
+      "notes": "Strong deceleration episodes."
+    },
+    {
+      "label": "rapid_swerve",
+      "aliases": ["cornering_burst"],
+      "notes": "High lateral + roll dynamics."
+    },
+    {
+      "label": "rider_bicycle_mismatch",
+      "aliases": ["divergence"],
+      "notes": "Rider and bicycle dynamics diverge beyond expected coupling."
+    },
+    {
+      "label": "fall_or_drop",
+      "aliases": ["incident"],
+      "notes": "Potential loss-of-balance or bicycle-drop behavior."
+    },
+    {
+      "label": "unknown",
+      "aliases": [],
+      "notes": "Insufficient evidence to assign class."
+    },
+    {
+      "label": "ambiguous",
+      "aliases": [],
+      "notes": "Multiple plausible interpretations."
+    },
+    {
+      "label": "mixed",
+      "aliases": [],
+      "notes": "More than one clear class in same section/window."
+    }
+  ],
+  "event_candidate_defaults": {
+    "bump_shock_candidate": "surface_disturbance",
+    "braking_burst": "hard_braking",
+    "swerve_roll_rate_candidate": "rapid_swerve",
+    "rider_bicycle_divergence": "rider_bicycle_mismatch",
+    "fall_or_bicycle_drop_candidate": "fall_or_drop"
+  }
+}
