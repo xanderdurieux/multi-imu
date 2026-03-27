@@ -1,23 +1,32 @@
-"""Run evaluation report: ``uv run python -m evaluation <features_fused.csv> [out_dir]``."""
+"""Run evaluation report: ``uv run python -m evaluation <features_fused.csv> [out_dir] [--config cfg.json]``."""
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 
 from .experiments import run_evaluation_report
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print(
-            "Usage: uv run python -m evaluation <features_fused.csv> [out_dir]\n"
-            "  out_dir defaults to <csv_parent>/evaluation_report"
-        )
-        sys.exit(1)
-    csv_path = Path(sys.argv[1])
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else csv_path.parent / "evaluation_report"
-    run_evaluation_report(csv_path, out)
+    parser = argparse.ArgumentParser(description="Run thesis-oriented dual-IMU experiments.")
+    parser.add_argument("features_csv", type=Path, help="Path to fused feature CSV")
+    parser.add_argument(
+        "out_dir",
+        nargs="?",
+        type=Path,
+        help="Output directory (default: <csv_parent>/evaluation_report)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional JSON config path for feature subsets/experiment settings",
+    )
+    args = parser.parse_args()
+
+    out = args.out_dir if args.out_dir is not None else args.features_csv.parent / "evaluation_report"
+    run_evaluation_report(args.features_csv, out, config_path=args.config)
 
 
 if __name__ == "__main__":
