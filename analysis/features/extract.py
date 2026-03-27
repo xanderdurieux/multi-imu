@@ -616,7 +616,7 @@ def extract_section(
                     affected_features=["acc_norm_corr", "acc_norm_lag_ms", "acc_norm_coherence_mean"],
                 )
                 if cross_reasons:
-                    exclude_features.update(["acc_norm_corr", "acc_norm_lag_ms"])
+                    exclude_features.update(["acc_norm_corr", "acc_norm_lag_ms", "acc_norm_coherence_mean"])
             else:
                 row["acc_norm_corr"] = np.nan
                 row["acc_norm_lag_ms"] = np.nan
@@ -697,6 +697,7 @@ def extract_section(
                 row["shock_peak_ratio_bike_to_rider"] = np.nan
                 row["shock_peak_ratio_rider_to_bike"] = np.nan
                 row["peak_time_diff_acc_norm_s"] = np.nan
+                energy_reasons.append("axis_alignment_unavailable")
 
             reliability["energy_ratio"] = _reliability_entry(
                 reasons=sorted(set(energy_reasons)),
