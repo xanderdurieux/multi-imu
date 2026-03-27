@@ -19,10 +19,38 @@ already exist on disk (this repository does not generate them).
 | `plot_calibration` | `calibrated/` | World-frame sensor signals, calibration quality |
 | `plot_orientation` | `orientation/` | Euler angles, linear acceleration, relative head-bike orientation |
 | `plot_derived` | `derived/` | Physically interpretable derived-signal overview (residual/shock/tilt-rate) |
+| `dual_imu_report` | `derived/` + `events/` | Bike-vs-rider event summaries, lag/attenuation, presentation + diagnostic report bundle |
 | `plot_session` | all | Orchestrator — runs all of the above for a full session |
 
 ---
 
+
+
+## `dual_imu_report` — bicycle-vs-rider reporting layer
+
+**Saved in:** `sections/<section>/reporting/dual_imu/` (section mode), or recording/global reporting folders.
+
+```bash
+# One section
+uv run python -m visualization.dual_imu_report 2026-02-26_r5s1 --mode section
+
+# All sections in one recording
+uv run python -m visualization.dual_imu_report 2026-02-26_r5 --mode recording
+
+# All good sections in the dataset
+uv run python -m visualization.dual_imu_report all --mode all-good
+```
+
+Outputs emphasize **dual-IMU value** instead of raw CSV columns:
+- thesis-ready presentation figure with aligned bike/rider overlays,
+- cross-correlation lag summary (timing lead/lag),
+- shock attenuation estimates (bike peak vs rider peak),
+- agreement/disagreement traces (residual + transmission),
+- automatic event summary text with confidence flags,
+- compact section-level summary CSV/JSON,
+- example gallery + thesis figure recommendations.
+
+Diagnostic plots are written separately from presentation plots.
 
 ## `plot_derived` — derived-signal overview
 
