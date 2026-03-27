@@ -113,6 +113,115 @@ GROUPED_FEATURES = [
     "disagree_energy_axis_ratio_var",
 ]
 
+MIN_SIGNAL_STD = 1e-4
+MIN_SIGNAL_ENERGY = 1e-6
+MIN_DENOM_ENERGY = 1e-4
+MIN_LAG_PEAK_PROMINENCE = 1e-6
+
+ORIENTATION_CROSS_FEATURES = [
+    "pitch_corr",
+    "pitch_divergence_std",
+    "roll_corr",
+    "roll_divergence_std",
+    "brake_pitch_change_deg",
+    "brake_pitch_coupling_corr",
+    "corner_roll_rate_rms_deg_s",
+    "corner_roll_coupling_corr",
+]
+
+
+def _quality_tag_score(tag: str) -> float:
+    return {
+        "good": 1.0,
+        "marginal": 0.6,
+        "poor": 0.25,
+        "unknown": 0.45,
+    }.get(str(tag or "unknown"), 0.45)
+
+
+def _load_orientation_quality(section_path: Path, orientation_variant: str) -> tuple[str, float]:
+    stats_path = section_path / "orientation" / "orientation_stats.json"
+    if not stats_path.exists():
+        return "unknown", 0.45
+    try:
+        data = json.loads(stats_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "unknown", 0.45
+    tags: list[str] = []
+    for sensor in ("sporsa", "arduino"):
+        block = data.get(sensor, {})
+        if not isinstance(block, dict):
+            continue
+        entry = block.get(f"__{orientation_variant}", {})
+        if isinstance(entry, dict):
+            tags.append(str(entry.get("quality", "unknown")))
+    if not tags:
+        return "unknown", 0.45
+    # worst-tag aggregation
+    worst = min(tags, key=_quality_tag_score)
+    return worst, min(_quality_tag_score(t) for t in tags)
+
+
+def _sync_quality_score(recording_id: str | None, sync_method: str) -> tuple[float, str]:
+    if not recording_id:
+        return 0.45, "sync_unknown"
+    try:
+        from common.paths import recording_dir
+
+        p = recording_dir(recording_id) / "synced" / "all_methods.json"
+        if not p.exists():
+            return 0.45, "sync_missing"
+        data = json.loads(p.read_text(encoding="utf-8"))
+        method = sync_method or str(data.get("selected_method", "") or "")
+        info = data.get(method, {}) if isinstance(data, dict) else {}
+        corr = None
+        if isinstance(info, dict):
+            corr = (info.get("correlation") or {}).get("offset_and_drift")
+        if corr is None or not np.isfinite(corr):
+            return 0.45, "sync_corr_unknown"
+        score = float(np.clip((float(corr) + 1.0) / 2.0, 0.0, 1.0))
+        return score, "ok"
+    except Exception:
+        return 0.45, "sync_parse_error"
+
+
+def _signal_stats_ok(x: np.ndarray, *, min_std: float = MIN_SIGNAL_STD) -> tuple[float, list[str]]:
+    reasons: list[str] = []
+    if len(x) < 8:
+        reasons.append("short_window")
+    finite = x[np.isfinite(x)]
+    if len(finite) < 8:
+        reasons.append("insufficient_finite_samples")
+        return 0.0, reasons
+    std = float(np.nanstd(finite))
+    energy = float(np.nansum(finite * finite))
+    if std < min_std:
+        reasons.append("low_variance")
+    if energy < MIN_SIGNAL_ENERGY:
+        reasons.append("low_energy")
+    score = 1.0
+    if "short_window" in reasons:
+        score *= 0.6
+    if "low_variance" in reasons:
+        score *= 0.5
+    if "low_energy" in reasons:
+        score *= 0.6
+    return score, reasons
+
+
+def _reliability_entry(
+    *,
+    reasons: list[str],
+    confidence: float,
+    affected_features: list[str],
+) -> dict[str, Any]:
+    return {
+        "reliable": len(reasons) == 0,
+        "confidence": float(np.clip(confidence, 0.0, 1.0)),
+        "reasons": reasons,
+        "affected_features": affected_features,
+    }
+
 
 def _window_sanity_flags(
     acc: np.ndarray,
@@ -223,12 +332,19 @@ def _cross_corr_lag_ms(
     b: np.ndarray,
     dt_ms: float,
     max_lag_ms: float = 500.0,
-) -> float:
-    """Lag in ms at max cross-correlation (-max_lag to +max_lag)."""
+) -> tuple[float, float, list[str]]:
+    """Lag in ms at max cross-correlation (-max_lag to +max_lag) with confidence."""
+    reasons: list[str] = []
     if len(a) < 2 or len(b) < 2 or not np.any(np.isfinite(a)) or not np.any(np.isfinite(b)):
-        return np.nan
+        return np.nan, 0.0, ["insufficient_samples"]
     a = np.nan_to_num(a, nan=0.0)
     b = np.nan_to_num(b, nan=0.0)
+    a = a - np.mean(a)
+    b = b - np.mean(b)
+    sa = float(np.nanstd(a))
+    sb = float(np.nanstd(b))
+    if sa < MIN_SIGNAL_STD or sb < MIN_SIGNAL_STD:
+        return np.nan, 0.2, ["low_variance"]
     corr = np.correlate(a, b, mode="full")
     mid = len(corr) // 2
     dt_ms = max(dt_ms, 0.1)
@@ -236,9 +352,16 @@ def _cross_corr_lag_ms(
     lo = max(0, mid - max_lag_samp)
     hi = min(len(corr), mid + max_lag_samp + 1)
     region = corr[lo:hi]
+    if len(region) == 0:
+        return np.nan, 0.0, ["empty_lag_region"]
+    peak = float(np.nanmax(region))
+    trough = float(np.nanmin(region))
+    if not np.isfinite(peak) or (peak - trough) < MIN_LAG_PEAK_PROMINENCE:
+        return np.nan, 0.25, ["flat_cross_correlation"]
     idx = np.argmax(region)
     lag_samp = idx - (mid - lo)
-    return float(lag_samp * dt_ms)
+    conf = float(np.clip((peak - trough) / (abs(peak) + 1e-9), 0.0, 1.0))
+    return float(lag_samp * dt_ms), conf, reasons
 
 
 def _align_to_common_time(
@@ -339,6 +462,8 @@ def extract_section(
     if cal_path.exists():
         cal_json = json.loads(cal_path.read_text(encoding="utf-8"))
     calib_q = _worst_calibration_quality(cal_json)
+    orient_q_tag, orient_q_score = _load_orientation_quality(section_path, orientation_variant)
+    sync_q_score, sync_q_flag = _sync_quality_score(recording_id, sync_method)
 
     dfs: dict[str, pd.DataFrame] = {}
     orient_dfs: dict[str, pd.DataFrame] = {}
@@ -389,7 +514,28 @@ def extract_section(
             "event_type": "",
             "event_confidence": np.nan,
             "event_timestamp": np.nan,
+            "orientation_quality": orient_q_tag,
+            "upstream_confidence_score": float(
+                np.clip(
+                    min(_quality_tag_score(calib_q), orient_q_score, sync_q_score),
+                    0.0,
+                    1.0,
+                )
+            ),
+            "upstream_quality_flags": "ok",
         }
+        reliability: dict[str, dict[str, Any]] = {}
+        exclude_features: set[str] = set()
+        upstream_flags: list[str] = []
+        if calib_q in {"poor", "unknown"}:
+            upstream_flags.append(f"calibration_{calib_q}")
+        if orient_q_tag in {"poor", "unknown"}:
+            upstream_flags.append(f"orientation_{orient_q_tag}")
+        if sync_q_flag != "ok":
+            upstream_flags.append(sync_q_flag)
+        if not upstream_flags and sync_q_score < 0.45:
+            upstream_flags.append("sync_low_confidence")
+        row["upstream_quality_flags"] = "ok" if not upstream_flags else "|".join(sorted(set(upstream_flags)))
         if event_windows is not None and len(event_windows):
             # Nearest event center metadata (exact in common case).
             idx_evt = int(np.nanargmin(np.abs(pd.to_numeric(event_windows["window_center_s"], errors="coerce").to_numpy(dtype=float) - t_center_s)))
@@ -444,7 +590,10 @@ def extract_section(
             )
             if aligned is not None:
                 a_s, a_a = aligned
-                if len(a_s) > 2 and (np.ptp(a_s) > 1e-12 or np.ptp(a_a) > 1e-12):
+                q_a, reasons_a = _signal_stats_ok(a_s)
+                q_b, reasons_b = _signal_stats_ok(a_a)
+                corr_reasons = sorted(set([f"bike_{r}" for r in reasons_a] + [f"rider_{r}" for r in reasons_b]))
+                if len(a_s) > 2 and not corr_reasons:
                     try:
                         corr = stats.pearsonr(a_s, a_a)[0]
                     except Exception:
@@ -453,14 +602,31 @@ def extract_section(
                     corr = np.nan
                 row["acc_norm_corr"] = corr if np.isfinite(corr) else np.nan
                 dt_interp_ms = 1000.0 * window_s / max(len(a_s), 1)
-                row["acc_norm_lag_ms"] = _cross_corr_lag_ms(a_s, a_a, dt_interp_ms)
-                row["acc_norm_coherence_mean"] = mean_coherence_band(
+                lag_ms, lag_conf, lag_reasons = _cross_corr_lag_ms(a_s, a_a, dt_interp_ms)
+                row["acc_norm_lag_ms"] = lag_ms
+                coh = mean_coherence_band(
                     a_s, a_a, fs_hz=1.0 / max(window_s / max(len(a_s), 1), 1e-6)
                 )
+                row["acc_norm_coherence_mean"] = coh
+                cross_reasons = sorted(set(corr_reasons + lag_reasons))
+                cross_conf = min(q_a, q_b, lag_conf, row["upstream_confidence_score"])
+                reliability["cross_sensor"] = _reliability_entry(
+                    reasons=cross_reasons,
+                    confidence=cross_conf,
+                    affected_features=["acc_norm_corr", "acc_norm_lag_ms", "acc_norm_coherence_mean"],
+                )
+                if cross_reasons:
+                    exclude_features.update(["acc_norm_corr", "acc_norm_lag_ms", "acc_norm_coherence_mean"])
             else:
                 row["acc_norm_corr"] = np.nan
                 row["acc_norm_lag_ms"] = np.nan
                 row["acc_norm_coherence_mean"] = np.nan
+                reliability["cross_sensor"] = _reliability_entry(
+                    reasons=["acc_alignment_unavailable"],
+                    confidence=0.0,
+                    affected_features=["acc_norm_corr", "acc_norm_lag_ms", "acc_norm_coherence_mean"],
+                )
+                exclude_features.update(["acc_norm_corr", "acc_norm_lag_ms", "acc_norm_coherence_mean"])
 
             aligned_g = _align_to_common_time(
                 ts_s, gyro_n_s, ts_a, gyro_n_a, t_center_s, half_window_s
@@ -474,11 +640,16 @@ def extract_section(
 
             e_s = row.get("sporsa__acc_norm_energy", np.nan)
             e_a = row.get("arduino__acc_norm_energy", np.nan)
-            row["acc_energy_ratio"] = e_s / e_a if np.isfinite(e_a) and e_a != 0 else np.nan
+            energy_reasons: list[str] = []
+            if not np.isfinite(e_a) or abs(float(e_a)) <= MIN_DENOM_ENERGY:
+                energy_reasons.append("acc_energy_denominator_tiny")
+            row["acc_energy_ratio"] = safe_ratio(float(e_s), float(e_a), eps=MIN_DENOM_ENERGY)
 
             g_s_e = row.get("sporsa__gyro_energy", np.nan)
             g_a_e = row.get("arduino__gyro_energy", np.nan)
-            row["gyro_energy_ratio"] = g_s_e / g_a_e if np.isfinite(g_a_e) and g_a_e != 0 else np.nan
+            if not np.isfinite(g_a_e) or abs(float(g_a_e)) <= MIN_DENOM_ENERGY:
+                energy_reasons.append("gyro_energy_denominator_tiny")
+            row["gyro_energy_ratio"] = safe_ratio(float(g_s_e), float(g_a_e), eps=MIN_DENOM_ENERGY)
 
             acc_pair = _align_acc_vectors(
                 ts_s,
@@ -500,6 +671,12 @@ def extract_section(
                 row["energy_ratio_longitudinal"] = safe_ratio(exs, exa)
                 row["energy_ratio_lateral"] = safe_ratio(eys, eya)
                 row["energy_ratio_vertical"] = safe_ratio(ezs, eza)
+                if exa <= MIN_DENOM_ENERGY:
+                    energy_reasons.append("longitudinal_denominator_tiny")
+                if eya <= MIN_DENOM_ENERGY:
+                    energy_reasons.append("lateral_denominator_tiny")
+                if eza <= MIN_DENOM_ENERGY:
+                    energy_reasons.append("vertical_denominator_tiny")
                 mxs = float(np.nanmax(acc_n_s[(ts_s >= t_center_s - half_window_s) & (ts_s <= t_center_s + half_window_s)]))
                 mxa = float(np.nanmax(acc_n_a[(ts_a >= t_center_s - half_window_s) & (ts_a <= t_center_s + half_window_s)]))
                 row["shock_peak_ratio_bike_to_rider"] = safe_ratio(mxs, mxa, eps=1e-9)
@@ -520,11 +697,38 @@ def extract_section(
                 row["shock_peak_ratio_bike_to_rider"] = np.nan
                 row["shock_peak_ratio_rider_to_bike"] = np.nan
                 row["peak_time_diff_acc_norm_s"] = np.nan
+                energy_reasons.append("axis_alignment_unavailable")
+
+            reliability["energy_ratio"] = _reliability_entry(
+                reasons=sorted(set(energy_reasons)),
+                confidence=min(row["upstream_confidence_score"], 1.0 if not energy_reasons else 0.35),
+                affected_features=[
+                    "acc_energy_ratio",
+                    "gyro_energy_ratio",
+                    "energy_ratio_longitudinal",
+                    "energy_ratio_lateral",
+                    "energy_ratio_vertical",
+                ],
+            )
+            if energy_reasons:
+                exclude_features.update(
+                    [
+                        "acc_energy_ratio",
+                        "gyro_energy_ratio",
+                        "energy_ratio_longitudinal",
+                        "energy_ratio_lateral",
+                        "energy_ratio_vertical",
+                    ]
+                )
 
             # Physically interpreted compact families (aligned window).
             if acc_pair is not None and aligned is not None:
                 bike_pitch = rider_pitch = bike_roll = rider_roll = None
                 roll_dt_s: float | None = None
+                orient_reasons: list[str] = []
+                orientation_usable = orient_q_score >= 0.5
+                if not orientation_usable:
+                    orient_reasons.append(f"orientation_quality_{orient_q_tag}")
                 if "sporsa" in orient_dfs and "arduino" in orient_dfs:
                     od_s = orient_dfs["sporsa"]
                     od_a = orient_dfs["arduino"]
@@ -547,10 +751,18 @@ def extract_section(
                         half_window_s,
                     )
                     if pitch_pair is not None:
-                        bike_pitch, rider_pitch = pitch_pair
+                        if orientation_usable:
+                            bike_pitch, rider_pitch = pitch_pair
+                    elif orientation_usable:
+                        orient_reasons.append("pitch_alignment_unavailable")
                     if roll_pair is not None:
-                        bike_roll, rider_roll = roll_pair
-                        roll_dt_s = window_s / max(len(bike_roll), 1)
+                        if orientation_usable:
+                            bike_roll, rider_roll = roll_pair
+                            roll_dt_s = window_s / max(len(bike_roll), 1)
+                    elif orientation_usable:
+                        orient_reasons.append("roll_alignment_unavailable")
+                elif orientation_usable:
+                    orient_reasons.append("orientation_tracks_unavailable")
 
                 va, vb = acc_pair
                 bike_gyro_interp = _align_to_common_time(ts_s, gyro_n_s, ts_a, gyro_n_a, t_center_s, half_window_s)
@@ -582,11 +794,30 @@ def extract_section(
                     axis_energy_ratios=axis_ratios,
                 )
                 row.update(grouped)
+                reliability["grouped"] = _reliability_entry(
+                    reasons=sorted(set(orient_reasons)),
+                    confidence=min(row["upstream_confidence_score"], 1.0 if not orient_reasons else orient_q_score),
+                    affected_features=[f for f in GROUPED_FEATURES if "pitch" in f or "roll" in f],
+                )
+                if orient_reasons:
+                    for fname in GROUPED_FEATURES:
+                        if ("pitch" in fname or "roll" in fname) and fname in row:
+                            row[fname] = np.nan
+                    exclude_features.update([f for f in GROUPED_FEATURES if "pitch" in f or "roll" in f])
             else:
                 for f in GROUPED_FEATURES:
                     row[f] = np.nan
+                reliability["grouped"] = _reliability_entry(
+                    reasons=["grouped_alignment_unavailable"],
+                    confidence=0.0,
+                    affected_features=GROUPED_FEATURES,
+                )
+                exclude_features.update(GROUPED_FEATURES)
 
             if "sporsa" in orient_dfs and "arduino" in orient_dfs:
+                orient_cross_reasons: list[str] = []
+                if orient_q_score < 0.5:
+                    orient_cross_reasons.append(f"orientation_quality_{orient_q_tag}")
                 od_s = orient_dfs["sporsa"]
                 od_a = orient_dfs["arduino"]
                 ts_os = (od_s["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
@@ -598,41 +829,69 @@ def extract_section(
                 al = _align_to_common_time(ts_os, pitch_s, ts_oa, pitch_a, t_center_s, half_window_s)
                 if al is not None:
                     ps, pa = al
-                    if len(ps) > 2 and (np.ptp(ps) > 1e-12 or np.ptp(pa) > 1e-12):
+                    if len(ps) > 2 and orient_q_score >= 0.5 and np.nanstd(ps) >= MIN_SIGNAL_STD and np.nanstd(pa) >= MIN_SIGNAL_STD:
                         try:
                             row["pitch_corr"] = stats.pearsonr(ps, pa)[0]
                         except Exception:
                             row["pitch_corr"] = np.nan
                     else:
                         row["pitch_corr"] = np.nan
+                        if orient_q_score >= 0.5:
+                            orient_cross_reasons.append("pitch_low_variance")
                     row["pitch_divergence_std"] = float(np.nanstd(ps - pa))
                 else:
                     row["pitch_corr"] = np.nan
                     row["pitch_divergence_std"] = np.nan
+                    orient_cross_reasons.append("pitch_alignment_unavailable")
                 alr = _align_to_common_time(ts_os, roll_s, ts_oa, roll_a, t_center_s, half_window_s)
                 if alr is not None:
                     rs, ra = alr
-                    if len(rs) > 2 and (np.ptp(rs) > 1e-12 or np.ptp(ra) > 1e-12):
+                    if len(rs) > 2 and orient_q_score >= 0.5 and np.nanstd(rs) >= MIN_SIGNAL_STD and np.nanstd(ra) >= MIN_SIGNAL_STD:
                         try:
                             row["roll_corr"] = stats.pearsonr(rs, ra)[0]
                         except Exception:
                             row["roll_corr"] = np.nan
                     else:
                         row["roll_corr"] = np.nan
+                        if orient_q_score >= 0.5:
+                            orient_cross_reasons.append("roll_low_variance")
                     row["roll_divergence_std"] = float(np.nanstd(rs - ra))
                 else:
                     row["roll_corr"] = np.nan
                     row["roll_divergence_std"] = np.nan
+                    orient_cross_reasons.append("roll_alignment_unavailable")
+                if orient_q_score < 0.5:
+                    row["pitch_divergence_std"] = np.nan
+                    row["roll_divergence_std"] = np.nan
+                reliability["orientation_cross_sensor"] = _reliability_entry(
+                    reasons=sorted(set(orient_cross_reasons)),
+                    confidence=min(row["upstream_confidence_score"], orient_q_score),
+                    affected_features=ORIENTATION_CROSS_FEATURES,
+                )
+                if orient_cross_reasons:
+                    exclude_features.update(ORIENTATION_CROSS_FEATURES)
             else:
                 row["pitch_corr"] = np.nan
                 row["pitch_divergence_std"] = np.nan
                 row["roll_corr"] = np.nan
                 row["roll_divergence_std"] = np.nan
+                reliability["orientation_cross_sensor"] = _reliability_entry(
+                    reasons=["orientation_tracks_missing"],
+                    confidence=0.0,
+                    affected_features=ORIENTATION_CROSS_FEATURES,
+                )
+                exclude_features.update(ORIENTATION_CROSS_FEATURES)
         else:
             for f in CROSS_SENSOR_FEATURES + CROSS_SENSOR_EXTRA:
                 row[f] = np.nan
             for f in GROUPED_FEATURES:
                 row[f] = np.nan
+            reliability["cross_sensor"] = _reliability_entry(
+                reasons=["missing_one_sensor_stream"],
+                confidence=0.0,
+                affected_features=CROSS_SENSOR_FEATURES + CROSS_SENSOR_EXTRA + GROUPED_FEATURES,
+            )
+            exclude_features.update(CROSS_SENSOR_FEATURES + CROSS_SENSOR_EXTRA + GROUPED_FEATURES)
 
         scen = ""
         src = "none"
@@ -660,6 +919,21 @@ def extract_section(
             aacc = adf.loc[amask, ACC_COLS].to_numpy(dtype=float)
             agyro = adf.loc[amask, GYRO_COLS].to_numpy(dtype=float)
             row["arduino__window_sanity"] = _window_sanity_flags(aacc, agyro)
+
+        row["feature_reliability"] = json.dumps(reliability, sort_keys=True)
+        row["feature_reliability_summary"] = "|".join(
+            sorted(
+                {
+                    reason
+                    for block in reliability.values()
+                    for reason in block.get("reasons", [])
+                }
+            )
+        ) or "ok"
+        for fam, block in reliability.items():
+            row[f"feature_confidence__{fam}"] = float(block.get("confidence", np.nan))
+            row[f"feature_reliable__{fam}"] = int(bool(block.get("reliable", False)))
+        row["exclude_from_downstream"] = "|".join(sorted(exclude_features)) if exclude_features else ""
 
         rows.append(row)
 

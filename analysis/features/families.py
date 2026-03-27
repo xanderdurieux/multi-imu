@@ -155,7 +155,7 @@ def _corr_safe(a: np.ndarray, b: np.ndarray) -> float:
     b = np.asarray(b, dtype=float)
     if not np.any(np.isfinite(a)) or not np.any(np.isfinite(b)):
         return float("nan")
-    if np.nanstd(a) < 1e-9 or np.nanstd(b) < 1e-9:
+    if np.nanstd(a) < 1e-4 or np.nanstd(b) < 1e-4:
         return float("nan")
     return float(np.corrcoef(a, b)[0, 1])
 
@@ -167,7 +167,7 @@ def _lag_seconds(a: np.ndarray, b: np.ndarray, dt_s: float, max_lag_s: float = 0
     b = np.nan_to_num(np.asarray(b, dtype=float), nan=0.0)
     a0 = a - np.mean(a)
     b0 = b - np.mean(b)
-    if np.nanstd(a0) < 1e-9 or np.nanstd(b0) < 1e-9:
+    if np.nanstd(a0) < 1e-4 or np.nanstd(b0) < 1e-4:
         return float("nan")
     c = np.correlate(a0, b0, mode="full")
     mid = len(c) // 2
@@ -175,7 +175,7 @@ def _lag_seconds(a: np.ndarray, b: np.ndarray, dt_s: float, max_lag_s: float = 0
     lo = max(0, mid - max_lag)
     hi = min(len(c), mid + max_lag + 1)
     window = c[lo:hi]
-    if len(window) == 0 or np.nanmax(window) - np.nanmin(window) < 1e-12:
+    if len(window) == 0 or np.nanmax(window) - np.nanmin(window) < 1e-6:
         return float("nan")
     i = int(np.argmax(window)) + lo
     return float((i - mid) * dt_s)
@@ -211,7 +211,7 @@ def extract_grouped_features(
     z_peak_bike = float(np.nanmax(np.abs(bike_z))) if len(bike_z) else float("nan")
     z_peak_rider = float(np.nanmax(np.abs(rider_z))) if len(rider_z) else float("nan")
     out["bump_vertical_peak_ms2"] = z_peak_bike
-    out["bump_shock_attenuation_ratio"] = safe_ratio(z_peak_bike, z_peak_rider)
+    out["bump_shock_attenuation_ratio"] = safe_ratio(z_peak_bike, z_peak_rider, eps=1e-4)
     out["bump_response_lag_s"] = _lag_seconds(bike_z, rider_z, dt_s)
 
     # 2) Braking / deceleration

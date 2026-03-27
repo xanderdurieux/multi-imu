@@ -25,8 +25,14 @@ FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
     "sync_method": "Synchronization method key (e.g. sda, lida, calibration, online)",
     "orientation_method": "Orientation filter stem (e.g. complementary_orientation)",
     "calibration_quality": "Worst per-sensor ride calibration quality in section",
+    "orientation_quality": "Worst orientation quality tag across bike+rider for selected orientation_method",
+    "upstream_confidence_score": "Conservative confidence score propagated from sync, calibration, and orientation quality [0,1]",
+    "upstream_quality_flags": "Pipe-separated upstream quality issues (sync/calibration/orientation), or ok",
     "label_source": "Origin of scenario_label (none / manual / rule name)",
     "scenario_label": "Scenario or disturbance class for this window",
+    "feature_reliability": "JSON map per feature family with reliable/confidence/reasons/affected_features",
+    "feature_reliability_summary": "Pipe-separated union of reliability reasons across families, or ok",
+    "exclude_from_downstream": "Pipe-separated features recommended for exclusion in downstream evaluation for this window",
     # Window sanity
     "sporsa__window_sanity": "Sanity flag for bike window (ok or semicolon-separated degenerate conditions)",
     "arduino__window_sanity": "Sanity flag for rider window (ok or semicolon-separated degenerate conditions)",
@@ -78,6 +84,14 @@ FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
     "energy_ratio_longitudinal": "sum(ax²)_bike / sum(ax²)_rider on interpolated grid",
     "energy_ratio_lateral": "sum(ay²) ratio bike/rider",
     "energy_ratio_vertical": "sum(az²) ratio bike/rider",
+    "feature_confidence__cross_sensor": "Confidence score for acc correlation/lag/coherence family [0,1]",
+    "feature_reliable__cross_sensor": "1 if cross-sensor acc timing family is reliable, else 0",
+    "feature_confidence__energy_ratio": "Confidence score for energy-ratio family [0,1]",
+    "feature_reliable__energy_ratio": "1 if energy ratio features are reliable, else 0",
+    "feature_confidence__orientation_cross_sensor": "Confidence score for pitch/roll cross-sensor family [0,1]",
+    "feature_reliable__orientation_cross_sensor": "1 if orientation cross-sensor features are reliable, else 0",
+    "feature_confidence__grouped": "Confidence score for grouped physically interpreted orientation-linked features [0,1]",
+    "feature_reliable__grouped": "1 if grouped orientation-linked features are reliable, else 0",
 }
 
 for feat in FEATURE_DEFS:
