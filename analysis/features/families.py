@@ -165,12 +165,19 @@ def _lag_seconds(a: np.ndarray, b: np.ndarray, dt_s: float, max_lag_s: float = 0
         return float("nan")
     a = np.nan_to_num(np.asarray(a, dtype=float), nan=0.0)
     b = np.nan_to_num(np.asarray(b, dtype=float), nan=0.0)
-    c = np.correlate(a - np.mean(a), b - np.mean(b), mode="full")
+    a0 = a - np.mean(a)
+    b0 = b - np.mean(b)
+    if np.nanstd(a0) < 1e-9 or np.nanstd(b0) < 1e-9:
+        return float("nan")
+    c = np.correlate(a0, b0, mode="full")
     mid = len(c) // 2
     max_lag = int(max_lag_s / max(dt_s, 1e-6))
     lo = max(0, mid - max_lag)
     hi = min(len(c), mid + max_lag + 1)
-    i = int(np.argmax(c[lo:hi])) + lo
+    window = c[lo:hi]
+    if len(window) == 0 or np.nanmax(window) - np.nanmin(window) < 1e-12:
+        return float("nan")
+    i = int(np.argmax(window)) + lo
     return float((i - mid) * dt_s)
 
 
@@ -187,6 +194,7 @@ def extract_grouped_features(
     bike_roll: np.ndarray | None,
     rider_roll: np.ndarray | None,
     dt_s: float,
+    roll_dt_s: float | None,
     fs_hz: float,
     vec_disagreement: float,
     axis_energy_ratios: tuple[float, float, float],
@@ -223,7 +231,8 @@ def extract_grouped_features(
     # 3) Cornering / swerving
     out["corner_lateral_energy_ms2_sq"] = float(np.nansum(bike_y * bike_y)) if len(bike_y) else float("nan")
     if bike_roll is not None and len(bike_roll) >= 3:
-        roll_rate = np.diff(bike_roll) / max(dt_s, 1e-6)
+        dt_roll = roll_dt_s if roll_dt_s is not None else dt_s
+        roll_rate = np.diff(bike_roll) / max(dt_roll, 1e-6)
         out["corner_roll_rate_rms_deg_s"] = float(np.sqrt(np.nanmean(roll_rate * roll_rate)))
     else:
         out["corner_roll_rate_rms_deg_s"] = float("nan")

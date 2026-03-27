@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .extract import _window_sanity_flags
-from .families import extract_grouped_features
+from .families import _lag_seconds, extract_grouped_features
 from .signal_stats import safe_ratio
 
 
@@ -23,6 +23,7 @@ def run_sanity_checks() -> None:
 
     # Near-zero denominator protected.
     assert np.isnan(safe_ratio(1.0, 0.0))
+    assert np.isnan(_lag_seconds(np.zeros(20), np.zeros(20), 0.02))
 
     # Group feature extraction on degenerate signals should not raise.
     out = extract_grouped_features(
@@ -37,6 +38,7 @@ def run_sanity_checks() -> None:
         bike_roll=np.zeros(40),
         rider_roll=np.zeros(40),
         dt_s=0.02,
+        roll_dt_s=0.02,
         fs_hz=50.0,
         vec_disagreement=0.0,
         axis_energy_ratios=(np.nan, np.nan, np.nan),

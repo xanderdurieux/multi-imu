@@ -507,6 +507,7 @@ def extract_section(
             # Physically interpreted compact families (aligned window).
             if acc_pair is not None and aligned is not None:
                 bike_pitch = rider_pitch = bike_roll = rider_roll = None
+                roll_dt_s: float | None = None
                 if "sporsa" in orient_dfs and "arduino" in orient_dfs:
                     od_s = orient_dfs["sporsa"]
                     od_a = orient_dfs["arduino"]
@@ -532,6 +533,7 @@ def extract_section(
                         bike_pitch, rider_pitch = pitch_pair
                     if roll_pair is not None:
                         bike_roll, rider_roll = roll_pair
+                        roll_dt_s = window_s / max(len(bike_roll), 1)
 
                 va, vb = acc_pair
                 bike_gyro_interp = _align_to_common_time(ts_s, gyro_n_s, ts_a, gyro_n_a, t_center_s, half_window_s)
@@ -557,6 +559,7 @@ def extract_section(
                     bike_roll=bike_roll,
                     rider_roll=rider_roll,
                     dt_s=window_s / max(len(va), 1),
+                    roll_dt_s=roll_dt_s,
                     fs_hz=1.0 / max(window_s / max(len(va), 1), 1e-6),
                     vec_disagreement=row.get("vec_disagreement_mean_ms2", np.nan),
                     axis_energy_ratios=axis_ratios,
