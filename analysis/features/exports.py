@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import pandas as pd
 
 from common.paths import recordings_root, sections_root
@@ -30,11 +31,22 @@ META_COLS = [
     "exclude_from_downstream",
     "label_source",
     "scenario_label",
+    "quality_schema_version",
+    "section_quality_score",
+    "section_usability_category",
+    "window_quality_score",
+    "window_quality_label",
+    "window_usability_category",
+    "section_sync_confidence",
+    "section_sync_residual_quality",
+    "section_interpolation_burden",
+    "section_packet_loss_burden",
+    "section_frame_estimation_confidence",
+    "section_feature_reliability_score",
 ]
 
 
 def _collect_feature_frames(sections_root_path: Path) -> pd.DataFrame:
-    """Concatenate all ``sections/*/features/features.csv`` under sections root."""
     all_dfs: list[pd.DataFrame] = []
     if not sections_root_path.exists():
         return pd.DataFrame()
@@ -51,8 +63,7 @@ def _collect_feature_frames(sections_root_path: Path) -> pd.DataFrame:
         if df.empty:
             continue
         if "recording_id" not in df.columns or "section_id" not in df.columns:
-            # Derive missing metadata from folder name.
-            _rec_name, sec_idx = parse_section_folder_name(sec_dir.name)
+            _rec_name, _sec_idx = parse_section_folder_name(sec_dir.name)
             if "recording_id" not in df.columns:
                 df["recording_id"] = _rec_name
             if "section_id" not in df.columns:
@@ -64,7 +75,6 @@ def _collect_feature_frames(sections_root_path: Path) -> pd.DataFrame:
 
 
 def _subset_columns(df: pd.DataFrame, prefix: str | None) -> pd.DataFrame:
-    """Keep metadata columns and optionally all columns with *prefix*."""
     meta = [c for c in META_COLS if c in df.columns]
     extra = ["section"] if "section" in df.columns else []
     keep = meta + extra
@@ -72,9 +82,52 @@ def _subset_columns(df: pd.DataFrame, prefix: str | None) -> pd.DataFrame:
         feat = [c for c in df.columns if c not in keep]
     else:
         feat = [c for c in df.columns if c.startswith(prefix)]
-    cols = keep + feat
-    cols = [c for c in cols if c in df.columns]
+    cols = [c for c in keep + feat if c in df.columns]
     return df[cols].copy()
+
+
+def _collect_section_quality_rows(sec_root: Path) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if not sec_root.exists():
+        return pd.DataFrame()
+    for sec_dir in sorted(sec_root.iterdir()):
+        if not sec_dir.is_dir():
+            continue
+        qf = sec_dir / "quality_metadata.json"
+        if not qf.is_file():
+            continue
+        try:
+            rows.append(json.loads(qf.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+def _write_quality_plots(section_q: pd.DataFrame, out: Path) -> None:
+    if section_q.empty:
+        return
+    if "overall_usability_category" in section_q.columns:
+        counts = section_q["overall_usability_category"].value_counts()
+        fig, ax = plt.subplots(figsize=(6, 4))
+        counts.plot(kind="bar", ax=ax, color=["#2ca25f", "#fdae6b", "#de2d26"])
+        ax.set_title("Section usability histogram")
+        ax.set_ylabel("Sections")
+        ax.set_xlabel("Usability category")
+        fig.tight_layout()
+        fig.savefig(out / "quality_usability_hist.png", dpi=140)
+        plt.close(fig)
+
+    if "overall_quality_score" in section_q.columns:
+        vals = pd.to_numeric(section_q["overall_quality_score"], errors="coerce").dropna()
+        if len(vals):
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(vals, bins=12, color="#3182bd", alpha=0.9)
+            ax.set_title("Section quality score distribution")
+            ax.set_xlabel("Overall quality score")
+            ax.set_ylabel("Sections")
+            fig.tight_layout()
+            fig.savefig(out / "quality_confidence_hist.png", dpi=140)
+            plt.close(fig)
 
 
 def export_thesis_feature_tables(
@@ -82,15 +135,6 @@ def export_thesis_feature_tables(
     out_dir: Path | None = None,
     recordings_root_path: Path | None = None,
 ) -> dict[str, Path]:
-    """Write bike-only, rider-only, and fused feature CSVs plus a small manifest.
-
-    Sporsa = bicycle-mounted IMU, Arduino = rider-mounted IMU (thesis convention).
-
-    Returns
-    -------
-    dict
-        Keys ``bike``, ``rider``, ``fused``, ``manifest`` mapping to written paths.
-    """
     recordings_root_path = recordings_root_path or recordings_root()
     data_root = recordings_root_path.parent
     out = Path(out_dir) if out_dir is not None else data_root / "exports"
@@ -141,7 +185,6 @@ def export_qc_summaries(
     out_dir: Path | None = None,
     recordings_root_path: Path | None = None,
 ) -> Path:
-    """Aggregate per-section QC JSON files if present (from validation pipeline)."""
     recordings_root_path = recordings_root_path or recordings_root()
     data_root = recordings_root_path.parent
     out = Path(out_dir) if out_dir is not None else data_root / "exports"
@@ -163,16 +206,43 @@ def export_qc_summaries(
         if qf.is_file():
             try:
                 data = json.loads(qf.read_text(encoding="utf-8"))
-                _rec_name, sec_idx = parse_section_folder_name(sec_dir.name)
-                data["recording_id"] = _rec_name
-                data["section_id"] = sec_dir.name
-                rows.append(data)
+                _rec_name, _sec_idx = parse_section_folder_name(sec_dir.name)
+                flat = dict(data)
+                meta = flat.pop("quality_metadata", {})
+                if isinstance(meta, dict):
+                    for k, v in meta.items():
+                        flat[f"quality__{k}"] = v
+                flat["recording_id"] = _rec_name
+                flat["section_id"] = sec_dir.name
+                rows.append(flat)
             except Exception:
                 continue
 
     qcsv = out / "qc_sections_summary.csv"
+    qjson = out / "qc_sections_summary.json"
+    section_quality_csv = out / "section_quality_summary.csv"
+    recording_quality_csv = out / "recording_quality_report.csv"
     if rows:
-        pd.DataFrame(rows).to_csv(qcsv, index=False)
+        qdf = pd.DataFrame(rows)
+        qdf.to_csv(qcsv, index=False)
+        qjson.write_text(qdf.to_json(orient="records", indent=2), encoding="utf-8")
+
+        sq = _collect_section_quality_rows(sec_root)
+        if not sq.empty:
+            sq.to_csv(section_quality_csv, index=False)
+            rec = (
+                sq.groupby("recording_id", dropna=False)
+                .agg(
+                    sections=("section_id", "count"),
+                    mean_quality_score=("overall_quality_score", "mean"),
+                    usable_sections=("overall_usability_category", lambda s: int((s == "usable").sum())),
+                    caution_sections=("overall_usability_category", lambda s: int((s == "caution").sum())),
+                    excluded_sections=("overall_usability_category", lambda s: int((s == "exclude").sum())),
+                )
+                .reset_index()
+            )
+            rec.to_csv(recording_quality_csv, index=False)
+            _write_quality_plots(sq, out)
     else:
         pd.DataFrame().to_csv(qcsv, index=False)
     log.info("QC summary: %s (%d sections)", qcsv, len(rows))
