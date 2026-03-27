@@ -60,6 +60,11 @@ def validate(section_path: Path) -> dict[str, str | float | int]:
             result[f"{sensor}_forward_fallback"] = 1
             if worst_status == "good":
                 worst_status = "marginal"
+        if isinstance(ff, dict) and "confidence_score" in ff:
+            conf = float(ff.get("confidence_score", 0.0))
+            result[f"{sensor}_frame_confidence"] = conf
+            if conf < 0.35 and worst_status == "good":
+                worst_status = "marginal"
 
         if status == "poor" or (status == "marginal" and worst_status == "good"):
             worst_status = status

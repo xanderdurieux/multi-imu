@@ -520,7 +520,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "recording_names",
         nargs="+",
-        help="One or more recording names (e.g. 2026-02-26_5).",
+        help="One or more recording names (e.g. 2026-02-26_r5).",
     )
     parser.add_argument(
         "--stage",

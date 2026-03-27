@@ -21,7 +21,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "recording_name_stage",
         type=str,
-        help="Recording name and stage as '<recording_name>/<stage>' (e.g. '2026-02-26_5/parsed').",
+        help="Recording name and stage as '<recording_name>/<stage>' (e.g. '2026-02-26_r5/parsed').",
     )
     parser.add_argument("sensor_name_a", type=str, default="sporsa", nargs="?", help="Sensor A name.")
     parser.add_argument("sensor_name_b", type=str, default="arduino", nargs="?", help="Sensor B name.")

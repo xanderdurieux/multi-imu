@@ -18,7 +18,28 @@ already exist on disk (this repository does not generate them).
 | `plot_sync` | `synced/` | Sync method comparison, pre/post alignment |
 | `plot_calibration` | `calibrated/` | World-frame sensor signals, calibration quality |
 | `plot_orientation` | `orientation/` | Euler angles, linear acceleration, relative head-bike orientation |
+| `plot_derived` | `derived/` | Physically interpretable derived-signal overview (residual/shock/tilt-rate) |
 | `plot_session` | all | Orchestrator — runs all of the above for a full session |
+
+---
+
+
+## `plot_derived` — derived-signal overview
+
+**Saved in:** `derived/`
+
+```bash
+python -m visualization.plot_derived 2026-02-26_r5s1
+python -m visualization.plot_derived data/sections/2026-02-26_r5s1 --recompute
+```
+
+Creates `derived/derived_signals_overview.png` with:
+- bike vs rider vertical gravity-compensated acceleration,
+- rider-minus-bike residual motion (vertical + longitudinal/lateral when trustworthy),
+- shock transmission gain (bike→rider),
+- roll/pitch tilt-rate derivatives for both sensors.
+
+If derived CSVs are missing, this module can recompute them from calibrated/orientation outputs.
 
 ---
 
@@ -49,8 +70,8 @@ methods instead of viewing them individually.
 **Saved in:** `parsed/`
 
 ```bash
-python -m visualization.plot_timing 2026-02-26_5
-python -m visualization.plot_timing 2026-02-26_5 --no-drift
+python -m visualization.plot_timing 2026-02-26_r5
+python -m visualization.plot_timing 2026-02-26_r5 --no-drift
 ```
 
 ### Outputs
@@ -110,8 +131,8 @@ recording.  This is why drift correction is essential during synchronisation.
 **Saved in:** `synced/`
 
 ```bash
-python -m visualization.plot_sync 2026-02-26_5
-python -m visualization.plot_sync 2026-02-26_5 --no-alignment
+python -m visualization.plot_sync 2026-02-26_r5
+python -m visualization.plot_sync 2026-02-26_r5 --no-alignment
 ```
 
 ### Outputs
@@ -165,8 +186,8 @@ Side-by-side `‖acc‖` (accelerometer norm) overlay.
 **Saved in:** the target stage directory.
 
 ```bash
-python -m visualization.plot_sensor 2026-02-26_5/parsed sporsa
-python -m visualization.plot_sensor 2026-02-26_5/synced arduino --acc --norm
+python -m visualization.plot_sensor 2026-02-26_r5/parsed sporsa
+python -m visualization.plot_sensor 2026-02-26_r5/synced arduino --acc --norm
 ```
 
 Plots the accelerometer, gyroscope, and magnetometer axes for a single sensor.
@@ -183,8 +204,8 @@ as gaps rather than artefact spikes.
 **Saved in:** the target stage directory.
 
 ```bash
-python -m visualization.plot_comparison 2026-02-26_5/synced
-python -m visualization.plot_comparison 2026-02-26_5/synced --norm
+python -m visualization.plot_comparison 2026-02-26_r5/synced
+python -m visualization.plot_comparison 2026-02-26_r5/synced --norm
 ```
 
 Overlays Sporsa (handlebar) and Arduino (helmet) on the same axes.  When both
@@ -232,8 +253,8 @@ followed by ≥ 3 sharp tapping peaks within a short window.  These segments ser
 **Saved in:** `calibrated/`
 
 ```bash
-python -m visualization.plot_calibration 2026-02-26_5
-python -m visualization.plot_calibration 2026-02-26_5 --no-comparison
+python -m visualization.plot_calibration 2026-02-26_r5
+python -m visualization.plot_calibration 2026-02-26_r5 --no-comparison
 ```
 
 ### Outputs
@@ -265,7 +286,7 @@ or orientation artefacts.
 
 ```python
 from visualization.plot_orientation import plot_orientation_stage
-plot_orientation_stage("2026-02-26_5")
+plot_orientation_stage("2026-02-26_r5")
 ```
 
 ### Per-file outputs

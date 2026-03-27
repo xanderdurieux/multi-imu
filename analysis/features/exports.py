@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 
 from common.paths import recordings_root, sections_root
-from common.paths import parse_section_folder_name, section_id_for_idx
+from common.paths import parse_section_folder_name
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _collect_feature_frames(sections_root_path: Path) -> pd.DataFrame:
             if "recording_id" not in df.columns:
                 df["recording_id"] = _rec_name
             if "section_id" not in df.columns:
-                df["section_id"] = section_id_for_idx(sec_idx)
+                df["section_id"] = sec_dir.name
         all_dfs.append(df)
     if not all_dfs:
         return pd.DataFrame()
@@ -160,7 +160,7 @@ def export_qc_summaries(
                 data = json.loads(qf.read_text(encoding="utf-8"))
                 _rec_name, sec_idx = parse_section_folder_name(sec_dir.name)
                 data["recording_id"] = _rec_name
-                data["section_id"] = section_id_for_idx(sec_idx)
+                data["section_id"] = sec_dir.name
                 rows.append(data)
             except Exception:
                 continue

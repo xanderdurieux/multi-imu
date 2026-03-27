@@ -177,8 +177,8 @@ uv run -m parser.session <session_name>
   `data/sessions/<session_name>/{arduino,sporsa}/*.txt`
 
 - **Output** (per recording `2026-02-26_k`):  
-  - `data/recordings/2026-02-26_k/session_stats.json` (timing stats)  
-  - `data/recordings/2026-02-26_k/parsed/` — `sporsa.csv`, `arduino.csv`, plots  
+  - `data/recordings/2026-02-26_r<k>/session_stats.json` (timing stats)  
+  - `data/recordings/2026-02-26_r<k>/parsed/` — `sporsa.csv`, `arduino.csv`, plots  
 - **Output** (session): `data/sessions/<session_name>/session_stats.json`
 
 ---
@@ -347,8 +347,8 @@ uv run -m visualization.plot_sensor <recording_name>/<stage> <sensor_name> [--no
 ```
 
 - **Examples**:
-  - `uv run -m visualization.plot_sensor 2026-02-26_5/parsed sporsa --norm`
-  - `uv run -m visualization.plot_sensor 2026-02-26_5/calibrated arduino --norm`
+  - `uv run -m visualization.plot_sensor 2026-02-26_r5/parsed sporsa --norm`
+  - `uv run -m visualization.plot_sensor 2026-02-26_r5/calibrated arduino --norm`
 
 ### Compare two streams
 

@@ -63,6 +63,14 @@ def assess_section(
             fq = block.get("forward_frame_meta") or {}
             if fq.get("fallback"):
                 downgrade(1, f"{sensor}: forward-frame alignment fell back (weak horizontal motion)")
+            conf = fq.get("confidence_score", None)
+            if conf is not None:
+                try:
+                    conf_f = float(conf)
+                except Exception:
+                    conf_f = float("nan")
+                if np.isfinite(conf_f) and conf_f < 0.35:
+                    downgrade(1, f"{sensor}: low section-frame confidence ({conf_f:.2f})")
             cq = block.get("calibration_quality", "")
             if cq == "poor":
                 downgrade(0, f"{sensor}: calibration_quality=poor")
