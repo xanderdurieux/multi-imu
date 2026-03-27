@@ -1,32 +1,53 @@
-# `evaluation/` — Feature-table evaluation report
+# `evaluation/` — Thesis experiment layer for dual-IMU features
 
-This package generates a thesis-oriented evaluation report from a consolidated
+This package runs a lightweight, interpretable experiment workflow on a fused
 feature table (typically `features_fused.csv`).
 
 ## CLI
 From the `analysis/` directory:
 
 ```bash
-uv run python -m evaluation <features_fused.csv> [out_dir]
+uv run python -m evaluation <features_fused.csv> [out_dir] --config evaluation/configs/thesis_experiment_config.json
 ```
 
 If `out_dir` is omitted, outputs go to:
 - `<features_csv_parent>/evaluation_report/`
 
 ## What gets computed
-`evaluation/experiments.py:run_evaluation_report()` loads the fused features
-and computes:
-- per-feature missingness (NaN fraction)
-- class counts for `scenario_label`
-- within/between variance summaries
-- simple effect sizes for feature pairs across class labels (Cohen-d style)
+`evaluation/experiments.py:run_evaluation_report()` generates thesis-ready tables and plots:
 
-When scikit-learn is available, it also runs simple baseline classifiers with
-leave-one-recording-out (group) validation.
+1. **Feature source comparison**
+   - bike-only (`sporsa__*`) vs rider-only (`arduino__*`) vs fused
+   - models: logistic regression, random forest, gradient boosting
+   - leave-one-recording-out validation (recording-aware)
 
-## Inputs expected in the CSV
-The report assumes the feature table contains:
-- `scenario_label` (label column)
-- `recording_id` (group column for leave-one-group-out)
-- `section_id`, `window_start_s`, `window_end_s` (metadata; ignored for modeling)
+2. **Sync method comparison**
+   - evaluates fused features separately for each `sync_method`
 
+3. **Orientation method comparison**
+   - evaluates fused features separately for each `orientation_method`
+
+4. **Optional feature family ablation**
+   - "all fused" vs "minus family" feature groups (e.g., bumps/braking/cornering)
+
+5. **When labels are limited / as supportive evidence**
+   - effect-size table (max pairwise Cohen's d)
+   - within-class vs between-class variance ratio
+   - PCA class scatter and KMeans overlay for separability inspection
+
+## Output artifacts (for thesis)
+- `thesis_table_model_metrics.csv` (balanced accuracy, precision, recall, F1)
+- `classification_summary.csv`
+- confusion matrix images (`cm_*.png`)
+- feature-importance tables (`feature_importance_*.csv`)
+- optional precision-recall curves (`pr_*.png`) when imbalance is strong
+- `separability_effect_size.csv`
+- `separability_within_between_variance.csv`
+- `THESIS_SUMMARY.md` and `evaluation_summary.json` with recommendation text
+
+## Config-driven controls
+Use `evaluation/configs/thesis_experiment_config.json` to adjust:
+- feature subsets (`feature_sets`)
+- ablation families (`feature_family_ablation`)
+- minimum label counts and reporting limits
+- label/group/sync/orientation column names
