@@ -42,3 +42,23 @@ uv run python -m orientation.estimate <section_or_recording> \
 uv run -m orientation.validate <section_path>
 ```
 
+
+## Dynamic cycling filter comparison
+
+Use `compare_dynamic.py` to evaluate **all existing orientation outputs** on
+static and dynamic cycling sections with overlay plots and summary tables.
+
+```bash
+uv run python -m orientation.compare_dynamic <section_path>
+uv run python -m orientation.compare_dynamic <recording_name> --all-sections
+```
+
+Artifacts written to `orientation/comparison_dynamic/`:
+- `summary_per_filter.csv`: smoothness/responsiveness, drift, roll/pitch dynamic consistency, event separability proxy
+- `summary_pairwise_agreement.csv`: inter-filter quaternion-angle agreement stats
+- `overlay_static.png` and `overlay_dynamic.png`: all filters overlaid on same section windows
+- `comparison_summary.json`: per-sensor recommendation + magnetometer unreliability fractions
+- (recording mode) `comparison_overall_summary.csv` and `THESIS_INTERPRETATION.md`
+
+Magnetometer-based heading unreliability is flagged when calibrated magnetic
+norm deviates strongly from section median or when heading jumps abruptly.
