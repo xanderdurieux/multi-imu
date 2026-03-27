@@ -13,6 +13,7 @@ import pandas as pd
 from scipy import stats
 
 from common import load_dataframe
+from quality_metadata import attach_window_quality_fields, build_section_quality_metadata
 
 from .schema import write_feature_schema_json
 from .families import extract_grouped_features
@@ -464,6 +465,11 @@ def extract_section(
     calib_q = _worst_calibration_quality(cal_json)
     orient_q_tag, orient_q_score = _load_orientation_quality(section_path, orientation_variant)
     sync_q_score, sync_q_flag = _sync_quality_score(recording_id, sync_method)
+    section_quality_meta = build_section_quality_metadata(
+        section_path,
+        orientation_variant=orientation_variant,
+        sync_method=sync_method,
+    )
 
     dfs: dict[str, pd.DataFrame] = {}
     orient_dfs: dict[str, pd.DataFrame] = {}
@@ -523,6 +529,15 @@ def extract_section(
                 )
             ),
             "upstream_quality_flags": "ok",
+            "quality_schema_version": section_quality_meta.get("schema_version", "quality_metadata.v1"),
+            "section_quality_score": section_quality_meta.get("overall_quality_score"),
+            "section_usability_category": section_quality_meta.get("overall_usability_category"),
+            "section_sync_confidence": section_quality_meta.get("sync_confidence"),
+            "section_sync_residual_quality": section_quality_meta.get("sync_residual_quality"),
+            "section_interpolation_burden": section_quality_meta.get("interpolation_burden"),
+            "section_packet_loss_burden": section_quality_meta.get("packet_loss_burden"),
+            "section_frame_estimation_confidence": section_quality_meta.get("frame_estimation_confidence"),
+            "section_feature_reliability_score": section_quality_meta.get("feature_reliability_score"),
         }
         reliability: dict[str, dict[str, Any]] = {}
         exclude_features: set[str] = set()
@@ -937,7 +952,7 @@ def extract_section(
 
         rows.append(row)
 
-    out_df = pd.DataFrame(rows)
+    out_df = attach_window_quality_fields(pd.DataFrame(rows))
     out_path = features_dir / "features.csv"
     out_df.to_csv(out_path, index=False)
 

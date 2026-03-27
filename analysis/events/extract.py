@@ -408,6 +408,18 @@ def extract_event_candidates_section(
     dedup = _suppressed(cands, cfg.min_separation_s)
     out_df = pd.DataFrame([asdict(c) for c in dedup])
 
+    qmeta_path = section_path / "quality_metadata.json"
+    if qmeta_path.exists() and len(out_df):
+        try:
+            qmeta = json.loads(qmeta_path.read_text(encoding="utf-8"))
+        except Exception:
+            qmeta = {}
+        if isinstance(qmeta, dict):
+            out_df["quality_schema_version"] = qmeta.get("schema_version", "quality_metadata.v1")
+            out_df["section_quality_score"] = qmeta.get("overall_quality_score")
+            out_df["section_usability_category"] = qmeta.get("overall_usability_category")
+            out_df["section_sync_confidence"] = qmeta.get("sync_confidence")
+
     out_df.to_csv(out_dir / "event_candidates.csv", index=False)
     (out_dir / "event_config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
 

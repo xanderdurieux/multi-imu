@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from common import load_dataframe
+from quality_metadata import build_section_quality_metadata, write_section_quality_metadata
 
 log = logging.getLogger(__name__)
 
@@ -131,10 +132,12 @@ def assess_section(
             downgrade(1, f"sporsa orientation quality marginal ({orientation_variant})")
 
     label = ("poor", "marginal", "good")[tier]
+    meta = build_section_quality_metadata(section_path, orientation_variant=orientation_variant)
     out: dict[str, Any] = {
         "section_path": str(section_path),
         "quality_tier": label,
         "reasons": reasons,
+        "quality_metadata": meta,
     }
     return out
 
@@ -145,4 +148,5 @@ def write_section_qc(section_path: Path, **kwargs: Any) -> Path:
     res = assess_section(section_path, **kwargs)
     out = section_path / "qc_section.json"
     out.write_text(json.dumps(res, indent=2), encoding="utf-8")
+    write_section_quality_metadata(section_path, orientation_variant=kwargs.get("orientation_variant", "complementary_orientation"))
     return out
