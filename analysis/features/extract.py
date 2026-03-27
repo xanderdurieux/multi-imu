@@ -15,12 +15,14 @@ from scipy import stats
 from common import load_dataframe
 
 from .schema import write_feature_schema_json
+from .families import extract_grouped_features
 from .signal_stats import (
     band_energy_ratio,
     crest_factor,
     dominant_frequency_hz,
     mean_coherence_band,
     peak_time_difference_s,
+    safe_ratio,
     signal_entropy,
     vec_disagreement_ms2,
     zero_crossing_rate,
@@ -92,6 +94,44 @@ CROSS_SENSOR_EXTRA = [
     "energy_ratio_lateral",
     "energy_ratio_vertical",
 ]
+
+GROUPED_FEATURES = [
+    "bump_vertical_peak_ms2",
+    "bump_shock_attenuation_ratio",
+    "bump_response_lag_s",
+    "brake_longitudinal_decel_peak_ms2",
+    "brake_pitch_change_deg",
+    "brake_pitch_coupling_corr",
+    "corner_lateral_energy_ms2_sq",
+    "corner_roll_rate_rms_deg_s",
+    "corner_roll_coupling_corr",
+    "sprint_cadence_band_fraction",
+    "sprint_dom_freq_hz",
+    "sprint_gyro_energy_sum",
+    "disagree_vec_diff_mean_ms2",
+    "disagree_vertical_coherence",
+    "disagree_energy_axis_ratio_var",
+]
+
+
+def _window_sanity_flags(
+    acc: np.ndarray,
+    gyro: np.ndarray,
+    *,
+    min_len: int = 8,
+    min_std: float = 1e-6,
+) -> str:
+    """Return semi-colon-separated sanity flags for degenerate windows."""
+    flags: list[str] = []
+    if len(acc) < min_len or len(gyro) < min_len:
+        flags.append("short_window")
+    if np.nanstd(acc) < min_std:
+        flags.append("acc_low_variance")
+    if np.nanstd(gyro) < min_std:
+        flags.append("gyro_low_variance")
+    if np.all(~np.isfinite(acc)) or np.all(~np.isfinite(gyro)):
+        flags.append("all_nan")
+    return ";".join(flags) if flags else "ok"
 
 
 def _acc_norm(arr: np.ndarray) -> np.ndarray:
@@ -440,13 +480,13 @@ def extract_section(
                 eya = np.nansum(vb[:, 1] ** 2)
                 ezs = np.nansum(va[:, 2] ** 2)
                 eza = np.nansum(vb[:, 2] ** 2)
-                row["energy_ratio_longitudinal"] = exs / exa if exa > 1e-12 else np.nan
-                row["energy_ratio_lateral"] = eys / eya if eya > 1e-12 else np.nan
-                row["energy_ratio_vertical"] = ezs / eza if eza > 1e-12 else np.nan
+                row["energy_ratio_longitudinal"] = safe_ratio(exs, exa)
+                row["energy_ratio_lateral"] = safe_ratio(eys, eya)
+                row["energy_ratio_vertical"] = safe_ratio(ezs, eza)
                 mxs = float(np.nanmax(acc_n_s[(ts_s >= t_center_s - half_window_s) & (ts_s <= t_center_s + half_window_s)]))
                 mxa = float(np.nanmax(acc_n_a[(ts_a >= t_center_s - half_window_s) & (ts_a <= t_center_s + half_window_s)]))
-                row["shock_peak_ratio_bike_to_rider"] = mxs / mxa if mxa > 1e-9 else np.nan
-                row["shock_peak_ratio_rider_to_bike"] = mxa / mxs if mxs > 1e-9 else np.nan
+                row["shock_peak_ratio_bike_to_rider"] = safe_ratio(mxs, mxa, eps=1e-9)
+                row["shock_peak_ratio_rider_to_bike"] = safe_ratio(mxa, mxs, eps=1e-9)
                 m_s = (ts_s >= t_center_s - half_window_s) & (ts_s <= t_center_s + half_window_s)
                 m_a = (ts_a >= t_center_s - half_window_s) & (ts_a <= t_center_s + half_window_s)
                 row["peak_time_diff_acc_norm_s"] = peak_time_difference_s(
@@ -463,6 +503,68 @@ def extract_section(
                 row["shock_peak_ratio_bike_to_rider"] = np.nan
                 row["shock_peak_ratio_rider_to_bike"] = np.nan
                 row["peak_time_diff_acc_norm_s"] = np.nan
+
+            # Physically interpreted compact families (aligned window).
+            if acc_pair is not None and aligned is not None:
+                bike_pitch = rider_pitch = bike_roll = rider_roll = None
+                if "sporsa" in orient_dfs and "arduino" in orient_dfs:
+                    od_s = orient_dfs["sporsa"]
+                    od_a = orient_dfs["arduino"]
+                    ts_os = (od_s["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
+                    ts_oa = (od_a["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
+                    pitch_pair = _align_to_common_time(
+                        ts_os,
+                        od_s["pitch_deg"].to_numpy(dtype=float),
+                        ts_oa,
+                        od_a["pitch_deg"].to_numpy(dtype=float),
+                        t_center_s,
+                        half_window_s,
+                    )
+                    roll_pair = _align_to_common_time(
+                        ts_os,
+                        od_s["roll_deg"].to_numpy(dtype=float),
+                        ts_oa,
+                        od_a["roll_deg"].to_numpy(dtype=float),
+                        t_center_s,
+                        half_window_s,
+                    )
+                    if pitch_pair is not None:
+                        bike_pitch, rider_pitch = pitch_pair
+                    if roll_pair is not None:
+                        bike_roll, rider_roll = roll_pair
+
+                va, vb = acc_pair
+                bike_gyro_interp = _align_to_common_time(ts_s, gyro_n_s, ts_a, gyro_n_a, t_center_s, half_window_s)
+                if bike_gyro_interp is not None:
+                    gsa, gaa = bike_gyro_interp
+                else:
+                    gsa = np.array([], dtype=float)
+                    gaa = np.array([], dtype=float)
+                axis_ratios = (
+                    row.get("energy_ratio_longitudinal", np.nan),
+                    row.get("energy_ratio_lateral", np.nan),
+                    row.get("energy_ratio_vertical", np.nan),
+                )
+                grouped = extract_grouped_features(
+                    bike_acc=va,
+                    rider_acc=vb,
+                    bike_acc_norm=aligned[0],
+                    rider_acc_norm=aligned[1],
+                    bike_gyro_norm=gsa,
+                    rider_gyro_norm=gaa,
+                    bike_pitch=bike_pitch,
+                    rider_pitch=rider_pitch,
+                    bike_roll=bike_roll,
+                    rider_roll=rider_roll,
+                    dt_s=window_s / max(len(va), 1),
+                    fs_hz=1.0 / max(window_s / max(len(va), 1), 1e-6),
+                    vec_disagreement=row.get("vec_disagreement_mean_ms2", np.nan),
+                    axis_energy_ratios=axis_ratios,
+                )
+                row.update(grouped)
+            else:
+                for f in GROUPED_FEATURES:
+                    row[f] = np.nan
 
             if "sporsa" in orient_dfs and "arduino" in orient_dfs:
                 od_s = orient_dfs["sporsa"]
@@ -509,6 +611,8 @@ def extract_section(
         else:
             for f in CROSS_SENSOR_FEATURES + CROSS_SENSOR_EXTRA:
                 row[f] = np.nan
+            for f in GROUPED_FEATURES:
+                row[f] = np.nan
 
         scen = ""
         src = "none"
@@ -521,6 +625,21 @@ def extract_section(
             )
         row["scenario_label"] = scen
         row["label_source"] = src
+        # Window sanity checks from per-sensor windows if available.
+        if "sporsa" in dfs:
+            sdf = dfs["sporsa"]
+            st = (sdf["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
+            smask = (st >= window_start_s) & (st <= window_end_s)
+            sacc = sdf.loc[smask, ACC_COLS].to_numpy(dtype=float)
+            sgyro = sdf.loc[smask, GYRO_COLS].to_numpy(dtype=float)
+            row["sporsa__window_sanity"] = _window_sanity_flags(sacc, sgyro)
+        if "arduino" in dfs:
+            adf = dfs["arduino"]
+            at = (adf["timestamp"].to_numpy(dtype=float) - t0) / 1000.0
+            amask = (at >= window_start_s) & (at <= window_end_s)
+            aacc = adf.loc[amask, ACC_COLS].to_numpy(dtype=float)
+            agyro = adf.loc[amask, GYRO_COLS].to_numpy(dtype=float)
+            row["arduino__window_sanity"] = _window_sanity_flags(aacc, agyro)
 
         rows.append(row)
 
@@ -546,9 +665,10 @@ def extract_section(
     write_feature_schema_json(features_dir / "feature_schema.json")
 
     if write_plots and len(out_df) > 0:
-        from .plots import plot_features_timeline
+        from .plots import plot_features_timeline, plot_scenario_feature_summary
 
         plot_features_timeline(features_dir, out_df)
+        plot_scenario_feature_summary(features_dir, out_df, GROUPED_FEATURES)
 
     return out_df
 

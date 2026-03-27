@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .families import GROUP_EXPLANATIONS, FEATURE_DEFS
+
 # Populated alongside extract.py; keys are column names after export prefixes where noted.
 FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
     # Window geometry
@@ -21,6 +23,9 @@ FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
     "calibration_quality": "Worst per-sensor ride calibration quality in section",
     "label_source": "Origin of scenario_label (none / manual / rule name)",
     "scenario_label": "Scenario or disturbance class for this window",
+    # Window sanity
+    "sporsa__window_sanity": "Sanity flag for bike window (ok or semicolon-separated degenerate conditions)",
+    "arduino__window_sanity": "Sanity flag for rider window (ok or semicolon-separated degenerate conditions)",
     # Per-sensor (prefix sporsa__ or arduino__)
     "acc_norm_mean": "Mean ‖accelerometer‖ in world frame (m/s²)",
     "acc_norm_max": "Max ‖accelerometer‖",
@@ -71,6 +76,11 @@ FEATURE_COLUMN_DESCRIPTIONS: dict[str, str] = {
     "energy_ratio_vertical": "sum(az²) ratio bike/rider",
 }
 
+for feat in FEATURE_DEFS:
+    FEATURE_COLUMN_DESCRIPTIONS[feat.name] = (
+        f"[{feat.group}] {feat.description} Hypothesis: {feat.hypothesis}."
+    )
+
 
 def write_feature_schema_json(out_path: Path) -> None:
     """Write JSON data dictionary for all documented columns."""
@@ -78,6 +88,7 @@ def write_feature_schema_json(out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "description": "Feature column dictionary for dual-IMU cycling analysis",
+        "group_explanations": GROUP_EXPLANATIONS,
         "columns": FEATURE_COLUMN_DESCRIPTIONS,
     }
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
