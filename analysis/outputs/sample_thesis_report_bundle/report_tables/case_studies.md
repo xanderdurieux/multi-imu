@@ -1,0 +1,3 @@
+| section_id | quality_label | key_flags |
+| --- | --- | --- |
+| N/A | no_data | insufficient_quality_metadata |
