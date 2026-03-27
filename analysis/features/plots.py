@@ -82,3 +82,44 @@ def plot_features_timeline(features_dir: Path, df: pd.DataFrame) -> None:
     fig.suptitle("Top 4 discriminative features over time")
     fig.savefig(plots_dir / "features_timeline.png", dpi=150, bbox_inches="tight")
     plt.close()
+
+
+def plot_scenario_feature_summary(features_dir: Path, df: pd.DataFrame, features: list[str]) -> None:
+    """Write scenario-level summary table and compact barplot (if labels exist)."""
+    if "scenario_label" not in df.columns:
+        return
+    d = df.copy()
+    d["scenario_label"] = d["scenario_label"].fillna("").astype(str)
+    d = d[d["scenario_label"].str.len() > 0]
+    if d.empty:
+        return
+    use_cols = [c for c in features if c in d.columns]
+    if not use_cols:
+        return
+    plots_dir = features_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = (
+        d.groupby("scenario_label")[use_cols]
+        .agg(["mean", "std", "count"])
+        .sort_index()
+    )
+    summary.to_csv(features_dir / "scenario_feature_summary.csv")
+
+    # Plot top 6 by between-class mean spread.
+    spreads = []
+    for c in use_cols:
+        m = d.groupby("scenario_label")[c].mean()
+        spreads.append((c, float(m.max() - m.min()) if len(m) else 0.0))
+    top = [name for name, _ in sorted(spreads, key=lambda x: x[1], reverse=True)[:6]]
+    if not top:
+        return
+    means = d.groupby("scenario_label")[top].mean()
+
+    fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
+    means.plot(kind="bar", ax=ax)
+    ax.set_ylabel("Mean feature value")
+    ax.set_title("Scenario summary (top spread grouped features)")
+    ax.legend(loc="upper right", ncol=2, fontsize=8)
+    fig.savefig(plots_dir / "scenario_feature_summary.png", dpi=150, bbox_inches="tight")
+    plt.close()

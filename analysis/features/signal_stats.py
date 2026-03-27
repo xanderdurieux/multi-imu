@@ -12,6 +12,13 @@ from scipy.signal import coherence
 Array = np.ndarray
 
 
+def safe_ratio(num: float, den: float, *, eps: float = 1e-12) -> float:
+    """Return ``num / den`` when denominator is numerically stable, else NaN."""
+    if not np.isfinite(num) or not np.isfinite(den) or abs(den) <= eps:
+        return float("nan")
+    return float(num / den)
+
+
 def signal_entropy(x: Array, *, n_bins: int = 32) -> float:
     """Shannon entropy of histogram of *x* (ignoring NaNs)."""
     v = x[np.isfinite(x)]
@@ -113,6 +120,8 @@ def mean_coherence_band(
         return float("nan")
     a = a[:n]
     b = b[:n]
+    if np.nanstd(a) < 1e-9 or np.nanstd(b) < 1e-9:
+        return float("nan")
     if nperseg is None:
         nperseg = max(16, min(256, n // 4))
     nperseg = min(nperseg, n)
@@ -135,6 +144,8 @@ def peak_time_difference_s(
     """Difference in time (seconds) between max-|signal| peaks on each timeline."""
     if len(sig_a) < 2 or len(sig_b) < 2:
         return float("nan")
+    if not np.any(np.isfinite(sig_a)) or not np.any(np.isfinite(sig_b)):
+        return float("nan")
     ia = int(np.nanargmax(np.abs(sig_a)))
     ib = int(np.nanargmax(np.abs(sig_b)))
     return float(ts_b_s[ib] - ts_a_s[ia])
@@ -147,3 +158,21 @@ def vec_disagreement_ms2(acc_a: Array, acc_b: Array) -> float:
         return float("nan")
     d = acc_a[:n] - acc_b[:n]
     return float(np.nanmean(np.sqrt(np.sum(d * d, axis=1))))
+
+
+def normalized_band_energy(x: Array, fs_hz: float, band_hz: tuple[float, float]) -> float:
+    """Energy fraction in ``band_hz`` over non-DC total FFT energy."""
+    v = np.asarray(x, dtype=float)
+    v = v[np.isfinite(v)]
+    n = len(v)
+    if n < 32 or fs_hz <= 0:
+        return float("nan")
+    v = v - np.nanmean(v)
+    spec = np.abs(rfft(v)) ** 2
+    freqs = rfftfreq(n, d=1.0 / fs_hz)
+    e_total = float(np.nansum(spec[1:]))
+    if e_total <= 1e-12:
+        return float("nan")
+    m = (freqs >= band_hz[0]) & (freqs <= band_hz[1])
+    e_band = float(np.nansum(spec[m]))
+    return float(e_band / e_total)

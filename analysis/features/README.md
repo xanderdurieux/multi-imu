@@ -4,6 +4,16 @@ This package computes thesis-ready features for each calibration-bounded
 section by sliding a fixed-size window over time and summarizing signal
 statistics (including cross-sensor features).
 
+## Physically interpreted feature families
+- Implemented in `families.py`.
+- Catalog and hypotheses documented in `FEATURE_CATALOG.md`.
+- Families:
+  1. bumps / disturbances
+  2. braking / deceleration
+  3. cornering / swerving
+  4. sprinting / exertion
+  5. rider-bicycle disagreement / destabilization
+
 ## Main extraction module
 - `extract.py`
   - Public entry point: `extract_section(section_path, section_name, ...)`
@@ -46,6 +56,8 @@ For each section, extraction expects:
 - `features/features_stats.json` (simple numeric summaries)
 - `features/feature_schema.json` (feature column schema)
 - Optional feature timeline plots (when enabled by the caller)
+- `features/scenario_feature_summary.csv` when labels/scenarios are present
+- `features/plots/scenario_feature_summary.png` when labels/scenarios are present
 
 ## Validation
 ```bash
@@ -70,4 +82,3 @@ Consolidated outputs:
 - `analysis/data/exports/features_fused.csv`
 - `analysis/data/exports/export_manifest.json`
 - `analysis/data/exports/qc_sections_summary.csv` (when QC JSON exists)
-
