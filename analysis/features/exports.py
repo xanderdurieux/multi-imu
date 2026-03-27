@@ -22,7 +22,12 @@ META_COLS = [
     "window_center_s",
     "sync_method",
     "orientation_method",
+    "orientation_quality",
     "calibration_quality",
+    "upstream_confidence_score",
+    "upstream_quality_flags",
+    "feature_reliability_summary",
+    "exclude_from_downstream",
     "label_source",
     "scenario_label",
 ]

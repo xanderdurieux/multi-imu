@@ -58,6 +58,11 @@ For each section, extraction expects:
 
 ### Outputs (per section)
 - `features/features.csv` (one row per window)
+- `features` reliability metadata columns:
+  - `upstream_confidence_score`, `upstream_quality_flags`
+  - `feature_reliability` (JSON by family), `feature_reliability_summary`
+  - `feature_confidence__*` / `feature_reliable__*`
+  - `exclude_from_downstream` (window-specific exclusion suggestions)
 - `features/features_stats.json` (simple numeric summaries)
 - `features/feature_schema.json` (feature column schema)
 - Optional feature timeline plots (when enabled by the caller)
@@ -68,6 +73,9 @@ For each section, extraction expects:
 ```bash
 uv run -m features.validate <section_path>
 ```
+
+Quick reliability examples are in:
+- `analysis/features/notebooks/reliability_validation.ipynb`
 
 ## Session aggregation (features_all.csv)
 - `aggregate.py`: `python -m features.aggregate <session_name>`
