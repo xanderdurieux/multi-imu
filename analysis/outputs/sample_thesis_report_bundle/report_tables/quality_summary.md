@@ -1,0 +1,3 @@
+| section_id | overall_quality_score | overall_quality_label | usability | qc_tier | sync_confidence | orientation_quality_score |
+| --- | --- | --- | --- | --- | --- | --- |
+| N/A |  | no_data | no_data | no_data |  |  |
