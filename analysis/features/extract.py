@@ -753,10 +753,14 @@ def extract_section(
                     if pitch_pair is not None:
                         if orientation_usable:
                             bike_pitch, rider_pitch = pitch_pair
+                    elif orientation_usable:
+                        orient_reasons.append("pitch_alignment_unavailable")
                     if roll_pair is not None:
                         if orientation_usable:
                             bike_roll, rider_roll = roll_pair
                             roll_dt_s = window_s / max(len(bike_roll), 1)
+                    elif orientation_usable:
+                        orient_reasons.append("roll_alignment_unavailable")
                 elif orientation_usable:
                     orient_reasons.append("orientation_tracks_unavailable")
 
