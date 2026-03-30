@@ -74,6 +74,7 @@ class ThesisWorkflowSmokeTest(unittest.TestCase):
                         "evaluation",
                         str(fused_csv),
                         str(out),
+                        "--primary",
                         "--config",
                         str(eval_cfg),
                         "--seed",
@@ -88,10 +89,23 @@ class ThesisWorkflowSmokeTest(unittest.TestCase):
                 "thesis_table_model_metrics.csv",
                 "separability_effect_size.csv",
                 "separability_within_between_variance.csv",
+                "primary_feature_source_comparison.csv",
+                "sync_ablation_compact.csv",
+                "orientation_downstream_comparison.csv",
+                "feature_family_ablation_compact.csv",
             ):
                 a = pd.read_csv(out_a / filename)
                 b = pd.read_csv(out_b / filename)
                 pd.testing.assert_frame_equal(a, b, check_dtype=False, check_like=True)
+
+            for md_name in (
+                "PRIMARY_INTERPRETATION.md",
+                "SYNC_ABLATION_INTERPRETATION.md",
+                "ORIENTATION_DOWNSTREAM_INTERPRETATION.md",
+                "FEATURE_FAMILY_INTERPRETATION.md",
+                "THESIS_EXPERIMENT_BUNDLE.md",
+            ):
+                self.assertTrue((out_a / md_name).is_file())
 
             sum_a = json.loads((out_a / "evaluation_summary.json").read_text(encoding="utf-8"))
             sum_b = json.loads((out_b / "evaluation_summary.json").read_text(encoding="utf-8"))

@@ -3,32 +3,50 @@
 This package runs a lightweight, interpretable experiment workflow on a fused
 feature table (typically `features_fused.csv`).
 
-## CLI
+## Primary thesis command (recommended)
 From the `analysis/` directory:
 
 ```bash
-uv run python -m evaluation <features_fused.csv> [out_dir] --config evaluation/configs/thesis_experiment_config.json --seed 42
+uv run python -m evaluation <features_fused.csv> [out_dir] --primary --config evaluation/configs/thesis_primary_experiment_config.json --seed 42
 ```
 
 If `out_dir` is omitted, outputs go to:
 - `<features_csv_parent>/evaluation_report/`
 
+This one command generates the **core thesis bundle**:
+- primary comparison: bike-only vs rider-only vs fused (recording-aware validation),
+- compact sync ablation (table + figure + interpretation),
+- orientation-to-downstream comparison (table + figure + interpretation),
+- focused feature-family ablation with physically grounded interpretation.
+
+## Secondary / legacy command (still available)
+
+```bash
+uv run python -m evaluation <features_fused.csv> [out_dir] --config evaluation/configs/thesis_experiment_config.json --seed 42
+```
+
+This runs the broader report directly (`run_evaluation_report`) without the compact thesis-first bundle wrappers.
+
 ## What gets computed
-`evaluation/experiments.py:run_evaluation_report()` generates thesis-ready tables and plots:
+`evaluation/experiments.py` generates thesis-ready tables and plots:
 
 1. **Feature source comparison**
    - bike-only (`sporsa__*`) vs rider-only (`arduino__*`) vs fused
    - models: logistic regression, random forest, gradient boosting
    - leave-one-recording-out validation (recording-aware)
 
-2. **Sync method comparison**
+2. **Sync method ablation (secondary support)**
    - evaluates fused features separately for each `sync_method`
+   - exports `sync_ablation_compact.csv`, `sync_ablation_compact.png`, `SYNC_ABLATION_INTERPRETATION.md`
 
-3. **Orientation method comparison**
+3. **Orientation method downstream comparison (secondary support)**
    - evaluates fused features separately for each `orientation_method`
+   - explicitly reports downstream classification impact (not only filter diagnostics)
+   - exports `orientation_downstream_comparison.csv`, `orientation_downstream_comparison.png`, `ORIENTATION_DOWNSTREAM_INTERPRETATION.md`
 
-4. **Optional feature family ablation**
+4. **Focused feature-family ablation (secondary support)**
    - "all fused" vs "minus family" feature groups (e.g., bumps/braking/cornering)
+   - adds physically grounded interpretation in `FEATURE_FAMILY_INTERPRETATION.md`
 
 5. **When labels are limited / as supportive evidence**
    - effect-size table (max pairwise Cohen's d)
@@ -38,12 +56,14 @@ If `out_dir` is omitted, outputs go to:
 ## Output artifacts (for thesis)
 - `thesis_table_model_metrics.csv` (balanced accuracy, precision, recall, F1)
 - `classification_summary.csv`
+- `primary_feature_source_comparison.csv` (main thesis table)
 - confusion matrix images (`cm_*.png`)
 - feature-importance tables (`feature_importance_*.csv`)
 - optional precision-recall curves (`pr_*.png`) when imbalance is strong
 - `separability_effect_size.csv`
 - `separability_within_between_variance.csv`
 - `THESIS_SUMMARY.md` and `evaluation_summary.json` with recommendation text
+- `THESIS_EXPERIMENT_BUNDLE.md` (primary vs secondary artifact map)
 
 ## Config-driven controls
 Use `evaluation/configs/thesis_experiment_config.json` to adjust:

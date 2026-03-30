@@ -59,6 +59,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "sprinting": ["sprint_"],
             "disagreement": ["disagree_"],
         },
+        "physical_meaning": {
+            "bumps": "Vertical shock transfer and road-surface disturbance sensitivity.",
+            "braking": "Longitudinal deceleration load transfer and rider stabilization response.",
+            "cornering": "Lateral acceleration / lean-coupled dynamics in turns.",
+            "sprinting": "High-cadence rider-driven oscillation and power bursts.",
+            "disagreement": "Bike-rider coupling mismatch (relative motion and damping behaviour).",
+        },
     },
     "locked_split_manifest": None,
     "qc_policy": {"enabled": False},
@@ -358,6 +365,148 @@ def _recommendation_text(classifier_table: pd.DataFrame, separability_table: pd.
             "for thesis claims, and present classifiers as supportive trends."
         )
     return "Evidence is weak-to-moderate; emphasize descriptive trends, uncertainty, and need for more labeled sessions."
+
+
+def _compact_best_model_table(comparison_df: pd.DataFrame, comparison: str) -> pd.DataFrame:
+    columns = [
+        "comparison",
+        "variant",
+        "model",
+        "split_protocol",
+        "n_samples",
+        "n_groups",
+        "n_features",
+        "balanced_accuracy",
+        "f1_macro",
+        "precision_macro",
+        "recall_macro",
+    ]
+    if comparison_df.empty:
+        return pd.DataFrame(columns=columns)
+    sub = comparison_df[comparison_df["comparison"] == comparison].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=columns)
+    sub = sub.sort_values(["variant", "balanced_accuracy"], ascending=[True, False])
+    best = sub.groupby("variant", as_index=False).head(1).copy()
+    best["comparison"] = comparison
+    return best[columns].sort_values("balanced_accuracy", ascending=False)
+
+
+def _plot_compact_ablation(table: pd.DataFrame, *, title: str, out_path: Path) -> None:
+    if table.empty:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar(table["variant"], table["balanced_accuracy"], color="#3b82f6", alpha=0.9)
+    ax.set_ylim(0, min(1.0, max(0.4, float(table["balanced_accuracy"].max()) + 0.1)))
+    ax.set_ylabel("Balanced accuracy")
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.25)
+    for b, val in zip(bars, table["balanced_accuracy"], strict=False):
+        ax.text(b.get_x() + b.get_width() / 2, val + 0.01, f"{val:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
+
+
+def _write_markdown(path: Path, lines: list[str]) -> None:
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_primary_interpretations(
+    *,
+    out_dir: Path,
+    core_table: pd.DataFrame,
+    sync_table: pd.DataFrame,
+    orientation_table: pd.DataFrame,
+    family_table: pd.DataFrame,
+    family_meaning: dict[str, str],
+) -> None:
+    core_lines = [
+        "# Primary thesis comparison",
+        "",
+        "Main comparison: **bike-only vs rider-only vs fused features** under recording-aware validation.",
+        "",
+    ]
+    if core_table.empty:
+        core_lines.append(
+            "- Insufficient labeled recordings/classes for a stable primary comparison in this run."
+        )
+    else:
+        top = core_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
+        core_lines.extend(
+            [
+                f"- Best variant: **{top['variant']}** using `{top['model']}`.",
+                f"- Balanced accuracy: **{top['balanced_accuracy']:.3f}**, macro-F1: **{top['f1_macro']:.3f}**.",
+                f"- Validation protocol: `{top['split_protocol']}` across {int(top['n_groups'])} recordings.",
+                "",
+                "Interpretation: If fused outperforms bike-only and rider-only, the thesis claim is supported:",
+                "joint bike+rider dynamics carry behavior signal not captured by either sensor alone.",
+            ]
+        )
+    _write_markdown(out_dir / "PRIMARY_INTERPRETATION.md", core_lines)
+
+    sync_lines = [
+        "# Synchronization ablation (downstream impact)",
+        "",
+        "Compares downstream classification quality by sync method using fused features.",
+        "",
+    ]
+    if sync_table.empty:
+        sync_lines.append("- No sync-specific subset met minimum data requirements.")
+    else:
+        best_sync = sync_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
+        sync_lines.extend(
+            [
+                f"- Best sync method: **{best_sync['variant']}** ({best_sync['balanced_accuracy']:.3f} balanced accuracy).",
+                "- This ablation measures practical impact, not only alignment diagnostics.",
+                "- Use this table/figure to justify one synchronization choice in the thesis methods section.",
+            ]
+        )
+    _write_markdown(out_dir / "SYNC_ABLATION_INTERPRETATION.md", sync_lines)
+
+    orient_lines = [
+        "# Orientation method downstream comparison",
+        "",
+        "Compares orientation filters by downstream separability/classification, not filter diagnostics alone.",
+        "",
+    ]
+    if orientation_table.empty:
+        orient_lines.append("- No orientation-specific subset met minimum data requirements.")
+    else:
+        best_orient = orientation_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
+        orient_lines.extend(
+            [
+                f"- Best orientation method: **{best_orient['variant']}** ({best_orient['balanced_accuracy']:.3f} balanced accuracy).",
+                "- Treat this as task-level evidence for orientation choice in the final thesis pipeline.",
+            ]
+        )
+    _write_markdown(out_dir / "ORIENTATION_DOWNSTREAM_INTERPRETATION.md", orient_lines)
+
+    fam_lines = [
+        "# Feature-family ablation (physically grounded)",
+        "",
+        "Family drops are interpreted via physical dynamics, not generic model importance only.",
+        "",
+    ]
+    if family_table.empty:
+        fam_lines.append("- Feature-family ablation did not produce comparable variants in this run.")
+    else:
+        baseline = family_table[family_table["variant"] == "all_fused"]
+        base_score = float(baseline.iloc[0]["balanced_accuracy"]) if not baseline.empty else np.nan
+        fam_lines.append(f"- Baseline (`all_fused`) balanced accuracy: **{base_score:.3f}**." if np.isfinite(base_score) else "- Baseline score unavailable.")
+        minus_rows = family_table[family_table["variant"].str.startswith("minus_")].copy()
+        if not minus_rows.empty and np.isfinite(base_score):
+            minus_rows["delta_vs_all_fused"] = minus_rows["balanced_accuracy"] - base_score
+            minus_rows = minus_rows.sort_values("delta_vs_all_fused")
+            fam_lines.append("")
+            for _, row in minus_rows.iterrows():
+                fam = str(row["variant"]).replace("minus_", "", 1)
+                meaning = family_meaning.get(fam, "Physical interpretation not specified in config.")
+                fam_lines.append(
+                    f"- `{row['variant']}`: Δ balanced accuracy {row['delta_vs_all_fused']:+.3f}. "
+                    f"Physical meaning: {meaning}"
+                )
+    _write_markdown(out_dir / "FEATURE_FAMILY_INTERPRETATION.md", fam_lines)
 
 
 def run_evaluation_report(
@@ -680,3 +829,83 @@ def run_evaluation_report(
         "thesis_table": out_dir / "thesis_table_model_metrics.csv",
         "classification": out_dir / "classification_summary.csv",
     }
+
+
+def run_primary_thesis_bundle(
+    features_fused_csv: Path,
+    out_dir: Path,
+    *,
+    config_path: Path | None = None,
+    random_state: int = 42,
+) -> dict[str, Path]:
+    """Run the primary thesis bundle and export compact secondary ablation artifacts."""
+    outputs = run_evaluation_report(
+        features_fused_csv,
+        out_dir,
+        config_path=config_path,
+        random_state=random_state,
+    )
+    out_dir = Path(out_dir)
+    cfg = _load_config(config_path)
+    comparison_df = pd.read_csv(out_dir / "classification_summary.csv")
+
+    core_table = _compact_best_model_table(comparison_df, "feature_source")
+    core_table.to_csv(out_dir / "primary_feature_source_comparison.csv", index=False)
+
+    sync_table = _compact_best_model_table(comparison_df, "sync_method")
+    sync_table.to_csv(out_dir / "sync_ablation_compact.csv", index=False)
+    _plot_compact_ablation(
+        sync_table,
+        title="Downstream impact by synchronization method",
+        out_path=out_dir / "sync_ablation_compact.png",
+    )
+
+    orientation_table = _compact_best_model_table(comparison_df, "orientation_method")
+    orientation_table.to_csv(out_dir / "orientation_downstream_comparison.csv", index=False)
+    _plot_compact_ablation(
+        orientation_table,
+        title="Downstream impact by orientation method",
+        out_path=out_dir / "orientation_downstream_comparison.png",
+    )
+
+    family_table = _compact_best_model_table(comparison_df, "feature_family_ablation")
+    family_table.to_csv(out_dir / "feature_family_ablation_compact.csv", index=False)
+    _plot_compact_ablation(
+        family_table,
+        title="Feature-family ablation (balanced accuracy)",
+        out_path=out_dir / "feature_family_ablation_compact.png",
+    )
+    family_meaning = (
+        cfg.get("feature_family_ablation", {}).get("physical_meaning", {})
+        if isinstance(cfg.get("feature_family_ablation"), dict)
+        else {}
+    )
+
+    _write_primary_interpretations(
+        out_dir=out_dir,
+        core_table=core_table,
+        sync_table=sync_table,
+        orientation_table=orientation_table,
+        family_table=family_table,
+        family_meaning=family_meaning if isinstance(family_meaning, dict) else {},
+    )
+
+    thesis_bundle_lines = [
+        "# Thesis experiment bundle (primary + secondary)",
+        "",
+        "## Primary result (thesis claim)",
+        "- `primary_feature_source_comparison.csv`",
+        "- `thesis_table_model_metrics.csv`",
+        "- `cm_feature_source_*.png`",
+        "- `feature_importance_feature_source_*.csv`",
+        "- `PRIMARY_INTERPRETATION.md`",
+        "",
+        "## Secondary ablations (supporting analyses)",
+        "- `sync_ablation_compact.csv`, `sync_ablation_compact.png`, `SYNC_ABLATION_INTERPRETATION.md`",
+        "- `orientation_downstream_comparison.csv`, `orientation_downstream_comparison.png`, `ORIENTATION_DOWNSTREAM_INTERPRETATION.md`",
+        "- `feature_family_ablation_compact.csv`, `feature_family_ablation_compact.png`, `FEATURE_FAMILY_INTERPRETATION.md`",
+    ]
+    _write_markdown(out_dir / "THESIS_EXPERIMENT_BUNDLE.md", thesis_bundle_lines)
+
+    outputs["primary_bundle"] = out_dir / "THESIS_EXPERIMENT_BUNDLE.md"
+    return outputs
