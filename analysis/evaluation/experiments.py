@@ -30,6 +30,8 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+from protocol.thesis_protocol import evaluate_qc_sections, load_locked_split_manifest
+
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -47,6 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "rider_only": {"include_prefixes": ["arduino__"]},
         "fused": {"include_prefixes": []},
     },
+    "evaluation_seed": 42,
     "feature_family_ablation": {
         "enabled": True,
         "families": {
@@ -56,7 +59,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "sprinting": ["sprint_"],
             "disagreement": ["disagree_"],
         },
+        "physical_meaning": {
+            "bumps": "Vertical shock transfer and road-surface disturbance sensitivity.",
+            "braking": "Longitudinal deceleration load transfer and rider stabilization response.",
+            "cornering": "Lateral acceleration / lean-coupled dynamics in turns.",
+            "sprinting": "High-cadence rider-driven oscillation and power bursts.",
+            "disagreement": "Bike-rider coupling mismatch (relative motion and damping behaviour).",
+        },
     },
+    "locked_split_manifest": None,
+    "qc_policy": {"enabled": False},
 }
 
 
@@ -178,10 +190,10 @@ def _variance_table(df: pd.DataFrame, label_col: str, feature_cols: list[str]) -
     return pd.DataFrame(rows).sort_values("ratio_between_within", ascending=False)
 
 
-def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path) -> None:
+def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path, *, random_state: int) -> None:
     if X.shape[0] < 3 or X.shape[1] < 2:
         return
-    pca = PCA(n_components=2, random_state=42)
+    pca = PCA(n_components=2, random_state=random_state)
     X2 = pca.fit_transform(X)
     fig, ax = plt.subplots(figsize=(6, 5))
     for cls in np.unique(y):
@@ -196,15 +208,15 @@ def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_kmeans_overlay(X: np.ndarray, y: np.ndarray, out_path: Path) -> None:
+def _plot_kmeans_overlay(X: np.ndarray, y: np.ndarray, out_path: Path, *, random_state: int) -> None:
     if X.shape[0] < 6 or X.shape[1] < 2:
         return
-    pca = PCA(n_components=2, random_state=42)
+    pca = PCA(n_components=2, random_state=random_state)
     X2 = pca.fit_transform(X)
     k = len(np.unique(y))
     if k < 2:
         return
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km = KMeans(n_clusters=k, random_state=random_state, n_init=10)
     clusters = km.fit_predict(X2)
     fig, ax = plt.subplots(figsize=(6, 5))
     sc = ax.scatter(X2[:, 0], X2[:, 1], c=clusters, cmap="tab10", s=25, alpha=0.75)
@@ -306,6 +318,8 @@ def _save_feature_importance(
     y: pd.Series,
     out_csv: Path,
     max_features: int,
+    *,
+    random_state: int,
 ) -> None:
     clf = model.named_steps["clf"]
     imputer = model.named_steps["imputer"]
@@ -323,7 +337,7 @@ def _save_feature_importance(
     else:
         Xt2 = Xt
         clf.fit(Xt2, y)
-        perm = permutation_importance(clf, Xt2, y, n_repeats=8, random_state=42)
+        perm = permutation_importance(clf, Xt2, y, n_repeats=8, random_state=random_state)
         score = perm.importances_mean
 
     imp = pd.DataFrame({"feature": X.columns, "importance": score, "model": model_name})
@@ -353,6 +367,148 @@ def _recommendation_text(classifier_table: pd.DataFrame, separability_table: pd.
     return "Evidence is weak-to-moderate; emphasize descriptive trends, uncertainty, and need for more labeled sessions."
 
 
+def _compact_best_model_table(comparison_df: pd.DataFrame, comparison: str) -> pd.DataFrame:
+    columns = [
+        "comparison",
+        "variant",
+        "model",
+        "split_protocol",
+        "n_samples",
+        "n_groups",
+        "n_features",
+        "balanced_accuracy",
+        "f1_macro",
+        "precision_macro",
+        "recall_macro",
+    ]
+    if comparison_df.empty:
+        return pd.DataFrame(columns=columns)
+    sub = comparison_df[comparison_df["comparison"] == comparison].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=columns)
+    sub = sub.sort_values(["variant", "balanced_accuracy"], ascending=[True, False])
+    best = sub.groupby("variant", as_index=False).head(1).copy()
+    best["comparison"] = comparison
+    return best[columns].sort_values("balanced_accuracy", ascending=False)
+
+
+def _plot_compact_ablation(table: pd.DataFrame, *, title: str, out_path: Path) -> None:
+    if table.empty:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar(table["variant"], table["balanced_accuracy"], color="#3b82f6", alpha=0.9)
+    ax.set_ylim(0, min(1.0, max(0.4, float(table["balanced_accuracy"].max()) + 0.1)))
+    ax.set_ylabel("Balanced accuracy")
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.25)
+    for b, val in zip(bars, table["balanced_accuracy"], strict=False):
+        ax.text(b.get_x() + b.get_width() / 2, val + 0.01, f"{val:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
+
+
+def _write_markdown(path: Path, lines: list[str]) -> None:
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_primary_interpretations(
+    *,
+    out_dir: Path,
+    core_table: pd.DataFrame,
+    sync_table: pd.DataFrame,
+    orientation_table: pd.DataFrame,
+    family_table: pd.DataFrame,
+    family_meaning: dict[str, str],
+) -> None:
+    core_lines = [
+        "# Primary thesis comparison",
+        "",
+        "Main comparison: **bike-only vs rider-only vs fused features** under recording-aware validation.",
+        "",
+    ]
+    if core_table.empty:
+        core_lines.append(
+            "- Insufficient labeled recordings/classes for a stable primary comparison in this run."
+        )
+    else:
+        top = core_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
+        core_lines.extend(
+            [
+                f"- Best variant: **{top['variant']}** using `{top['model']}`.",
+                f"- Balanced accuracy: **{top['balanced_accuracy']:.3f}**, macro-F1: **{top['f1_macro']:.3f}**.",
+                f"- Validation protocol: `{top['split_protocol']}` across {int(top['n_groups'])} recordings.",
+                "",
+                "Interpretation: If fused outperforms bike-only and rider-only, the thesis claim is supported:",
+                "joint bike+rider dynamics carry behavior signal not captured by either sensor alone.",
+            ]
+        )
+    _write_markdown(out_dir / "PRIMARY_INTERPRETATION.md", core_lines)
+
+    sync_lines = [
+        "# Synchronization ablation (downstream impact)",
+        "",
+        "Compares downstream classification quality by sync method using fused features.",
+        "",
+    ]
+    if sync_table.empty:
+        sync_lines.append("- No sync-specific subset met minimum data requirements.")
+    else:
+        best_sync = sync_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
+        sync_lines.extend(
+            [
+                f"- Best sync method: **{best_sync['variant']}** ({best_sync['balanced_accuracy']:.3f} balanced accuracy).",
+                "- This ablation measures practical impact, not only alignment diagnostics.",
+                "- Use this table/figure to justify one synchronization choice in the thesis methods section.",
+            ]
+        )
+    _write_markdown(out_dir / "SYNC_ABLATION_INTERPRETATION.md", sync_lines)
+
+    orient_lines = [
+        "# Orientation method downstream comparison",
+        "",
+        "Compares orientation filters by downstream separability/classification, not filter diagnostics alone.",
+        "",
+    ]
+    if orientation_table.empty:
+        orient_lines.append("- No orientation-specific subset met minimum data requirements.")
+    else:
+        best_orient = orientation_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
+        orient_lines.extend(
+            [
+                f"- Best orientation method: **{best_orient['variant']}** ({best_orient['balanced_accuracy']:.3f} balanced accuracy).",
+                "- Treat this as task-level evidence for orientation choice in the final thesis pipeline.",
+            ]
+        )
+    _write_markdown(out_dir / "ORIENTATION_DOWNSTREAM_INTERPRETATION.md", orient_lines)
+
+    fam_lines = [
+        "# Feature-family ablation (physically grounded)",
+        "",
+        "Family drops are interpreted via physical dynamics, not generic model importance only.",
+        "",
+    ]
+    if family_table.empty:
+        fam_lines.append("- Feature-family ablation did not produce comparable variants in this run.")
+    else:
+        baseline = family_table[family_table["variant"] == "all_fused"]
+        base_score = float(baseline.iloc[0]["balanced_accuracy"]) if not baseline.empty else np.nan
+        fam_lines.append(f"- Baseline (`all_fused`) balanced accuracy: **{base_score:.3f}**." if np.isfinite(base_score) else "- Baseline score unavailable.")
+        minus_rows = family_table[family_table["variant"].str.startswith("minus_")].copy()
+        if not minus_rows.empty and np.isfinite(base_score):
+            minus_rows["delta_vs_all_fused"] = minus_rows["balanced_accuracy"] - base_score
+            minus_rows = minus_rows.sort_values("delta_vs_all_fused")
+            fam_lines.append("")
+            for _, row in minus_rows.iterrows():
+                fam = str(row["variant"]).replace("minus_", "", 1)
+                meaning = family_meaning.get(fam, "Physical interpretation not specified in config.")
+                fam_lines.append(
+                    f"- `{row['variant']}`: Δ balanced accuracy {row['delta_vs_all_fused']:+.3f}. "
+                    f"Physical meaning: {meaning}"
+                )
+    _write_markdown(out_dir / "FEATURE_FAMILY_INTERPRETATION.md", fam_lines)
+
+
 def run_evaluation_report(
     features_fused_csv: Path,
     out_dir: Path,
@@ -362,6 +518,8 @@ def run_evaluation_report(
 ) -> dict[str, Path]:
     """Run lightweight, config-driven experiments and write thesis-ready artifacts."""
     cfg = _load_config(config_path)
+    effective_seed = int(cfg.get("evaluation_seed", random_state)) if random_state is not None else int(cfg.get("evaluation_seed", 42))
+    np.random.seed(effective_seed)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -382,6 +540,27 @@ def run_evaluation_report(
 
     feature_cols = _numeric_feature_columns(df, exclude=meta_cols)
     feature_sets = _resolve_feature_sets(feature_cols, cfg)
+
+    qc_policy = cfg.get("qc_policy", {}) if isinstance(cfg.get("qc_policy"), dict) else {}
+    if qc_policy.get("enabled", False):
+        sections_root = Path(features_fused_csv).resolve().parents[1] / "sections"
+        dec = evaluate_qc_sections(
+            [str(x) for x in df.get("section_id", pd.Series(dtype=str)).dropna().astype(str).tolist()],
+            sections_root=sections_root,
+            policy=qc_policy,
+        )
+        if not dec.empty:
+            df = df.merge(dec[["section_id", "include", "exclusion_reasons", "qc_tier"]], on="section_id", how="left")
+            df["include"] = df["include"].fillna(False).astype(bool)
+            dec.to_csv(out_dir / "qc_inclusion_section_decisions.csv", index=False)
+            summary = {
+                "total_sections": int(len(dec)),
+                "included_sections": int(dec["include"].sum()),
+                "excluded_sections": int((~dec["include"]).sum()),
+                "exclusion_reason_counts": dec.loc[~dec["include"], "exclusion_reasons"].value_counts().to_dict(),
+            }
+            (out_dir / "qc_inclusion_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            df = df[df["include"]].copy()
 
     valid = df[label_col].notna() & df[group_col].notna()
     dfe = df.loc[valid].copy()
@@ -412,6 +591,9 @@ def run_evaluation_report(
     enc = LabelEncoder()
     y = pd.Series(enc.fit_transform(dfe[label_col]), index=dfe.index)
     groups = dfe[group_col]
+    locked_splits = None
+    if cfg.get("locked_split_manifest"):
+        locked_splits = load_locked_split_manifest(Path(cfg["locked_split_manifest"]))
 
     comparisons: dict[str, dict[str, list[str]]] = {
         "feature_source": feature_sets,
@@ -449,23 +631,76 @@ def run_evaluation_report(
             if dsub.empty or dsub[group_col].nunique() < 2 or dsub[label_col].nunique() < 2:
                 continue
 
-            y_sub = pd.Series(enc.transform(dsub[label_col]), index=dsub.index)
-            fold_df, y_true_dict, y_pred_dict, models = _run_group_cv(
-                dsub[use_cols].replace([np.inf, -np.inf], np.nan),
-                y_sub,
-                dsub[group_col],
-                random_state=random_state,
-            )
-            if fold_df.empty:
+            usable_cols = [
+                c for c in use_cols
+                if pd.to_numeric(dsub[c], errors="coerce").notna().sum() >= 2
+            ]
+            if len(usable_cols) < 2:
                 continue
 
-            mean_df = (
-                fold_df.groupby("model", as_index=False)[
-                    ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
-                ]
-                .mean()
-                .sort_values("balanced_accuracy", ascending=False)
-            )
+            y_sub = pd.Series(enc.transform(dsub[label_col]), index=dsub.index)
+            if locked_splits is None:
+                fold_df, y_true_dict, y_pred_dict, models = _run_group_cv(
+                    dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
+                    y_sub,
+                    dsub[group_col],
+                    random_state=random_state,
+                )
+                if fold_df.empty:
+                    continue
+                mean_df = (
+                    fold_df.groupby("model", as_index=False)[
+                        ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
+                    ]
+                    .mean()
+                    .sort_values("balanced_accuracy", ascending=False)
+                )
+            else:
+                split_for_rec = {rec: split for split, recs in locked_splits.items() for rec in recs}
+                dsub = dsub[dsub[group_col].astype(str).isin(split_for_rec)].copy()
+                if dsub.empty:
+                    continue
+                dsub["_locked_split"] = dsub[group_col].astype(str).map(split_for_rec)
+                tr = dsub[dsub["_locked_split"] == "train"]
+                eval_splits = [s for s in ("validation", "val", "test") if s in set(dsub["_locked_split"].astype(str))]
+                if tr.empty or not eval_splits or tr[label_col].nunique() < 2:
+                    continue
+                models = _run_group_cv(
+                    tr[usable_cols].replace([np.inf, -np.inf], np.nan),
+                    pd.Series(enc.transform(tr[label_col]), index=tr.index),
+                    tr[group_col],
+                    random_state=random_state,
+                )[3]
+                locked_rows: list[dict[str, Any]] = []
+                y_true_dict = {}
+                y_pred_dict = {}
+                for model_name, pipe in models.items():
+                    pipe.fit(tr[usable_cols].replace([np.inf, -np.inf], np.nan), pd.Series(enc.transform(tr[label_col]), index=tr.index))
+                    y_true_all: list[int] = []
+                    y_pred_all: list[int] = []
+                    for split_name in eval_splits:
+                        dv = dsub[dsub["_locked_split"] == split_name]
+                        if dv.empty:
+                            continue
+                        y_true_eval = pd.Series(enc.transform(dv[label_col]), index=dv.index).to_numpy()
+                        y_pred_eval = pipe.predict(dv[usable_cols].replace([np.inf, -np.inf], np.nan))
+                        met = _evaluate_predictions(y_true_eval, y_pred_eval)
+                        locked_rows.append({"model": model_name, "fold": split_name, **met})
+                        y_true_all.extend(y_true_eval.tolist())
+                        y_pred_all.extend(y_pred_eval.tolist())
+                    y_true_dict[model_name] = np.asarray(y_true_all, dtype=int)
+                    y_pred_dict[model_name] = np.asarray(y_pred_all, dtype=int)
+                fold_df = pd.DataFrame(locked_rows)
+                if fold_df.empty:
+                    continue
+                mean_df = (
+                    fold_df.groupby("model", as_index=False)[
+                        ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
+                    ]
+                    .mean()
+                    .sort_values("balanced_accuracy", ascending=False)
+                )
+
             for _, row in mean_df.iterrows():
                 comparison_rows.append(
                     {
@@ -474,11 +709,12 @@ def run_evaluation_report(
                         "model": row["model"],
                         "n_samples": len(dsub),
                         "n_groups": int(dsub[group_col].nunique()),
-                        "n_features": len(use_cols),
+                        "n_features": len(usable_cols),
                         "balanced_accuracy": float(row["balanced_accuracy"]),
                         "precision_macro": float(row["precision_macro"]),
                         "recall_macro": float(row["recall_macro"]),
                         "f1_macro": float(row["f1_macro"]),
+                        "split_protocol": "locked_manifest" if locked_splits is not None else "logo_cv",
                     }
                 )
 
@@ -497,17 +733,18 @@ def run_evaluation_report(
             _save_feature_importance(
                 model_full,
                 best_model_name,
-                dsub[use_cols].replace([np.inf, -np.inf], np.nan),
+                dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
                 y_sub,
                 out_dir / f"feature_importance_{comparison}_{variant}_{best_model_name}.csv",
                 max_features=int(cfg["max_importance_features"]),
+                random_state=random_state,
             )
 
             minority_ratio = dsub[label_col].value_counts(normalize=True).min()
             if minority_ratio < float(cfg["pr_curve_minority_ratio_threshold"]):
-                clf = model_full.fit(dsub[use_cols].replace([np.inf, -np.inf], np.nan), y_sub)
+                clf = model_full.fit(dsub[usable_cols].replace([np.inf, -np.inf], np.nan), y_sub)
                 if hasattr(clf.named_steps["clf"], "predict_proba"):
-                    y_prob = clf.predict_proba(dsub[use_cols].replace([np.inf, -np.inf], np.nan))
+                    y_prob = clf.predict_proba(dsub[usable_cols].replace([np.inf, -np.inf], np.nan))
                     minority_class = int(np.argmin(dsub[label_col].value_counts().sort_index().to_numpy()))
                     y_bin = (y_sub.to_numpy() == minority_class).astype(int)
                     if y_prob.shape[1] > minority_class:
@@ -522,12 +759,18 @@ def run_evaluation_report(
 
     # unsupervised plots from fused set, for limited labels cases
     fused_cols = feature_sets.get("fused", feature_cols)
-    Xf = dfe[fused_cols].replace([np.inf, -np.inf], np.nan)
-    imp = SimpleImputer(strategy="median")
-    Xfi = imp.fit_transform(Xf)
-    Xfs = StandardScaler().fit_transform(Xfi)
-    _plot_pca_clusters(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_label_scatter.png")
-    _plot_kmeans_overlay(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_kmeans_scatter.png")
+    usable_fused_cols = [
+        c for c in fused_cols
+        if c in dfe.columns and pd.to_numeric(dfe[c], errors="coerce").notna().sum() >= 2
+    ]
+    if len(usable_fused_cols) >= 2 and not dfe.empty:
+        Xf = dfe[usable_fused_cols].replace([np.inf, -np.inf], np.nan)
+        imp = SimpleImputer(strategy="median")
+        Xfi = imp.fit_transform(Xf)
+        if Xfi.shape[1] >= 2:
+            Xfs = StandardScaler().fit_transform(Xfi)
+            _plot_pca_clusters(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_label_scatter.png", random_state=effective_seed)
+            _plot_kmeans_overlay(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_kmeans_scatter.png", random_state=effective_seed)
 
     recommendation = _recommendation_text(comparison_df, effect_df)
 
@@ -541,12 +784,14 @@ def run_evaluation_report(
         "inputs": {
             "features_csv": str(features_fused_csv),
             "config": str(config_path) if config_path else "default",
+            "evaluation_seed": effective_seed,
         },
         "dataset": {
             "rows_after_label_filter": int(len(dfe)),
             "groups": int(dfe[group_col].nunique()) if not dfe.empty else 0,
             "classes": sorted(dfe[label_col].unique().tolist()) if not dfe.empty else [],
         },
+        "seeds": {"evaluation_seed": effective_seed},
         "outputs": {
             "classification_summary": str(out_dir / "classification_summary.csv"),
             "thesis_table_model_metrics": str(out_dir / "thesis_table_model_metrics.csv"),
@@ -559,6 +804,7 @@ def run_evaluation_report(
         "recommendation": recommendation,
     }
     (out_dir / "evaluation_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out_dir / "evaluation_manifest.json").write_text(json.dumps({"evaluation_seed": effective_seed, "inputs": summary["inputs"], "dataset": summary["dataset"]}, indent=2), encoding="utf-8")
 
     md = [
         "# Evaluation Summary",
@@ -583,3 +829,83 @@ def run_evaluation_report(
         "thesis_table": out_dir / "thesis_table_model_metrics.csv",
         "classification": out_dir / "classification_summary.csv",
     }
+
+
+def run_primary_thesis_bundle(
+    features_fused_csv: Path,
+    out_dir: Path,
+    *,
+    config_path: Path | None = None,
+    random_state: int = 42,
+) -> dict[str, Path]:
+    """Run the primary thesis bundle and export compact secondary ablation artifacts."""
+    outputs = run_evaluation_report(
+        features_fused_csv,
+        out_dir,
+        config_path=config_path,
+        random_state=random_state,
+    )
+    out_dir = Path(out_dir)
+    cfg = _load_config(config_path)
+    comparison_df = pd.read_csv(out_dir / "classification_summary.csv")
+
+    core_table = _compact_best_model_table(comparison_df, "feature_source")
+    core_table.to_csv(out_dir / "primary_feature_source_comparison.csv", index=False)
+
+    sync_table = _compact_best_model_table(comparison_df, "sync_method")
+    sync_table.to_csv(out_dir / "sync_ablation_compact.csv", index=False)
+    _plot_compact_ablation(
+        sync_table,
+        title="Downstream impact by synchronization method",
+        out_path=out_dir / "sync_ablation_compact.png",
+    )
+
+    orientation_table = _compact_best_model_table(comparison_df, "orientation_method")
+    orientation_table.to_csv(out_dir / "orientation_downstream_comparison.csv", index=False)
+    _plot_compact_ablation(
+        orientation_table,
+        title="Downstream impact by orientation method",
+        out_path=out_dir / "orientation_downstream_comparison.png",
+    )
+
+    family_table = _compact_best_model_table(comparison_df, "feature_family_ablation")
+    family_table.to_csv(out_dir / "feature_family_ablation_compact.csv", index=False)
+    _plot_compact_ablation(
+        family_table,
+        title="Feature-family ablation (balanced accuracy)",
+        out_path=out_dir / "feature_family_ablation_compact.png",
+    )
+    family_meaning = (
+        cfg.get("feature_family_ablation", {}).get("physical_meaning", {})
+        if isinstance(cfg.get("feature_family_ablation"), dict)
+        else {}
+    )
+
+    _write_primary_interpretations(
+        out_dir=out_dir,
+        core_table=core_table,
+        sync_table=sync_table,
+        orientation_table=orientation_table,
+        family_table=family_table,
+        family_meaning=family_meaning if isinstance(family_meaning, dict) else {},
+    )
+
+    thesis_bundle_lines = [
+        "# Thesis experiment bundle (primary + secondary)",
+        "",
+        "## Primary result (thesis claim)",
+        "- `primary_feature_source_comparison.csv`",
+        "- `thesis_table_model_metrics.csv`",
+        "- `cm_feature_source_*.png`",
+        "- `feature_importance_feature_source_*.csv`",
+        "- `PRIMARY_INTERPRETATION.md`",
+        "",
+        "## Secondary ablations (supporting analyses)",
+        "- `sync_ablation_compact.csv`, `sync_ablation_compact.png`, `SYNC_ABLATION_INTERPRETATION.md`",
+        "- `orientation_downstream_comparison.csv`, `orientation_downstream_comparison.png`, `ORIENTATION_DOWNSTREAM_INTERPRETATION.md`",
+        "- `feature_family_ablation_compact.csv`, `feature_family_ablation_compact.png`, `FEATURE_FAMILY_INTERPRETATION.md`",
+    ]
+    _write_markdown(out_dir / "THESIS_EXPERIMENT_BUNDLE.md", thesis_bundle_lines)
+
+    outputs["primary_bundle"] = out_dir / "THESIS_EXPERIMENT_BUNDLE.md"
+    return outputs

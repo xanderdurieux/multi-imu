@@ -1,39 +1,72 @@
 # Thesis Reporting Module
 
-Generates publication-ready thesis figures/tables from processed section outputs.
+This module is for **thesis-facing artifacts** only.
+It now prefers explicit diagnostics over placeholder outputs.
 
-## Run
+## Primary thesis question (foregrounded)
+
+> **Does fusing bike-mounted and rider-mounted IMU signals improve scenario-discrimination evidence over single-sensor baselines under recording-aware evaluation?**
+
+Reporting artifacts are organized around evidence for that question.
+Secondary analyses (sync and orientation variants) are retained as supporting context, not primary claims.
+
+## Commands
+
+From `analysis/`:
+
+### 1) Full thesis report bundle
 
 ```bash
-cd analysis
 uv run python -m reporting --output-dir outputs/thesis_report_bundle
 ```
 
-## Scripts
+Generates figures/tables + manifest + caption metadata.
 
-- **Figure generation**: `reporting/figure_gen.py`
-- **Table generation**: `reporting/table_gen.py`
-- **Bundle orchestration + captions**: `reporting/bundle.py`
+### 2) Core figures only (deterministic, thesis chapter ready)
 
-## Output structure
+```bash
+uv run python -m reporting --core-figures-only --output-dir outputs/thesis_report_bundle
+```
 
-- `report_figures/`: final thesis/report figures (`.pdf` + `.png`)
-- `report_tables/`: report tables (`.csv` + `.md`)
-- `draft_debug/`: reserved for exploratory/debug visuals (kept separate from final plots)
-- `caption_suggestions.md`: candidate captions + chapter placement suggestions
-- `bundle_manifest.json`: machine-readable summary of generated artifacts
+Generates only core figures into:
+- `outputs/thesis_report_bundle/core_thesis_figures/`
 
-## Generated artifacts
+with deterministic stems:
+- `thesis_core_01_pipeline_overview.{pdf,png}`
+- `thesis_core_02_orientation_filter_comparison.{pdf,png}`
+- `thesis_core_03_event_centered_bike_vs_rider.{pdf,png}`
+- `thesis_core_04_feature_separability.{pdf,png}`
+- `thesis_core_05_success_failure_case_studies.{pdf,png}`
 
-- Pipeline overview figure.
-- Quality summary table.
-- Synchronization method comparison table.
-- Orientation filter comparison figure.
-- Event-centered bike vs rider figure.
-- Feature separability figure.
-- Single-sensor vs dual-sensor comparison table.
-- Representative success/failure case-study figure + table.
+and writes `core_figures_manifest.json`.
 
-## Repository note
+## Artifact status semantics (honest by design)
 
-The committed sample bundle keeps text artifacts (`manifest`, `captions`, `csv/md` tables) in git. Binary figures (`.pdf`, `.png`) are generated locally by the command above and intentionally not versioned to keep PR tooling compatible.
+Each artifact has one status in the manifest:
+- `real_result`: generated from available upstream outputs.
+- `skipped`: intentionally omitted in current mode.
+- `missing_prerequisite`: required upstream inputs absent; no placeholder file emitted.
+- `failed`: runtime failure occurred while attempting generation.
+
+This allows thesis bundles to distinguish **evidence** from **missing evidence**.
+
+## Success/failure case mining
+
+Representative case studies are mined automatically from section-level signals:
+- QC tier (`qc_section.json`),
+- quality/confidence metrics (`quality_metadata.json`),
+- downstream proxy separability from labeled feature tables.
+
+Outputs:
+- `report_tables/case_studies.csv` and `.md` (compact qualitative table),
+- `report_figures/success_failure_case_studies.{pdf,png}` (compact plot).
+
+## Assumptions and limitations (explicit)
+
+- If labeled features are sparse or absent, downstream proxy signals are unavailable.
+- Case mining uses a transparent composite signal for selection; it is an aid for discussion, not a causal proof.
+- Figures are deterministic in naming and output location, but numerical values depend on upstream workflow outputs.
+
+## Caption alignment
+
+`caption_suggestions.md` now includes artifact status so captions can be matched only to generated evidence.

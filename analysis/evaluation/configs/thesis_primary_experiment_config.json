@@ -27,10 +27,20 @@
       "cornering": ["corner_"],
       "sprinting": ["sprint_"],
       "disagreement": ["disagree_"]
+    },
+    "physical_meaning": {
+      "bumps": "Vertical shock transfer and road-surface disturbance sensitivity.",
+      "braking": "Longitudinal deceleration load transfer and rider stabilization response.",
+      "cornering": "Lateral acceleration / lean-coupled dynamics in turns.",
+      "sprinting": "High-cadence rider-driven oscillation and power bursts.",
+      "disagreement": "Bike-rider coupling mismatch (relative motion and damping behaviour)."
     }
   },
   "locked_split_manifest": null,
   "qc_policy": {
-    "enabled": false
+    "enabled": true,
+    "allow_qc_tiers": ["good", "marginal"],
+    "min_calibration_confidence": 0.35,
+    "min_orientation_confidence": 0.35
   }
 }

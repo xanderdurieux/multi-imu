@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -9,13 +9,17 @@ import pandas as pd
 
 from common.paths import sections_root
 
+from .case_mining import mine_success_failure_cases
+from .figure_gen import STATUS_MISSING, STATUS_REAL
+
 
 @dataclass
 class TableArtifact:
     key: str
-    path: Path
     status: str
     note: str
+    path: Path | None = None
+    diagnostics: list[str] = field(default_factory=list)
 
 
 def _sections() -> list[Path]:
@@ -68,23 +72,16 @@ def make_quality_summary_table(out_dir: Path) -> TableArtifact:
         )
     out_stem = out_dir / "quality_summary"
     if not rows:
-        df = pd.DataFrame([
-            {
-                "section_id": "N/A",
-                "overall_quality_score": np.nan,
-                "overall_quality_label": "no_data",
-                "usability": "no_data",
-                "qc_tier": "no_data",
-                "sync_confidence": np.nan,
-                "orientation_quality_score": np.nan,
-            }
-        ])
-        path = _write(df, out_stem)
-        return TableArtifact("quality_summary", path, "placeholder", "no quality metadata found")
+        return TableArtifact(
+            "quality_summary",
+            STATUS_MISSING,
+            "No quality metadata found.",
+            diagnostics=["Missing prerequisite: sections/*/quality_metadata.json or qc_section.json"],
+        )
 
     df = pd.DataFrame(rows).sort_values("overall_quality_score", ascending=False, na_position="last")
     path = _write(df, out_stem)
-    return TableArtifact("quality_summary", path, "ok", f"sections={len(df)}")
+    return TableArtifact("quality_summary", STATUS_REAL, f"sections={len(df)}", path)
 
 
 def make_sync_method_comparison_table(out_dir: Path) -> TableArtifact:
@@ -103,9 +100,12 @@ def make_sync_method_comparison_table(out_dir: Path) -> TableArtifact:
         )
     out_stem = out_dir / "sync_method_comparison"
     if not rows:
-        df = pd.DataFrame([{"sync_method": "no_data", "n_sections": 0, "sync_confidence_median": np.nan, "sync_residual_quality_median": np.nan}])
-        path = _write(df, out_stem)
-        return TableArtifact("sync_method_comparison", path, "placeholder", "no sync metadata")
+        return TableArtifact(
+            "sync_method_comparison",
+            STATUS_MISSING,
+            "No synchronization metadata found.",
+            diagnostics=["Missing prerequisite: sections/*/quality_metadata.json with chosen_sync_method/sync_* fields."],
+        )
 
     sec_df = pd.DataFrame(rows)
     agg = (
@@ -118,7 +118,7 @@ def make_sync_method_comparison_table(out_dir: Path) -> TableArtifact:
         .sort_values(["n_sections", "sync_confidence_median"], ascending=[False, False])
     )
     path = _write(agg, out_stem)
-    return TableArtifact("sync_method_comparison", path, "ok", f"methods={len(agg)}")
+    return TableArtifact("sync_method_comparison", STATUS_REAL, f"methods={len(agg)}", path)
 
 
 def make_single_vs_dual_sensor_table(out_dir: Path) -> TableArtifact:
@@ -156,9 +156,12 @@ def make_single_vs_dual_sensor_table(out_dir: Path) -> TableArtifact:
         )
     out_stem = out_dir / "single_vs_dual_sensor_comparison"
     if not rows:
-        df = pd.DataFrame([{"comparison": "no_data", "sporsa_only_median": np.nan, "arduino_only_median": np.nan, "dual_sensor_median": np.nan}])
-        path = _write(df, out_stem)
-        return TableArtifact("single_vs_dual_sensor_comparison", path, "placeholder", "no labeled feature sets")
+        return TableArtifact(
+            "single_vs_dual_sensor_comparison",
+            STATUS_MISSING,
+            "No labeled feature sets found for sensor-source comparison.",
+            diagnostics=["Missing prerequisite: sections/*/features/features.csv with scenario_label and source-prefixed feature columns."],
+        )
 
     sec_df = pd.DataFrame(rows)
     agg = pd.DataFrame(
@@ -172,33 +175,33 @@ def make_single_vs_dual_sensor_table(out_dir: Path) -> TableArtifact:
         ]
     )
     path = _write(agg, out_stem)
-    return TableArtifact("single_vs_dual_sensor_comparison", path, "ok", f"sections={len(sec_df)}")
+    return TableArtifact("single_vs_dual_sensor_comparison", STATUS_REAL, f"sections={len(sec_df)}", path)
 
 
 def make_case_study_table(out_dir: Path) -> TableArtifact:
-    rows = []
-    for section in _sections():
-        qm = _read_json(section / "quality_metadata.json")
-        qc = _read_json(section / "qc_section.json")
-        if not qm:
-            continue
-        rows.append(
-            {
-                "section_id": section.name,
-                "overall_quality_score": qm.get("overall_quality_score", np.nan),
-                "usability": qm.get("overall_usability_category", "unknown"),
-                "quality_label": qm.get("overall_quality_label", "unknown"),
-                "qc_tier": qc.get("quality_tier", "unknown"),
-                "key_flags": "|".join(qm.get("quality_flags", [])[:3]),
-            }
-        )
+    mined = mine_success_failure_cases(_sections(), n_success=2, n_failure=2)
     out_stem = out_dir / "case_studies"
-    if len(rows) < 2:
-        df = pd.DataFrame([{"section_id": "N/A", "quality_label": "no_data", "key_flags": "insufficient_quality_metadata"}])
-        path = _write(df, out_stem)
-        return TableArtifact("case_studies", path, "placeholder", "insufficient cases")
+    if mined.cases.empty:
+        return TableArtifact(
+            "case_studies",
+            STATUS_MISSING,
+            "Could not mine representative success/failure cases.",
+            diagnostics=mined.diagnostics,
+        )
 
-    df = pd.DataFrame(rows).dropna(subset=["overall_quality_score"]).sort_values("overall_quality_score")
-    subset = pd.concat([df.head(2), df.tail(2)], ignore_index=True)
-    path = _write(subset, out_stem)
-    return TableArtifact("case_studies", path, "ok", "2 failure + 2 success exemplars")
+    keep_cols = [
+        "case_type",
+        "section_id",
+        "composite_signal_score",
+        "overall_quality_score",
+        "sync_confidence",
+        "orientation_quality_score",
+        "downstream_proxy_score",
+        "qc_tier",
+        "quality_label",
+        "usability",
+        "key_flags",
+    ]
+    df = mined.cases[keep_cols].sort_values(["case_type", "composite_signal_score"], ascending=[True, False])
+    path = _write(df, out_stem)
+    return TableArtifact("case_studies", STATUS_REAL, f"cases={len(df)}", path, diagnostics=mined.diagnostics)

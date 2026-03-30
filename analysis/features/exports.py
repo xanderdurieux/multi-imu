@@ -12,6 +12,7 @@ import pandas as pd
 
 from common.paths import recordings_root, sections_root
 from common.paths import parse_section_folder_name
+from protocol.thesis_protocol import evaluate_qc_sections
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ def export_thesis_feature_tables(
     *,
     out_dir: Path | None = None,
     recordings_root_path: Path | None = None,
+    qc_policy: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     recordings_root_path = recordings_root_path or recordings_root()
     data_root = recordings_root_path.parent
@@ -160,6 +162,21 @@ def export_thesis_feature_tables(
             "fused": out / "features_fused.csv",
             "manifest": out / "export_manifest.json",
         }
+
+    decision_csv = None
+    if qc_policy and qc_policy.get("enabled", False) and "section_id" in full.columns:
+        dec = evaluate_qc_sections(
+            [str(x) for x in full["section_id"].dropna().astype(str).tolist()],
+            sections_root=data_root / "sections",
+            policy=qc_policy,
+        )
+        if not dec.empty:
+            full = full.merge(dec[["section_id", "include", "exclusion_reasons", "qc_tier"]], on="section_id", how="left")
+            full["include"] = full["include"].fillna(False).astype(bool)
+            decision_csv = out / "qc_inclusion_section_decisions.csv"
+            dec.to_csv(decision_csv, index=False)
+            if qc_policy.get("exclude_from_exports", True):
+                full = full[full["include"]].copy()
 
     bike = _subset_columns(full, "sporsa__")
     rider = _subset_columns(full, "arduino__")
@@ -182,6 +199,12 @@ def export_thesis_feature_tables(
         "fused_columns": len(fused.columns),
         "outputs": {k: str(v) for k, v in paths.items()},
     }
+    if decision_csv is not None:
+        manifest["qc_policy"] = {
+            "enabled": True,
+            "decision_csv": str(decision_csv),
+            "rows_retained": int(len(full)),
+        }
     mpath = out / "export_manifest.json"
     mpath.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     paths["manifest"] = mpath

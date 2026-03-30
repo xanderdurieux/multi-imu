@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -58,6 +59,27 @@ def _missing_required_parsed_inputs(recording_path: Path) -> list[str]:
     required = ("sporsa.csv", "arduino.csv")
     return [name for name in required if not (parsed_dir / name).is_file()]
 
+
+def _log_stage(
+    message: str,
+    *,
+    recording_id: str | None = None,
+    section_id: str | None = None,
+    step: str | None = None,
+    status: str | None = None,
+    reason: str | None = None,
+) -> None:
+    extra = {
+        "run_id": os.environ.get("MULTI_IMU_RUN_ID"),
+        "recording_id": recording_id,
+        "section_id": section_id,
+        "step": step,
+        "status": status,
+        "reason": reason,
+    }
+    log.info(message, extra=extra)
+
+
 def run_pipeline(
     *,
     session: str | None = None,
@@ -73,6 +95,7 @@ def run_pipeline(
     event_config_path: Path | None = None,
     event_centered_features: bool = False,
     min_event_confidence: float = 0.0,
+    qc_policy: dict[str, Any] | None = None,
 ) -> list[RecordingStatus]:
     """Execute pipeline steps for all recordings. Returns status objects (also written to JSON/CSV).
 
@@ -106,10 +129,24 @@ def run_pipeline(
                     need_parse = True
                     break
         if need_parse:
-            log.info("Parsing session %s", session)
+            _log_stage(
+                f"START parse session={session}",
+                step="parse",
+                status="start",
+            )
             process_session(session)
+            _log_stage(
+                f"FINISH parse session={session}",
+                step="parse",
+                status="ok",
+            )
         else:
-            log.info("Skipping parse (outputs exist, use --force to redo)")
+            _log_stage(
+                "SKIP parse",
+                step="parse",
+                status="skipped",
+                reason="outputs_exist",
+            )
 
     recordings = _recordings_list(root)
     if only_recordings:
@@ -150,7 +187,12 @@ def run_pipeline(
             # sync
             sync_done = (rpath / "synced" / "sync_info.json").is_file()
             if force or not sync_done:
-                log.info("[%s] Synchronizing (%s)", rec_id, sync_mode)
+                _log_stage(
+                    f"START sync method={sync_mode}",
+                    recording_id=rec_id,
+                    step="sync",
+                    status="start",
+                )
                 if sync_mode == "best":
                     synchronize_recording_all_methods(rec_id)
                 else:
@@ -161,8 +203,21 @@ def run_pipeline(
                         f"Synchronization did not produce synced outputs for {rec_id}"
                     )
                 rs.steps["sync"] = "ok"
+                _log_stage(
+                    "FINISH sync",
+                    recording_id=rec_id,
+                    step="sync",
+                    status="ok",
+                )
             else:
                 rs.steps["sync"] = "skipped"
+                _log_stage(
+                    "SKIP sync",
+                    recording_id=rec_id,
+                    step="sync",
+                    status="skipped",
+                    reason="sync_info_exists",
+                )
 
             # split sections
             sec_root = _sections_root()
@@ -171,7 +226,12 @@ def run_pipeline(
                 for d in sec_root.iterdir()
             ) if sec_root.exists() else False
             if force or not has_sections:
-                log.info("[%s] Splitting sections from stage %s", rec_id, split_stage)
+                _log_stage(
+                    f"START split stage={split_stage}",
+                    recording_id=rec_id,
+                    step="split",
+                    status="start",
+                )
                 split_recording(
                     rec_id,
                     stage=split_stage,
@@ -179,8 +239,21 @@ def run_pipeline(
                     sync=True,
                 )
                 rs.steps["split"] = "ok"
+                _log_stage(
+                    "FINISH split",
+                    recording_id=rec_id,
+                    step="split",
+                    status="ok",
+                )
             else:
                 rs.steps["split"] = "skipped"
+                _log_stage(
+                    "SKIP split",
+                    recording_id=rec_id,
+                    step="split",
+                    status="skipped",
+                    reason="sections_exist",
+                )
 
             sync_method = _read_selected_sync_method(rpath)
 
@@ -192,43 +265,116 @@ def run_pipeline(
                     # calibrate
                     cal_marker = sdir / "calibrated" / "calibration.json"
                     if force or not cal_marker.is_file():
+                        _log_stage(
+                            "START calibrate",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="calibrate",
+                            status="start",
+                        )
                         calibrate_section(
                             sdir.resolve(),
                             write_plots=not no_plots,
                             frame_alignment=frame_alignment,
                         )
                         ss.steps["calibrate"] = "ok"
+                        _log_stage(
+                            "FINISH calibrate",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="calibrate",
+                            status="ok",
+                        )
                     else:
                         ss.steps["calibrate"] = "skipped"
+                        _log_stage(
+                            "SKIP calibrate",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="calibrate",
+                            status="skipped",
+                            reason="calibration_exists",
+                        )
 
                     # orientation
                     orient_marker = sdir / "orientation" / "orientation_stats.json"
                     if force or not orient_marker.is_file():
+                        _log_stage(
+                            f"START orientation variant={orientation_filter}",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="orientation",
+                            status="start",
+                        )
                         estimate_section(
                             sdir.resolve(),
                             write_plots=not no_plots,
                             variants=[orientation_filter],
                         )
                         ss.steps["orientation"] = "ok"
+                        _log_stage(
+                            "FINISH orientation",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="orientation",
+                            status="ok",
+                        )
                     else:
                         ss.steps["orientation"] = "skipped"
+                        _log_stage(
+                            "SKIP orientation",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="orientation",
+                            status="skipped",
+                            reason="orientation_exists",
+                        )
 
                     # derived signals
                     derived_meta = sdir / "derived" / "derived_signals_meta.json"
                     if force or not derived_meta.is_file():
+                        _log_stage(
+                            "START derived",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="derived",
+                            status="start",
+                        )
                         derive_section_signals(
                             sdir.resolve(),
                             orientation_variant=orientation_filter,
                             include_normalized=True,
                         )
                         ss.steps["derived"] = "ok"
+                        _log_stage(
+                            "FINISH derived",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="derived",
+                            status="ok",
+                        )
                     else:
                         ss.steps["derived"] = "skipped"
+                        _log_stage(
+                            "SKIP derived",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="derived",
+                            status="skipped",
+                            reason="derived_exists",
+                        )
 
                     # features
                     feat_csv = sdir / "features" / "features.csv"
                     evt_csv = sdir / "events" / "event_candidates.csv"
                     if force or not evt_csv.is_file():
+                        _log_stage(
+                            "START events",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="events",
+                            status="start",
+                        )
                         config_override = None
                         if event_config_path is not None and event_config_path.exists():
                             config_override = json.loads(event_config_path.read_text(encoding="utf-8"))
@@ -238,10 +384,32 @@ def run_pipeline(
                             write_plots=not no_plots,
                         )
                         ss.steps["events"] = "ok"
+                        _log_stage(
+                            "FINISH events",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="events",
+                            status="ok",
+                        )
                     else:
                         ss.steps["events"] = "skipped"
+                        _log_stage(
+                            "SKIP events",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="events",
+                            status="skipped",
+                            reason="events_exist",
+                        )
 
                     if force or not feat_csv.is_file():
+                        _log_stage(
+                            "START features",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="features",
+                            status="start",
+                        )
                         event_windows = None
                         if event_centered_features:
                             event_windows = load_event_windows(
@@ -265,14 +433,43 @@ def run_pipeline(
 
                         warn_unlabeled_windows(pd.read_csv(feat_csv))
                         ss.steps["features"] = "ok"
+                        _log_stage(
+                            "FINISH features",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="features",
+                            status="ok",
+                        )
                     else:
                         ss.steps["features"] = "skipped"
+                        _log_stage(
+                            "SKIP features",
+                            recording_id=rec_id,
+                            section_id=section_id,
+                            step="features",
+                            status="skipped",
+                            reason="features_exists",
+                        )
 
+                    _log_stage(
+                        "START qc",
+                        recording_id=rec_id,
+                        section_id=section_id,
+                        step="qc",
+                        status="start",
+                    )
                     write_section_qc(
                         sdir.resolve(),
                         orientation_variant=orientation_filter,
                     )
                     ss.steps["qc"] = "ok"
+                    _log_stage(
+                        "FINISH qc",
+                        recording_id=rec_id,
+                        section_id=section_id,
+                        step="qc",
+                        status="ok",
+                    )
                 except Exception as exc:
                     ss.error = str(exc)
                     log.exception("[%s/%s] step failed", rec_id, sdir.name)
@@ -287,7 +484,7 @@ def run_pipeline(
     if not skip_exports:
         from features.exports import export_qc_summaries, export_thesis_feature_tables
 
-        export_thesis_feature_tables(recordings_root_path=root)
+        export_thesis_feature_tables(recordings_root_path=root, qc_policy=qc_policy)
         export_qc_summaries(recordings_root_path=root)
 
     _write_run_summary(root, statuses)
@@ -423,6 +620,10 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s %(message)s",
+    )
+    log.warning(
+        "DEPRECATED: direct 'python -m pipeline' execution is legacy. "
+        "Use 'python -m workflow --config configs/workflow.thesis.json' for thesis runs."
     )
 
     only = frozenset(args.recordings) if args.recordings else None
