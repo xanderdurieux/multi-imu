@@ -103,3 +103,18 @@ All stochastic components use a single seed (`evaluation_seed`):
 Seed priority is: `--seed` CLI > `MULTI_IMU_EVALUATION_SEED` > config `evaluation_seed` > default `42`.
 
 The chosen seed is recorded in `evaluation_summary.json` and `evaluation_manifest.json`.
+
+
+## Assumptions and limitations
+
+- Classification outputs are evidence for separability under the chosen labels/protocol, not proof of causal sensor superiority in all riding contexts.
+- If `scenario_label` quality is low or class balance is poor, downstream metrics can be unstable; inspect support counts before claiming gains.
+- Secondary ablations (sync/orientation/family) are supportive and should be framed as sensitivity analyses unless independently powered.
+- QC policy and locked split settings materially change inclusion and metrics; keep them explicit in thesis methods.
+
+## Unsupported claims to avoid
+
+Do **not** claim:
+- universal real-time robustness from offline evaluation only,
+- clinical-grade or safety-critical reliability without dedicated validation,
+- generalization to unseen devices/populations not represented in the dataset.

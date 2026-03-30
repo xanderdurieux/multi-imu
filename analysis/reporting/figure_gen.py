@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,13 +11,38 @@ import pandas as pd
 from common.paths import sections_root
 from visualization.thesis_style import THESIS_COLORS, apply_matplotlib_thesis_style
 
+from .case_mining import mine_success_failure_cases
+
+STATUS_REAL = "real_result"
+STATUS_SKIPPED = "skipped"
+STATUS_MISSING = "missing_prerequisite"
+STATUS_FAILED = "failed"
+
 
 @dataclass
 class FigureArtifact:
     key: str
-    path: Path
     status: str
     note: str
+    path: Path | None = None
+    diagnostics: list[str] = field(default_factory=list)
+
+
+CORE_FIGURE_KEYS = [
+    "pipeline_overview",
+    "orientation_filter_comparison",
+    "event_centered_bike_vs_rider",
+    "feature_separability",
+    "success_failure_case_studies",
+]
+
+CORE_FIGURE_FILENAMES = {
+    "pipeline_overview": "thesis_core_01_pipeline_overview",
+    "orientation_filter_comparison": "thesis_core_02_orientation_filter_comparison",
+    "event_centered_bike_vs_rider": "thesis_core_03_event_centered_bike_vs_rider",
+    "feature_separability": "thesis_core_04_feature_separability",
+    "success_failure_case_studies": "thesis_core_05_success_failure_case_studies",
+}
 
 
 def _safe_csv(path: Path) -> pd.DataFrame:
@@ -35,14 +61,6 @@ def _save(fig: plt.Figure, path: Path) -> None:
     plt.close(fig)
 
 
-def _placeholder_figure(title: str, message: str) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(7.2, 3.6))
-    ax.axis("off")
-    ax.text(0.5, 0.62, title, ha="center", va="center", fontsize=12, weight="bold")
-    ax.text(0.5, 0.42, message, ha="center", va="center", fontsize=10)
-    return fig
-
-
 def _section_dirs(limit: int | None = None) -> list[Path]:
     root = sections_root()
     if not root.exists():
@@ -51,7 +69,7 @@ def _section_dirs(limit: int | None = None) -> list[Path]:
     return dirs[:limit] if limit else dirs
 
 
-def make_pipeline_overview_figure(out_dir: Path) -> FigureArtifact:
+def make_pipeline_overview_figure(out_dir: Path, *, filename: str = "pipeline_overview") -> FigureArtifact:
     apply_matplotlib_thesis_style()
     fig, ax = plt.subplots(figsize=(10.5, 2.8))
     ax.axis("off")
@@ -76,12 +94,14 @@ def make_pipeline_overview_figure(out_dir: Path) -> FigureArtifact:
         if i < len(stages) - 1:
             ax.annotate("", xy=(xpos[i + 1] - 0.06, 0.5), xytext=(x + 0.06, 0.5), arrowprops={"arrowstyle": "->", "lw": 1.5})
     ax.set_title("Pipeline Overview for Thesis Reporting")
-    stem = out_dir / "pipeline_overview"
+    stem = out_dir / filename
     _save(fig, stem)
-    return FigureArtifact("pipeline_overview", stem.with_suffix(".pdf"), "ok", "")
+    return FigureArtifact("pipeline_overview", STATUS_REAL, "Generated from static pipeline schematic.", stem.with_suffix(".pdf"))
 
 
-def make_orientation_filter_comparison_figure(out_dir: Path, *, max_sections: int = 24) -> FigureArtifact:
+def make_orientation_filter_comparison_figure(
+    out_dir: Path, *, max_sections: int = 24, filename: str = "orientation_filter_comparison"
+) -> FigureArtifact:
     apply_matplotlib_thesis_style()
     rows: list[pd.DataFrame] = []
     for section in _section_dirs(limit=max_sections):
@@ -92,11 +112,13 @@ def make_orientation_filter_comparison_figure(out_dir: Path, *, max_sections: in
         df["section_id"] = section.name
         rows.append(df)
 
-    stem = out_dir / "orientation_filter_comparison"
     if not rows:
-        fig = _placeholder_figure("Orientation Filter Comparison", "No comparison_dynamic metrics found in processed section folders.")
-        _save(fig, stem)
-        return FigureArtifact("orientation_filter_comparison", stem.with_suffix(".pdf"), "placeholder", "no metrics")
+        return FigureArtifact(
+            "orientation_filter_comparison",
+            STATUS_MISSING,
+            "No orientation comparison metrics available.",
+            diagnostics=["Missing prerequisite: sections/*/orientation/comparison_dynamic/sporsa_per_filter_metrics.csv"],
+        )
 
     all_df = pd.concat(rows, ignore_index=True)
     agg = (
@@ -107,6 +129,14 @@ def make_orientation_filter_comparison_figure(out_dir: Path, *, max_sections: in
         )
         .dropna()
     )
+    if agg.empty:
+        return FigureArtifact(
+            "orientation_filter_comparison",
+            STATUS_MISSING,
+            "Metrics were found but required numeric fields are empty.",
+            diagnostics=["Required columns: variant, event_separability_index, smoothness_responsiveness_ratio"],
+        )
+
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
     ax.scatter(
         agg["smoothness_responsiveness_ratio"],
@@ -120,12 +150,21 @@ def make_orientation_filter_comparison_figure(out_dir: Path, *, max_sections: in
     ax.set_xlabel("Smoothness/Responsiveness ratio (median)")
     ax.set_ylabel("Event separability index (median)")
     ax.set_title("Orientation Filter Trade-off Across Sections")
+    stem = out_dir / filename
     _save(fig, stem)
-    return FigureArtifact("orientation_filter_comparison", stem.with_suffix(".pdf"), "ok", f"variants={len(agg)}")
+    return FigureArtifact("orientation_filter_comparison", STATUS_REAL, f"variants={len(agg)}", stem.with_suffix(".pdf"))
 
 
-def make_event_centered_plot(out_dir: Path, *, window_s: float = 2.0) -> FigureArtifact:
+def make_event_centered_plot(out_dir: Path, *, window_s: float = 2.0, filename: str = "event_centered_bike_vs_rider") -> FigureArtifact:
     apply_matplotlib_thesis_style()
+    if not _section_dirs():
+        return FigureArtifact(
+            "event_centered_bike_vs_rider",
+            STATUS_MISSING,
+            "No processed sections found.",
+            diagnostics=["Missing prerequisite: data/sections/* generated by workflow."],
+        )
+
     for section in _section_dirs():
         events = _safe_csv(section / "events" / "event_candidates.csv")
         bike = _safe_csv(section / "sporsa.csv")
@@ -164,17 +203,21 @@ def make_event_centered_plot(out_dir: Path, *, window_s: float = 2.0) -> FigureA
         ax.set_ylabel("Acceleration norm (m/s²)")
         ax.set_title(f"Event-centered bike vs rider response ({section.name})")
         ax.legend(loc="best")
-        stem = out_dir / "event_centered_bike_vs_rider"
+        stem = out_dir / filename
         _save(fig, stem)
-        return FigureArtifact("event_centered_bike_vs_rider", stem.with_suffix(".pdf"), "ok", section.name)
+        return FigureArtifact("event_centered_bike_vs_rider", STATUS_REAL, f"section={section.name}", stem.with_suffix(".pdf"))
 
-    stem = out_dir / "event_centered_bike_vs_rider"
-    fig = _placeholder_figure("Event-centered Bike vs Rider Plot", "No section had both event candidates and synchronized bike/rider streams.")
-    _save(fig, stem)
-    return FigureArtifact("event_centered_bike_vs_rider", stem.with_suffix(".pdf"), "placeholder", "no eligible section")
+    return FigureArtifact(
+        "event_centered_bike_vs_rider",
+        STATUS_MISSING,
+        "No section satisfied event + synchronized dual-IMU prerequisites.",
+        diagnostics=[
+            "Need one section containing events/event_candidates.csv with confidence+time_s and both sporsa.csv/arduino.csv with timestamp,ax,ay,az."
+        ],
+    )
 
 
-def make_feature_separability_plot(out_dir: Path) -> FigureArtifact:
+def make_feature_separability_plot(out_dir: Path, *, filename: str = "feature_separability") -> FigureArtifact:
     apply_matplotlib_thesis_style()
     frames: list[pd.DataFrame] = []
     for section in _section_dirs():
@@ -186,18 +229,23 @@ def make_feature_separability_plot(out_dir: Path) -> FigureArtifact:
             continue
         numeric["scenario_label"] = df["scenario_label"].astype(str)
         frames.append(numeric)
-    stem = out_dir / "feature_separability"
     if not frames:
-        fig = _placeholder_figure("Feature Separability", "No feature tables with scenario labels were found.")
-        _save(fig, stem)
-        return FigureArtifact("feature_separability", stem.with_suffix(".pdf"), "placeholder", "no labeled features")
+        return FigureArtifact(
+            "feature_separability",
+            STATUS_MISSING,
+            "No labeled feature tables were found.",
+            diagnostics=["Missing prerequisite: sections/*/features/features.csv with scenario_label + numeric feature columns."],
+        )
 
     all_df = pd.concat(frames, ignore_index=True)
     all_df = all_df[all_df["scenario_label"].str.strip() != ""]
     if all_df.empty:
-        fig = _placeholder_figure("Feature Separability", "Scenario labels are missing/empty across loaded features.")
-        _save(fig, stem)
-        return FigureArtifact("feature_separability", stem.with_suffix(".pdf"), "placeholder", "empty labels")
+        return FigureArtifact(
+            "feature_separability",
+            STATUS_MISSING,
+            "Scenario labels are present but empty.",
+            diagnostics=["Provide non-empty scenario_label annotations for at least two classes."],
+        )
 
     y = all_df["scenario_label"]
     feature_cols = [c for c in all_df.columns if c != "scenario_label"]
@@ -215,9 +263,12 @@ def make_feature_separability_plot(out_dir: Path) -> FigureArtifact:
         score = float(np.var(means) / np.mean(vars_))
         scores.append((col, score))
     if len(scores) < 2:
-        fig = _placeholder_figure("Feature Separability", "Not enough informative features for separability plotting.")
-        _save(fig, stem)
-        return FigureArtifact("feature_separability", stem.with_suffix(".pdf"), "placeholder", "insufficient informative features")
+        return FigureArtifact(
+            "feature_separability",
+            STATUS_MISSING,
+            "Not enough informative features for separability plotting.",
+            diagnostics=["Need >=2 numeric features with per-class support (>=4 samples per class across >=2 classes)."],
+        )
 
     top = [name for name, _ in sorted(scores, key=lambda t: t[1], reverse=True)[:2]]
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
@@ -228,36 +279,50 @@ def make_feature_separability_plot(out_dir: Path) -> FigureArtifact:
     ax.set_ylabel(top[1])
     ax.set_title("Feature separability across labeled scenarios")
     ax.legend(loc="best", ncols=2, fontsize=8)
+    stem = out_dir / filename
     _save(fig, stem)
-    return FigureArtifact("feature_separability", stem.with_suffix(".pdf"), "ok", f"features={top[0]}, {top[1]}")
+    return FigureArtifact("feature_separability", STATUS_REAL, f"features={top[0]}, {top[1]}", stem.with_suffix(".pdf"))
 
 
-def make_success_failure_case_plot(out_dir: Path) -> FigureArtifact:
+def make_success_failure_case_plot(out_dir: Path, *, filename: str = "success_failure_case_studies") -> FigureArtifact:
     apply_matplotlib_thesis_style()
-    rows = []
-    for section in _section_dirs():
-        qpath = section / "quality_metadata.json"
-        if not qpath.exists():
-            continue
-        try:
-            q = pd.read_json(qpath, typ="series")
-        except Exception:
-            continue
-        rows.append({"section": section.name, "score": float(q.get("overall_quality_score", np.nan))})
-    stem = out_dir / "success_failure_case_studies"
-    if len(rows) < 2:
-        fig = _placeholder_figure("Success / Failure Case Studies", "Need at least two sections with quality metadata to compare outcomes.")
-        _save(fig, stem)
-        return FigureArtifact("success_failure_case_studies", stem.with_suffix(".pdf"), "placeholder", "insufficient sections")
+    mined = mine_success_failure_cases(_section_dirs(), n_success=2, n_failure=2)
+    if mined.cases.empty:
+        return FigureArtifact(
+            "success_failure_case_studies",
+            STATUS_MISSING,
+            "No representative case-study candidates could be mined.",
+            diagnostics=mined.diagnostics,
+        )
 
-    df = pd.DataFrame(rows).dropna().sort_values("score")
-    chosen = pd.concat([df.head(1), df.tail(1)], ignore_index=True)
-    fig, ax = plt.subplots(figsize=(6.8, 4.0))
-    bars = ax.bar(["Failure exemplar", "Success exemplar"], chosen["score"], color=[THESIS_COLORS[3], THESIS_COLORS[2]])
-    for b, sec in zip(bars, chosen["section"], strict=True):
-        ax.text(b.get_x() + b.get_width() / 2.0, b.get_height() + 0.02, sec, ha="center", va="bottom", fontsize=8)
-    ax.set_ylim(0, 1.05)
-    ax.set_ylabel("Overall quality score")
-    ax.set_title("Representative success/failure section case studies")
+    fig, ax = plt.subplots(figsize=(9.2, 4.8))
+    ordered = mined.cases.sort_values(["case_type", "composite_signal_score"], ascending=[True, True]).reset_index(drop=True)
+    xpos = np.arange(len(ordered))
+    bars = ax.bar(xpos, ordered["composite_signal_score"], color=[THESIS_COLORS[3] if t == "failure" else THESIS_COLORS[2] for t in ordered["case_type"]])
+    ax.set_xticks(xpos)
+    ax.set_xticklabels(ordered["section_id"], rotation=25, ha="right", fontsize=8)
+    ax.set_ylabel("Composite quality signal score")
+    ax.set_title("Representative success/failure sections (QC + confidence + downstream proxy)")
+    for bar, ctype in zip(bars, ordered["case_type"], strict=True):
+        ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height() + 0.02, ctype, ha="center", va="bottom", fontsize=8)
+    ax.set_ylim(0.0, max(1.02, float(np.nanmax(ordered["composite_signal_score"])) + 0.08))
+    stem = out_dir / filename
     _save(fig, stem)
-    return FigureArtifact("success_failure_case_studies", stem.with_suffix(".pdf"), "ok", "quality-ranked extremes")
+    return FigureArtifact("success_failure_case_studies", STATUS_REAL, f"cases={len(ordered)}", stem.with_suffix(".pdf"), diagnostics=mined.diagnostics)
+
+
+def generate_core_thesis_figures(out_dir: Path) -> list[FigureArtifact]:
+    builders: list[tuple[str, Callable[..., FigureArtifact]]] = [
+        ("pipeline_overview", make_pipeline_overview_figure),
+        ("orientation_filter_comparison", make_orientation_filter_comparison_figure),
+        ("event_centered_bike_vs_rider", make_event_centered_plot),
+        ("feature_separability", make_feature_separability_plot),
+        ("success_failure_case_studies", make_success_failure_case_plot),
+    ]
+    artifacts: list[FigureArtifact] = []
+    for key, fn in builders:
+        try:
+            artifacts.append(fn(out_dir, filename=CORE_FIGURE_FILENAMES[key]))
+        except Exception as exc:
+            artifacts.append(FigureArtifact(key, STATUS_FAILED, f"Unhandled error: {exc}"))
+    return artifacts
