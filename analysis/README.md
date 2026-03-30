@@ -2,7 +2,7 @@
 
 This repository contains the offline processing stack for dual-IMU cycling data (bike-mounted Sporsa + rider-mounted Arduino).
 
-## 1) Reproducible thesis entry point (official)
+## 1) Reproducible thesis entry points (official)
 
 Run the full workflow via a single config file:
 
@@ -12,8 +12,17 @@ uv sync
 uv run python -m workflow --config configs/workflow.thesis.json
 ```
 
-- `workflow` is the top-level orchestrator for thesis-quality reruns.
+- `workflow` is the top-level orchestrator for thesis-quality reruns (data → fused features export).
 - `pipeline` is an internal stage runner and is **not** the recommended thesis command.
+
+Then run the **primary thesis experiment bundle** (recommended analysis path):
+
+```bash
+uv run python -m evaluation data/exports/features_fused.csv data/exports/thesis_primary --primary --config evaluation/configs/thesis_primary_experiment_config.json --seed 42
+```
+
+This is the canonical thesis comparison:
+**bike-only vs rider-only vs fused**, with recording-aware validation and compact secondary ablations (sync/orientation/feature family).
 
 ---
 
@@ -27,7 +36,7 @@ uv run python -m workflow --config configs/workflow.thesis.json
 | Calibration / orientation | World-frame calibration and orientation estimation | `calibration/`, `orientation/` |
 | Feature extraction | Window features + exports | `features/`, `derived/` |
 | Event analysis | Candidate event extraction from derived/orientation streams | `events/` |
-| Evaluation | Baselines and experiment runs | `evaluation/` |
+| Evaluation | Primary thesis bundle + secondary ablations | `evaluation/` |
 | Visualization / reporting | Plots, QC views, and section summary artifacts | `visualization/`, `pipeline/section_summary.py` |
 
 ---
