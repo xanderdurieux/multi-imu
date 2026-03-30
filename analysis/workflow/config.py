@@ -40,6 +40,7 @@ class WorkflowConfig:
     event_centered_features: bool = False
     min_event_confidence: float = 0.0
     evaluation_seed: int = 42
+    thesis_protocol_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +77,7 @@ def _validate_config_payload(payload: dict[str, Any], *, source: Path) -> None:
     _require_type(payload, "event_centered_features", bool)
     _require_type(payload, "min_event_confidence", (int, float))
     _require_type(payload, "evaluation_seed", int)
+    _require_type(payload, "thesis_protocol_path", (str, type(None)))
 
     recordings = payload.get("recordings")
     if isinstance(recordings, list):

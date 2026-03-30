@@ -74,6 +74,7 @@ def _resolve_paths(cfg: WorkflowConfig, config_path: Path) -> WorkflowConfig:
             "data_root": _maybe_resolve(cfg.data_root) or cfg.data_root,
             "labels_path": _maybe_resolve(cfg.labels_path),
             "event_config_path": _maybe_resolve(cfg.event_config_path),
+            "thesis_protocol_path": _maybe_resolve(cfg.thesis_protocol_path),
         }
     )
 
@@ -159,6 +160,20 @@ def _write_provenance_manifest(
     return manifest_path
 
 
+def _load_qc_policy(protocol_path: str | None) -> dict[str, Any] | None:
+    if not protocol_path:
+        return None
+    try:
+        payload = json.loads(Path(protocol_path).read_text(encoding="utf-8"))
+    except Exception:
+        logging.warning("Could not load thesis protocol config: %s", protocol_path)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    qc_policy = payload.get("qc_policy")
+    return qc_policy if isinstance(qc_policy, dict) else None
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -198,6 +213,7 @@ def main(argv: list[str] | None = None) -> None:
         event_config_path=Path(cfg.event_config_path) if cfg.event_config_path else None,
         event_centered_features=cfg.event_centered_features,
         min_event_confidence=cfg.min_event_confidence,
+        qc_policy=_load_qc_policy(cfg.thesis_protocol_path),
     )
     selected_recordings = [s.recording_id for s in statuses]
     output_root = Path(cfg.data_root).resolve()

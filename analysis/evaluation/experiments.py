@@ -30,6 +30,8 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+from protocol.thesis_protocol import evaluate_qc_sections, load_locked_split_manifest
+
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -58,6 +60,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "disagreement": ["disagree_"],
         },
     },
+    "locked_split_manifest": None,
+    "qc_policy": {"enabled": False},
 }
 
 
@@ -388,6 +392,27 @@ def run_evaluation_report(
     feature_cols = _numeric_feature_columns(df, exclude=meta_cols)
     feature_sets = _resolve_feature_sets(feature_cols, cfg)
 
+    qc_policy = cfg.get("qc_policy", {}) if isinstance(cfg.get("qc_policy"), dict) else {}
+    if qc_policy.get("enabled", False):
+        sections_root = Path(features_fused_csv).resolve().parents[1] / "sections"
+        dec = evaluate_qc_sections(
+            [str(x) for x in df.get("section_id", pd.Series(dtype=str)).dropna().astype(str).tolist()],
+            sections_root=sections_root,
+            policy=qc_policy,
+        )
+        if not dec.empty:
+            df = df.merge(dec[["section_id", "include", "exclusion_reasons", "qc_tier"]], on="section_id", how="left")
+            df["include"] = df["include"].fillna(False).astype(bool)
+            dec.to_csv(out_dir / "qc_inclusion_section_decisions.csv", index=False)
+            summary = {
+                "total_sections": int(len(dec)),
+                "included_sections": int(dec["include"].sum()),
+                "excluded_sections": int((~dec["include"]).sum()),
+                "exclusion_reason_counts": dec.loc[~dec["include"], "exclusion_reasons"].value_counts().to_dict(),
+            }
+            (out_dir / "qc_inclusion_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            df = df[df["include"]].copy()
+
     valid = df[label_col].notna() & df[group_col].notna()
     dfe = df.loc[valid].copy()
     dfe[label_col] = dfe[label_col].astype(str)
@@ -417,6 +442,9 @@ def run_evaluation_report(
     enc = LabelEncoder()
     y = pd.Series(enc.fit_transform(dfe[label_col]), index=dfe.index)
     groups = dfe[group_col]
+    locked_splits = None
+    if cfg.get("locked_split_manifest"):
+        locked_splits = load_locked_split_manifest(Path(cfg["locked_split_manifest"]))
 
     comparisons: dict[str, dict[str, list[str]]] = {
         "feature_source": feature_sets,
@@ -462,22 +490,68 @@ def run_evaluation_report(
                 continue
 
             y_sub = pd.Series(enc.transform(dsub[label_col]), index=dsub.index)
-            fold_df, y_true_dict, y_pred_dict, models = _run_group_cv(
-                dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
-                y_sub,
-                dsub[group_col],
-                random_state=random_state,
-            )
-            if fold_df.empty:
-                continue
+            if locked_splits is None:
+                fold_df, y_true_dict, y_pred_dict, models = _run_group_cv(
+                    dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
+                    y_sub,
+                    dsub[group_col],
+                    random_state=random_state,
+                )
+                if fold_df.empty:
+                    continue
+                mean_df = (
+                    fold_df.groupby("model", as_index=False)[
+                        ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
+                    ]
+                    .mean()
+                    .sort_values("balanced_accuracy", ascending=False)
+                )
+            else:
+                split_for_rec = {rec: split for split, recs in locked_splits.items() for rec in recs}
+                dsub = dsub[dsub[group_col].astype(str).isin(split_for_rec)].copy()
+                if dsub.empty:
+                    continue
+                dsub["_locked_split"] = dsub[group_col].astype(str).map(split_for_rec)
+                tr = dsub[dsub["_locked_split"] == "train"]
+                eval_splits = [s for s in ("validation", "val", "test") if s in set(dsub["_locked_split"].astype(str))]
+                if tr.empty or not eval_splits or tr[label_col].nunique() < 2:
+                    continue
+                models = _run_group_cv(
+                    tr[usable_cols].replace([np.inf, -np.inf], np.nan),
+                    pd.Series(enc.transform(tr[label_col]), index=tr.index),
+                    tr[group_col],
+                    random_state=random_state,
+                )[3]
+                locked_rows: list[dict[str, Any]] = []
+                y_true_dict = {}
+                y_pred_dict = {}
+                for model_name, pipe in models.items():
+                    pipe.fit(tr[usable_cols].replace([np.inf, -np.inf], np.nan), pd.Series(enc.transform(tr[label_col]), index=tr.index))
+                    y_true_all: list[int] = []
+                    y_pred_all: list[int] = []
+                    for split_name in eval_splits:
+                        dv = dsub[dsub["_locked_split"] == split_name]
+                        if dv.empty:
+                            continue
+                        y_true_eval = pd.Series(enc.transform(dv[label_col]), index=dv.index).to_numpy()
+                        y_pred_eval = pipe.predict(dv[usable_cols].replace([np.inf, -np.inf], np.nan))
+                        met = _evaluate_predictions(y_true_eval, y_pred_eval)
+                        locked_rows.append({"model": model_name, "fold": split_name, **met})
+                        y_true_all.extend(y_true_eval.tolist())
+                        y_pred_all.extend(y_pred_eval.tolist())
+                    y_true_dict[model_name] = np.asarray(y_true_all, dtype=int)
+                    y_pred_dict[model_name] = np.asarray(y_pred_all, dtype=int)
+                fold_df = pd.DataFrame(locked_rows)
+                if fold_df.empty:
+                    continue
+                mean_df = (
+                    fold_df.groupby("model", as_index=False)[
+                        ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
+                    ]
+                    .mean()
+                    .sort_values("balanced_accuracy", ascending=False)
+                )
 
-            mean_df = (
-                fold_df.groupby("model", as_index=False)[
-                    ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
-                ]
-                .mean()
-                .sort_values("balanced_accuracy", ascending=False)
-            )
             for _, row in mean_df.iterrows():
                 comparison_rows.append(
                     {
@@ -491,6 +565,7 @@ def run_evaluation_report(
                         "precision_macro": float(row["precision_macro"]),
                         "recall_macro": float(row["recall_macro"]),
                         "f1_macro": float(row["f1_macro"]),
+                        "split_protocol": "locked_manifest" if locked_splits is not None else "logo_cv",
                     }
                 )
 

@@ -28,5 +28,9 @@
       "sprinting": ["sprint_"],
       "disagreement": ["disagree_"]
     }
+  },
+  "locked_split_manifest": null,
+  "qc_policy": {
+    "enabled": false
   }
 }

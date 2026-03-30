@@ -23,6 +23,7 @@ The default config (`configs/workflow.thesis.json`) defines:
 - whether to generate plots/exports,
 - optional session and recording filters,
 - `evaluation_seed` (top-level deterministic seed exported to provenance and propagated via `MULTI_IMU_EVALUATION_SEED`).
+- `thesis_protocol_path` for optional QC inclusion policy + locked split manifest controls.
 
 Relative paths are resolved relative to the config file location.
 

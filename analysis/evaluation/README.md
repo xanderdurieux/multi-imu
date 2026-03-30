@@ -51,6 +51,26 @@ Use `evaluation/configs/thesis_experiment_config.json` to adjust:
 - ablation families (`feature_family_ablation`)
 - minimum label counts and reporting limits
 - label/group/sync/orientation column names
+- optional `locked_split_manifest` for fixed recording-level train/validation/test splits
+- optional `qc_policy` for explicit inclusion/exclusion gates using `qc_section.json` metadata
+
+## Locked recording split protocol
+
+To force reproducible train/validation/test evaluation at recording level:
+
+1. Create a manifest (example: `evaluation/configs/locked_splits.example.json`) with disjoint `train`, `validation`, and `test` recording lists.
+2. Point `locked_split_manifest` in your experiment config to that manifest.
+3. Run evaluation normally.
+
+When enabled, evaluation trains only on `train` recordings and reports metrics on validation/test recordings only, preventing cross-recording leakage by construction.
+
+## QC-driven inclusion protocol
+
+Enable `qc_policy.enabled=true` in evaluation config to:
+- compute section-level include/exclude decisions from `qc_section.json`,
+- apply calibration and orientation confidence thresholds,
+- export `qc_inclusion_section_decisions.csv` and `qc_inclusion_summary.json`,
+- retain explicit exclusion reasons (no silent dropping).
 
 
 ## Determinism
