@@ -21,7 +21,8 @@ The default config (`configs/workflow.thesis.json`) defines:
 - selected sync/orientation/calibration methods,
 - event thresholds config path,
 - whether to generate plots/exports,
-- optional session and recording filters.
+- optional session and recording filters,
+- `evaluation_seed` (top-level deterministic seed exported to provenance and propagated via `MULTI_IMU_EVALUATION_SEED`).
 
 Relative paths are resolved relative to the config file location.
 
@@ -61,3 +62,14 @@ uv run python -m workflow --config configs/workflow.thesis.json \
 ```bash
 uv run python -m workflow --config configs/workflow.thesis.json --log-format json
 ```
+
+
+## Smoke-test fixture
+
+Use the committed fixture config to run a fast reproducibility check:
+
+```bash
+uv run python -m workflow --config tests/fixtures/thesis_smoke/workflow.fixture.json --no-plots --force
+```
+
+This produces a provenance manifest in `tests/fixtures/thesis_smoke/data/provenance/` including `seeds.evaluation_seed`.

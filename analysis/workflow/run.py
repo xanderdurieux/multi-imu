@@ -142,7 +142,8 @@ def _write_provenance_manifest(
         "selected_recordings": selected_recordings,
         "seeds": {
             "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
-            "numpy_random_seed": None,
+            "evaluation_seed": cfg.evaluation_seed,
+            "numpy_random_seed": cfg.evaluation_seed,
         },
         "output_directories": {
             "recordings_root": str(output_root / "recordings"),
@@ -181,6 +182,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = _resolve_paths(cfg, args.config.resolve())
 
     os.environ["MULTI_IMU_DATA_ROOT"] = cfg.data_root
+    os.environ["MULTI_IMU_EVALUATION_SEED"] = str(cfg.evaluation_seed)
 
     statuses = run_pipeline(
         session=cfg.session,

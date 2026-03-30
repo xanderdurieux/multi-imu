@@ -7,7 +7,7 @@ feature table (typically `features_fused.csv`).
 From the `analysis/` directory:
 
 ```bash
-uv run python -m evaluation <features_fused.csv> [out_dir] --config evaluation/configs/thesis_experiment_config.json
+uv run python -m evaluation <features_fused.csv> [out_dir] --config evaluation/configs/thesis_experiment_config.json --seed 42
 ```
 
 If `out_dir` is omitted, outputs go to:
@@ -51,3 +51,15 @@ Use `evaluation/configs/thesis_experiment_config.json` to adjust:
 - ablation families (`feature_family_ablation`)
 - minimum label counts and reporting limits
 - label/group/sync/orientation column names
+
+
+## Determinism
+
+All stochastic components use a single seed (`evaluation_seed`):
+- model initialisation,
+- PCA/KMeans projections,
+- permutation importance.
+
+Seed priority is: `--seed` CLI > `MULTI_IMU_EVALUATION_SEED` > config `evaluation_seed` > default `42`.
+
+The chosen seed is recorded in `evaluation_summary.json` and `evaluation_manifest.json`.

@@ -58,7 +58,8 @@ Use `configs/workflow.thesis.json` to control:
 - method choices (`sync_method`, `orientation_filter`, `frame_alignment`),
 - run behavior (`force`, `no_plots`, `skip_exports`),
 - event thresholds (`event_config_path`, `min_event_confidence`),
-- reproducible subset selection (`session`, `recordings`).
+- reproducible subset selection (`session`, `recordings`),
+- a top-level deterministic evaluation seed (`evaluation_seed`) exported to manifests and downstream evaluation runs.
 
 Example:
 
@@ -77,7 +78,7 @@ uv run python -m workflow --config configs/workflow.thesis.json --sync-method ca
 ## 5) Environment and dependency setup
 
 Requirements:
-- Python `>=3.13`
+- Python `>=3.11,<3.14`
 - `uv` (recommended)
 
 Setup:
@@ -114,3 +115,17 @@ The default thesis config (`configs/workflow.thesis.json`) now encodes one consi
 - `event_centered_features: true` with `min_event_confidence: 0.4` to prioritize physically plausible, detector-backed windows.
 
 Every run through `workflow` writes a provenance manifest under `data/provenance/`.
+
+
+## 8) Automated smoke test (fixture dataset)
+
+A tiny representative dataset is included under `tests/fixtures/thesis_smoke/` and exercises the canonical path:
+parse → sync → split → calibration → orientation → derived → events → features → QC → exports, then evaluation.
+
+Run it from `analysis/`:
+
+```bash
+uv run python -m unittest tests.test_thesis_workflow_smoke
+```
+
+The smoke test intentionally validates structure/metadata instead of exact numeric values, and checks deterministic evaluation by running `evaluation` twice with the same seed.

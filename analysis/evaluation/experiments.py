@@ -47,6 +47,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "rider_only": {"include_prefixes": ["arduino__"]},
         "fused": {"include_prefixes": []},
     },
+    "evaluation_seed": 42,
     "feature_family_ablation": {
         "enabled": True,
         "families": {
@@ -178,10 +179,10 @@ def _variance_table(df: pd.DataFrame, label_col: str, feature_cols: list[str]) -
     return pd.DataFrame(rows).sort_values("ratio_between_within", ascending=False)
 
 
-def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path) -> None:
+def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path, *, random_state: int) -> None:
     if X.shape[0] < 3 or X.shape[1] < 2:
         return
-    pca = PCA(n_components=2, random_state=42)
+    pca = PCA(n_components=2, random_state=random_state)
     X2 = pca.fit_transform(X)
     fig, ax = plt.subplots(figsize=(6, 5))
     for cls in np.unique(y):
@@ -196,15 +197,15 @@ def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_kmeans_overlay(X: np.ndarray, y: np.ndarray, out_path: Path) -> None:
+def _plot_kmeans_overlay(X: np.ndarray, y: np.ndarray, out_path: Path, *, random_state: int) -> None:
     if X.shape[0] < 6 or X.shape[1] < 2:
         return
-    pca = PCA(n_components=2, random_state=42)
+    pca = PCA(n_components=2, random_state=random_state)
     X2 = pca.fit_transform(X)
     k = len(np.unique(y))
     if k < 2:
         return
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km = KMeans(n_clusters=k, random_state=random_state, n_init=10)
     clusters = km.fit_predict(X2)
     fig, ax = plt.subplots(figsize=(6, 5))
     sc = ax.scatter(X2[:, 0], X2[:, 1], c=clusters, cmap="tab10", s=25, alpha=0.75)
@@ -306,6 +307,8 @@ def _save_feature_importance(
     y: pd.Series,
     out_csv: Path,
     max_features: int,
+    *,
+    random_state: int,
 ) -> None:
     clf = model.named_steps["clf"]
     imputer = model.named_steps["imputer"]
@@ -323,7 +326,7 @@ def _save_feature_importance(
     else:
         Xt2 = Xt
         clf.fit(Xt2, y)
-        perm = permutation_importance(clf, Xt2, y, n_repeats=8, random_state=42)
+        perm = permutation_importance(clf, Xt2, y, n_repeats=8, random_state=random_state)
         score = perm.importances_mean
 
     imp = pd.DataFrame({"feature": X.columns, "importance": score, "model": model_name})
@@ -362,6 +365,8 @@ def run_evaluation_report(
 ) -> dict[str, Path]:
     """Run lightweight, config-driven experiments and write thesis-ready artifacts."""
     cfg = _load_config(config_path)
+    effective_seed = int(cfg.get("evaluation_seed", random_state)) if random_state is not None else int(cfg.get("evaluation_seed", 42))
+    np.random.seed(effective_seed)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -449,9 +454,16 @@ def run_evaluation_report(
             if dsub.empty or dsub[group_col].nunique() < 2 or dsub[label_col].nunique() < 2:
                 continue
 
+            usable_cols = [
+                c for c in use_cols
+                if pd.to_numeric(dsub[c], errors="coerce").notna().sum() >= 2
+            ]
+            if len(usable_cols) < 2:
+                continue
+
             y_sub = pd.Series(enc.transform(dsub[label_col]), index=dsub.index)
             fold_df, y_true_dict, y_pred_dict, models = _run_group_cv(
-                dsub[use_cols].replace([np.inf, -np.inf], np.nan),
+                dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
                 y_sub,
                 dsub[group_col],
                 random_state=random_state,
@@ -474,7 +486,7 @@ def run_evaluation_report(
                         "model": row["model"],
                         "n_samples": len(dsub),
                         "n_groups": int(dsub[group_col].nunique()),
-                        "n_features": len(use_cols),
+                        "n_features": len(usable_cols),
                         "balanced_accuracy": float(row["balanced_accuracy"]),
                         "precision_macro": float(row["precision_macro"]),
                         "recall_macro": float(row["recall_macro"]),
@@ -497,17 +509,18 @@ def run_evaluation_report(
             _save_feature_importance(
                 model_full,
                 best_model_name,
-                dsub[use_cols].replace([np.inf, -np.inf], np.nan),
+                dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
                 y_sub,
                 out_dir / f"feature_importance_{comparison}_{variant}_{best_model_name}.csv",
                 max_features=int(cfg["max_importance_features"]),
+                random_state=random_state,
             )
 
             minority_ratio = dsub[label_col].value_counts(normalize=True).min()
             if minority_ratio < float(cfg["pr_curve_minority_ratio_threshold"]):
-                clf = model_full.fit(dsub[use_cols].replace([np.inf, -np.inf], np.nan), y_sub)
+                clf = model_full.fit(dsub[usable_cols].replace([np.inf, -np.inf], np.nan), y_sub)
                 if hasattr(clf.named_steps["clf"], "predict_proba"):
-                    y_prob = clf.predict_proba(dsub[use_cols].replace([np.inf, -np.inf], np.nan))
+                    y_prob = clf.predict_proba(dsub[usable_cols].replace([np.inf, -np.inf], np.nan))
                     minority_class = int(np.argmin(dsub[label_col].value_counts().sort_index().to_numpy()))
                     y_bin = (y_sub.to_numpy() == minority_class).astype(int)
                     if y_prob.shape[1] > minority_class:
@@ -522,12 +535,18 @@ def run_evaluation_report(
 
     # unsupervised plots from fused set, for limited labels cases
     fused_cols = feature_sets.get("fused", feature_cols)
-    Xf = dfe[fused_cols].replace([np.inf, -np.inf], np.nan)
-    imp = SimpleImputer(strategy="median")
-    Xfi = imp.fit_transform(Xf)
-    Xfs = StandardScaler().fit_transform(Xfi)
-    _plot_pca_clusters(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_label_scatter.png")
-    _plot_kmeans_overlay(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_kmeans_scatter.png")
+    usable_fused_cols = [
+        c for c in fused_cols
+        if c in dfe.columns and pd.to_numeric(dfe[c], errors="coerce").notna().sum() >= 2
+    ]
+    if len(usable_fused_cols) >= 2 and not dfe.empty:
+        Xf = dfe[usable_fused_cols].replace([np.inf, -np.inf], np.nan)
+        imp = SimpleImputer(strategy="median")
+        Xfi = imp.fit_transform(Xf)
+        if Xfi.shape[1] >= 2:
+            Xfs = StandardScaler().fit_transform(Xfi)
+            _plot_pca_clusters(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_label_scatter.png", random_state=effective_seed)
+            _plot_kmeans_overlay(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_kmeans_scatter.png", random_state=effective_seed)
 
     recommendation = _recommendation_text(comparison_df, effect_df)
 
@@ -541,12 +560,14 @@ def run_evaluation_report(
         "inputs": {
             "features_csv": str(features_fused_csv),
             "config": str(config_path) if config_path else "default",
+            "evaluation_seed": effective_seed,
         },
         "dataset": {
             "rows_after_label_filter": int(len(dfe)),
             "groups": int(dfe[group_col].nunique()) if not dfe.empty else 0,
             "classes": sorted(dfe[label_col].unique().tolist()) if not dfe.empty else [],
         },
+        "seeds": {"evaluation_seed": effective_seed},
         "outputs": {
             "classification_summary": str(out_dir / "classification_summary.csv"),
             "thesis_table_model_metrics": str(out_dir / "thesis_table_model_metrics.csv"),
@@ -559,6 +580,7 @@ def run_evaluation_report(
         "recommendation": recommendation,
     }
     (out_dir / "evaluation_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out_dir / "evaluation_manifest.json").write_text(json.dumps({"evaluation_seed": effective_seed, "inputs": summary["inputs"], "dataset": summary["dataset"]}, indent=2), encoding="utf-8")
 
     md = [
         "# Evaluation Summary",
