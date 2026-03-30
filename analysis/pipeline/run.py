@@ -52,6 +52,12 @@ def _recordings_list(recordings_root: Path) -> list[str]:
         if d.is_dir() and not d.name.startswith(".")
     )
 
+
+def _missing_required_parsed_inputs(recording_path: Path) -> list[str]:
+    parsed_dir = recording_path / "parsed"
+    required = ("sporsa.csv", "arduino.csv")
+    return [name for name in required if not (parsed_dir / name).is_file()]
+
 def run_pipeline(
     *,
     session: str | None = None,
@@ -130,6 +136,17 @@ def run_pipeline(
         rs = RecordingStatus(recording_id=rec_id)
         rpath = root / rec_id
         try:
+            missing_inputs = _missing_required_parsed_inputs(rpath)
+            if missing_inputs:
+                rs.error = (
+                    "Missing required parsed sensor input(s): "
+                    + ", ".join(sorted(missing_inputs))
+                )
+                rs.steps["sync"] = "missing_inputs"
+                log.warning("[%s] %s -- skipping recording", rec_id, rs.error)
+                statuses.append(rs)
+                continue
+
             # sync
             sync_done = (rpath / "synced" / "sync_info.json").is_file()
             if force or not sync_done:
@@ -138,6 +155,11 @@ def run_pipeline(
                     synchronize_recording_all_methods(rec_id)
                 else:
                     synchronize_recording_chosen_method(rec_id, sync_mode, quiet=True)
+                sync_done = (rpath / "synced" / "sync_info.json").is_file()
+                if not sync_done:
+                    raise FileNotFoundError(
+                        f"Synchronization did not produce synced outputs for {rec_id}"
+                    )
                 rs.steps["sync"] = "ok"
             else:
                 rs.steps["sync"] = "skipped"

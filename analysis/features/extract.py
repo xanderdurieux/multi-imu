@@ -233,11 +233,13 @@ def _window_sanity_flags(
 ) -> str:
     """Return semi-colon-separated sanity flags for degenerate windows."""
     flags: list[str] = []
+    acc_finite = acc[np.isfinite(acc)]
+    gyro_finite = gyro[np.isfinite(gyro)]
     if len(acc) < min_len or len(gyro) < min_len:
         flags.append("short_window")
-    if np.nanstd(acc) < min_std:
+    if acc_finite.size < 2 or float(np.nanstd(acc_finite)) < min_std:
         flags.append("acc_low_variance")
-    if np.nanstd(gyro) < min_std:
+    if gyro_finite.size < 2 or float(np.nanstd(gyro_finite)) < min_std:
         flags.append("gyro_low_variance")
     if np.all(~np.isfinite(acc)) or np.all(~np.isfinite(gyro)):
         flags.append("all_nan")

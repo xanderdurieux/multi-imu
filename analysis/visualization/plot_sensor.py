@@ -23,7 +23,6 @@ def prepare_sensor_axes(num_series: int, num_columns: int = 1, *, sharex: bool =
         num_columns,
         figsize=(10 * num_columns, 3 * num_series),
         sharex=sharex,
-        constrained_layout=True,
     )
 
     if num_series == 1 and num_columns == 1:
@@ -187,6 +186,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             _plot_sensor_data(ax_grid[i][0], df, time_seconds, sensor_type, args.norm)
 
         fig.suptitle(f"{plot_label} — {sensor_name}")
+        fig.subplots_adjust(top=0.90)
 
         filename = "".join([
             csv_path.stem,
@@ -194,7 +194,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             "_norm" if args.norm else "",
             ".png",
         ])
-        fig.savefig(stage_dir / filename, bbox_inches="tight")
+        fig.savefig(stage_dir / filename)
         plt.close(fig)
         print(f"[{plot_label}] {filename}")
 

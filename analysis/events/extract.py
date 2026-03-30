@@ -166,6 +166,16 @@ def _render_diagnostics(
     rider_roll = _to_float_series(rider, "tilt_roll_rate_rad_s")
     residual = _to_float_series(cross, "residual_vertical_m_s2")
 
+    n = min(len(t), len(bike_vert), len(rider_vert), len(bike_roll), len(rider_roll), len(residual))
+    if n < 4:
+        return
+    t = t[:n]
+    bike_vert = bike_vert[:n]
+    rider_vert = rider_vert[:n]
+    bike_roll = bike_roll[:n]
+    rider_roll = rider_roll[:n]
+    residual = residual[:n]
+
     for i, ev in enumerate(sorted(events, key=lambda c: c.confidence, reverse=True)[:limit]):
         t0 = ev.time_s
         m = (t >= t0 - 2.0) & (t <= t0 + 2.0)

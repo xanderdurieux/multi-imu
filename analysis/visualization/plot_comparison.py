@@ -38,15 +38,28 @@ def main(argv: Optional[list[str]] = None) -> None:
         parser.error("recording_name_stage must be in format '<recording_name>/<stage>'")
     recording_name, stage = parts
 
-    # New layout: section stage strings map to top-level data/sections/<rec>s<idx>/.
+    # New layout: section stage strings map to top-level data/sections/<section_id>/.
     if stage.startswith("sections/"):
         from common.paths import section_dir as _section_dir
+        from common.paths import sections_root as _sections_root
+        from common.paths import parse_section_folder_name as _parse_section_folder_name
 
         sec_s = stage.split("/", 1)[1]
-        if not sec_s.startswith("section_"):
-            parser.error(f"Unrecognized section stage id: {stage!r}")
-        sec_idx = int(sec_s.split("_", 1)[1])
-        stage_dir = _section_dir(recording_name, sec_idx)
+        if sec_s.startswith("section_"):
+            sec_idx = int(sec_s.split("_", 1)[1])
+            stage_dir = _section_dir(recording_name, sec_idx)
+        else:
+            # Accept full section folder IDs like "2026-02-26_r2s1"
+            sec_root = _sections_root()
+            direct = sec_root / sec_s
+            if direct.is_dir():
+                stage_dir = direct
+            else:
+                try:
+                    rec_id, sec_idx = _parse_section_folder_name(sec_s)
+                except Exception:
+                    parser.error(f"Unrecognized section stage id: {stage!r}")
+                stage_dir = _section_dir(rec_id, sec_idx)
 
         csv_path_a = stage_dir / f"{args.sensor_name_a}.csv"
         csv_path_b = stage_dir / f"{args.sensor_name_b}.csv"

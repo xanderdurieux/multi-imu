@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -120,19 +121,34 @@ def mean_coherence_band(
         return float("nan")
     a = a[:n]
     b = b[:n]
+
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 32:
+        return float("nan")
+    a = a[mask]
+    b = b[mask]
     if np.nanstd(a) < 1e-9 or np.nanstd(b) < 1e-9:
         return float("nan")
     if nperseg is None:
-        nperseg = max(16, min(256, n // 4))
-    nperseg = min(nperseg, n)
+        nperseg = max(16, min(256, len(a) // 4))
+    nperseg = min(nperseg, len(a))
+    if nperseg < 16:
+        return float("nan")
+    if nperseg // 2 >= nperseg:
+        return float("nan")
     try:
-        f, cxy = coherence(a, b, fs=fs_hz, nperseg=nperseg, noverlap=nperseg // 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            f, cxy = coherence(a, b, fs=fs_hz, nperseg=nperseg, noverlap=nperseg // 2)
     except Exception:
         return float("nan")
     mask = (f >= f_min_hz) & (f <= f_max_hz)
     if not np.any(mask):
         return float("nan")
-    return float(np.nanmean(cxy[mask]))
+    band = cxy[mask]
+    if band.size == 0 or not np.any(np.isfinite(band)):
+        return float("nan")
+    return float(np.nanmean(band))
 
 
 def peak_time_difference_s(

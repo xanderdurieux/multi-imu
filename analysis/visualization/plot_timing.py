@@ -54,6 +54,13 @@ _GAP_THRESHOLDS = {"sporsa": 15.0, "arduino": 25.5}
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def _save_figure(fig: plt.Figure, out_path: Path, *, suptitle_top: float = 0.97) -> None:
+    fig.subplots_adjust(top=suptitle_top)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
 def _load_timing_stats(recording_name: str) -> dict:
     # For section ids we currently don't have per-section timing stats;
     # just return empty so timing plots are skipped.
@@ -115,7 +122,6 @@ def plot_timing_intervals(
     fig, axes = plt.subplots(
         1, len(dfs),
         figsize=(5 * len(dfs), 4),
-        constrained_layout=True,
     )
     if len(dfs) == 1:
         axes = [axes]
@@ -164,8 +170,7 @@ def plot_timing_intervals(
 
     fig.suptitle(f"{recording_name} / {_STAGE} — Packet interval distributions", fontsize=11)
     out_path = stage_dir / "parsed_timing_intervals.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    _save_figure(fig, out_path)
     print(f"[{recording_name}/{_STAGE}] {out_path.name}")
     return out_path
 
@@ -205,7 +210,6 @@ def plot_timing_timeline(
         len(dfs), 1,
         figsize=(12, 3 * len(dfs)),
         sharex=False,
-        constrained_layout=True,
     )
     if len(dfs) == 1:
         axes = [axes]
@@ -249,8 +253,7 @@ def plot_timing_timeline(
 
     fig.suptitle(f"{recording_name} / {_STAGE} — Packet interval timeline", fontsize=11)
     out_path = stage_dir / "parsed_timing_timeline.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    _save_figure(fig, out_path)
     print(f"[{recording_name}/{_STAGE}] {out_path.name}")
     return out_path
 
@@ -329,7 +332,6 @@ def plot_clock_drift(recording_name: str) -> Path | None:
         figsize=(10, 6),
         gridspec_kw={"height_ratios": [3, 1]},
         sharex=True,
-        constrained_layout=True,
     )
 
     # Top: offset over device time
@@ -369,8 +371,7 @@ def plot_clock_drift(recording_name: str) -> Path | None:
 
     fig.suptitle(f"{recording_name} / {_STAGE} — Arduino clock drift (device vs host)", fontsize=11)
     out_path = stage_dir / "parsed_clock_drift.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    _save_figure(fig, out_path)
     print(f"[{recording_name}/{_STAGE}] {out_path.name}")
     return out_path
 
