@@ -89,6 +89,11 @@ Exports are typically produced by the end-to-end `pipeline` via:
 - `features.exports.export_thesis_feature_tables()`
 - `features.exports.export_qc_summaries()`
 
+`export_thesis_feature_tables()` now accepts an optional thesis `qc_policy`
+configuration. When enabled, exports include explicit section-level
+`include/exclusion_reasons` decisions from `qc_section.json` confidence gates,
+and can retain only included sections while still writing decision logs.
+
 Consolidated outputs:
 - `analysis/data/exports/features_bike.csv`
 - `analysis/data/exports/features_rider.csv`

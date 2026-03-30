@@ -34,10 +34,21 @@ Conditionally required:
 Recommended provenance metadata:
 - `label_source`
 - `labeler`
+- `labeler_role`
 - `labeled_at_utc`
 - `label_confidence`
 - `label_notes`
 - `label_status`
+- `ambiguity_label`
+- `ambiguity_notes`
+- `provenance_source`
+- `source_artifact`
+- `annotation_template_id`
+- `annotation_example_id`
+- `annotation_id`
+- `annotation_batch_id`
+- `double_label_group`
+- `adjudication_status`
 - `label_schema_version`
 - `suggestion_source`
 - `suggestion_rank`
@@ -63,6 +74,14 @@ for each window row by resolving label rules.
 Use:
 ```bash
 uv run python -m labels.workflow apply-event-labels data/sections/<section_id> --labels labels/event_labels.csv
+
+# 4) Assign a defendable second-rater subset (e.g. 20%)
+uv run python -m labels.workflow double-label-subset --annotations labels/section_labels.csv \
+  --out labels/section_labels_with_double_subset.csv --reviewer-b reviewer_b --fraction 0.2 --seed 42
+
+# 5) Compute inter-rater agreement for the doubly-labeled subset
+uv run python -m labels.agreement --labels-a labels/reviewer_a.csv --labels-b labels/reviewer_b.csv \
+  --out-dir outputs/inter_rater
 ```
 This writes:
 - `events/event_candidates_labeled.csv`
@@ -120,4 +139,4 @@ Use this process for ~5–10 sections first:
    - Always populate `labeler`, `labeled_at_utc`, and `label_notes` for non-obvious cases.
 6. **Inter-rater consistency check (recommended)**
    - Double-label ~20% of rows by a second reviewer, compare agreement, and refine guidelines before scaling.
-
+   - Use `labels.agreement` to export `inter_rater_summary.json`, `inter_rater_by_scope.csv`, and explicit disagreement rows.

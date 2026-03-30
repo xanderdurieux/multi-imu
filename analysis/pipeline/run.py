@@ -89,6 +89,7 @@ def run_pipeline(
     event_config_path: Path | None = None,
     event_centered_features: bool = False,
     min_event_confidence: float = 0.0,
+    qc_policy: dict[str, Any] | None = None,
 ) -> list[RecordingStatus]:
     """Execute pipeline steps for all recordings. Returns status objects (also written to JSON/CSV).
 
@@ -461,7 +462,7 @@ def run_pipeline(
     if not skip_exports:
         from features.exports import export_qc_summaries, export_thesis_feature_tables
 
-        export_thesis_feature_tables(recordings_root_path=root)
+        export_thesis_feature_tables(recordings_root_path=root, qc_policy=qc_policy)
         export_qc_summaries(recordings_root_path=root)
 
     _write_run_summary(root, statuses)

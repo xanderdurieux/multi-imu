@@ -13,5 +13,6 @@
   "event_config_path": "event_thresholds.thesis.json",
   "event_centered_features": true,
   "min_event_confidence": 0.4,
-  "evaluation_seed": 42
+  "evaluation_seed": 42,
+  "thesis_protocol_path": "evaluation/configs/thesis_protocol.example.json"
 }
