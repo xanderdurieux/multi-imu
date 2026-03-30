@@ -10,7 +10,7 @@
   "force": false,
   "skip_exports": false,
   "labels_path": null,
-  "event_config_path": null,
-  "event_centered_features": false,
-  "min_event_confidence": 0.0
+  "event_config_path": "event_thresholds.thesis.json",
+  "event_centered_features": true,
+  "min_event_confidence": 0.4
 }

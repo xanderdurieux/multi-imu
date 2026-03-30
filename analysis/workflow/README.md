@@ -10,6 +10,9 @@ It wraps `pipeline.run_pipeline` but adds:
 - one-file run configuration,
 - explicit dataset root handling,
 - easy CLI overrides for quick experiments.
+- strict config validation before pipeline execution,
+- per-run provenance manifests under `data/provenance/`,
+- standardized stage logging (human-readable by default, JSON optional).
 
 ## Config schema
 
@@ -21,6 +24,15 @@ The default config (`configs/workflow.thesis.json`) defines:
 - optional session and recording filters.
 
 Relative paths are resolved relative to the config file location.
+
+### Validation guarantees
+
+Invalid configs fail fast before any stage runs:
+- unknown keys are rejected,
+- enum-like fields (`sync_method`, `orientation_filter`, `frame_alignment`, `split_stage`) are validated,
+- booleans must be booleans,
+- `min_event_confidence` must be in `[0.0, 1.0]`,
+- list and path-like fields are type-checked.
 
 ## Typical usage
 
@@ -42,4 +54,10 @@ uv run python -m workflow --config configs/workflow.thesis.json \
 ```bash
 uv run python -m workflow --config configs/workflow.thesis.json \
   --data-root /mnt/datasets/multi-imu/data
+```
+
+### 4) JSON logs for audit pipelines
+
+```bash
+uv run python -m workflow --config configs/workflow.thesis.json --log-format json
 ```
