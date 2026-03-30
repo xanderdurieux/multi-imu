@@ -39,6 +39,7 @@ class WorkflowConfig:
     event_config_path: str | None = None
     event_centered_features: bool = False
     min_event_confidence: float = 0.0
+    evaluation_seed: int = 42
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,6 +75,7 @@ def _validate_config_payload(payload: dict[str, Any], *, source: Path) -> None:
     _require_type(payload, "event_config_path", (str, type(None)))
     _require_type(payload, "event_centered_features", bool)
     _require_type(payload, "min_event_confidence", (int, float))
+    _require_type(payload, "evaluation_seed", int)
 
     recordings = payload.get("recordings")
     if isinstance(recordings, list):
@@ -106,6 +108,10 @@ def _validate_config_payload(payload: dict[str, Any], *, source: Path) -> None:
     confidence = payload.get("min_event_confidence")
     if isinstance(confidence, (int, float)) and not (0.0 <= float(confidence) <= 1.0):
         raise ValueError("Config key 'min_event_confidence' must be in [0.0, 1.0]")
+
+    eval_seed = payload.get("evaluation_seed")
+    if isinstance(eval_seed, int) and eval_seed < 0:
+        raise ValueError("Config key 'evaluation_seed' must be >= 0")
 
     data_root = payload.get("data_root")
     if isinstance(data_root, str) and not data_root.strip():
