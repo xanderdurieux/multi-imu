@@ -5,14 +5,14 @@
 `parser.session` → `sync` → `parser.split_sections` → `calibration` →
 `orientation` → `derived` → `events` → `features` → QC (`qc_section.json`) → consolidated exports.
 
-## Recommended entry point
+## Recommended thesis entry point
 For reproducible thesis runs, use:
 
 ```bash
 uv run python -m workflow --config configs/workflow.thesis.json
 ```
 
-Use `python -m pipeline` only for direct stage-level control.
+Use `python -m pipeline` only for development/debugging direct stage-level control. It is a legacy execution path for thesis reruns.
 
 ## When to use flags
 - `--session <session_name>`: parse raw logs for that session before syncing.

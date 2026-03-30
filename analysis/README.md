@@ -2,7 +2,7 @@
 
 This repository contains the offline processing stack for dual-IMU cycling data (bike-mounted Sporsa + rider-mounted Arduino).
 
-## 1) Reproducible entry point (recommended)
+## 1) Reproducible thesis entry point (official)
 
 Run the full workflow via a single config file:
 
@@ -13,7 +13,7 @@ uv run python -m workflow --config configs/workflow.thesis.json
 ```
 
 - `workflow` is the top-level orchestrator for thesis-quality reruns.
-- `pipeline` remains the lower-level stage runner.
+- `pipeline` is an internal stage runner and is **not** the recommended thesis command.
 
 ---
 
@@ -94,7 +94,7 @@ The project dependencies are defined in `pyproject.toml`.
 ## 6) Module quick links
 
 - `workflow/`: config-driven orchestration (`python -m workflow`)
-- `pipeline/`: lower-level stage orchestration (`python -m pipeline`)
+- `pipeline/`: lower-level stage orchestration used by `workflow` (direct CLI is deprecated for thesis reruns)
 - `parser/`: raw log parsing and section splitting
 - `sync/`: multi-method stream synchronization
 - `calibration/`, `orientation/`: world-frame and attitude
@@ -104,22 +104,13 @@ The project dependencies are defined in `pyproject.toml`.
 
 ---
 
-## 7) Dead code / abandoned path review (suggested cleanup)
+## 7) Thesis defaults and reproducibility notes
 
-The following items look like likely cleanup candidates in the **main branch** and should be reviewed before deletion:
+The default thesis config (`configs/workflow.thesis.json`) now encodes one consistent rerun profile:
+- `sync_method: "best"` to evaluate all supported sync methods and select the best-scoring alignment.
+- `orientation_filter: "complementary_orientation"` as the stable default for this dataset.
+- `frame_alignment: "gravity_only"` to avoid forward-axis assumptions when magnetometer quality varies.
+- `event_config_path: "event_thresholds.thesis.json"` so thresholds are explicit and versioned.
+- `event_centered_features: true` with `min_event_confidence: 0.4` to prioritize physically plausible, detector-backed windows.
 
-1. Legacy parser variants (`parser/arduino.py` vs `parser/arduino_batched.py`) — keep one canonical parser path if both are no longer required.
-2. Multiple overlapping visualization runners (`visualization/run_all_recordings.py`, ad-hoc plotting scripts) — converge into one reporting entry point.
-3. Legacy convenience entry (`main.py`) — currently retained for backward compatibility; can be removed after migration to `python -m workflow`.
-4. Historical notes (`orientation/THESIS_DYNAMIC_ORIENTATION_NOTES.md`) — consider moving to `docs/archive/` if no longer actively used.
-
----
-
-## 8) Remaining technical debt checklist
-
-- [ ] Add schema validation for `configs/workflow.thesis.json` (JSON Schema + CI check).
-- [ ] Add smoke tests for `python -m workflow` on a tiny fixture dataset.
-- [ ] Standardize logging output per stage (structured JSON log option).
-- [ ] Add deterministic seeds where randomness appears in evaluation workflows.
-- [ ] Move one-off visualization scripts into `visualization/tools/` and keep `visualization/` import-safe.
-- [ ] Add formal deprecation policy for legacy modules to avoid branch drift.
+Every run through `workflow` writes a provenance manifest under `data/provenance/`.
