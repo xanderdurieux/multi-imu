@@ -76,8 +76,13 @@ def main(argv: list[str] | None = None) -> None:
             variants=args.variants,
         )
         print(f"Processed {len(results)} section(s) for recording '{args.recording}'.")
-        for i, stats in enumerate(results):
-            print(f"  Section {i}: {json.dumps({k: v for k, v in stats.items() if k not in ('created_at_utc', 'canonical_variant')}, indent=4)}")
+        for i, stats in enumerate(results, start=1):
+            summary = {
+                "selected_method": stats.get("selected_method"),
+                "sporsa": stats.get("sporsa", {}),
+                "arduino": stats.get("arduino", {}),
+            }
+            print(f"  Section {i}: {json.dumps(summary, indent=4)}")
     elif args.section_name:
         section_dir = sections_root() / args.section_name
         if not section_dir.exists():
@@ -90,18 +95,19 @@ def main(argv: list[str] | None = None) -> None:
             canonical_variant=args.canonical_variant,
             variants=args.variants,
         )
-        # Print per-sensor quality summary.
+        print(f"Selected method: {stats.get('selected_method', '?')}")
         for sensor in ("sporsa", "arduino"):
-            if sensor not in stats:
+            sensor_stats = stats.get(sensor, {})
+            if not sensor_stats:
                 print(f"  {sensor}: not processed (CSV missing?)")
                 continue
-            for variant, s in stats[sensor].items():
-                print(
-                    f"  {sensor}/{variant}: quality={s['quality']}"
-                    f"  gravity_alignment={s['gravity_alignment']:.3f}"
-                    f"  pitch_std={s['pitch_std_deg']:.2f}°"
-                    f"  roll_std={s['roll_std_deg']:.2f}°"
-                )
+            print(
+                f"  {sensor}: quality={sensor_stats['quality']}"
+                f"  score={sensor_stats['score']:.3f}"
+                f"  gravity_alignment={sensor_stats['gravity_alignment']:.3f}"
+                f"  pitch_std={sensor_stats['pitch_std_deg']:.2f}°"
+                f"  roll_std={sensor_stats['roll_std_deg']:.2f}°"
+            )
     else:
         parser.print_help()
         sys.exit(1)

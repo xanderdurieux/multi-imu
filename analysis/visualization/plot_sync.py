@@ -243,17 +243,41 @@ def plot_sync_methods_comparison(
         fontsize=12,
     )
 
-    def _annotate_selected(ax, x_vals, y_vals):
+    def _set_bar_headroom(
+        ax,
+        y_vals,
+        *,
+        base_min_top: float,
+        base_min_bottom: float = 0.0,
+        pad_frac: float = 0.18,
+    ) -> tuple[float, float]:
+        finite_vals = [float(v) for v in y_vals if np.isfinite(v)]
+        ymax = max(finite_vals, default=0.0)
+        ymin = min(finite_vals, default=0.0)
+        top = max(base_min_top, ymax * (1.0 + pad_frac))
+        bottom = min(base_min_bottom, ymin * (1.0 + pad_frac))
+        ax.set_ylim(bottom, top)
+        return ymax, top
+
+    def _annotate_selected(ax, x_vals, y_vals, *, top: float, selected_offset_frac: float = 0.05) -> None:
         for xi, yi, m in zip(x_vals, y_vals, methods):
             if m == selected and np.isfinite(yi):
-                ax.text(xi, yi, "★", ha="center", va="bottom", fontsize=14,
+                star_y = yi + top * selected_offset_frac
+                ax.text(xi, star_y, "★", ha="center", va="bottom", fontsize=14,
                         color="black", fontweight="bold")
+
+    def _annotate_bar_values(ax, x_vals, y_vals, *, top: float, value_offset_frac: float, fmt: str) -> None:
+        for xi, yi in zip(x_vals, y_vals):
+            if np.isfinite(yi):
+                label_y = yi + top * value_offset_frac
+                ax.text(xi, label_y, format(yi, fmt), ha="center", va="bottom", fontsize=8)
 
     # --- Correlation (offset + drift) ---
     corr_vals = [data[m].get("corr_offset_and_drift") or float("nan") for m in methods]
     ax = axes[0][0]
     bars = ax.bar(bar_x, corr_vals, color=colors, edgecolor=edge_colors,
                   linewidth=lw_edges, width=bar_w, alpha=0.85)
+    _, corr_top = _set_bar_headroom(ax, corr_vals, base_min_top=0.35, base_min_bottom=0.0)
     ax.axhline(0, color="gray", lw=0.7, ls="--")
     ax.axhline(0.2, color="orange", lw=1.0, ls=":", label="min threshold (0.2)")
     ax.set_xticks(bar_x)
@@ -262,16 +286,15 @@ def plot_sync_methods_comparison(
     ax.set_title("Cross-correlation (offset + drift) — higher is better")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
-    _annotate_selected(ax, bar_x, corr_vals)
-    for xi, v in zip(bar_x, corr_vals):
-        if np.isfinite(v):
-            ax.text(xi, max(v, 0) + 0.005, f"{v:.4f}", ha="center", va="bottom", fontsize=8)
+    _annotate_selected(ax, bar_x, corr_vals, top=corr_top, selected_offset_frac=0.08)
+    _annotate_bar_values(ax, bar_x, corr_vals, top=corr_top, value_offset_frac=0.03, fmt=".4f")
 
     # --- Drift (ppm) ---
     drift_vals = [abs(data[m].get("drift_ppm") or 0.0) for m in methods]
     ax = axes[0][1]
     ax.bar(bar_x, drift_vals, color=colors, edgecolor=edge_colors,
            linewidth=lw_edges, width=bar_w, alpha=0.85)
+    _, drift_top = _set_bar_headroom(ax, drift_vals, base_min_top=450.0)
     ax.axhline(400, color="orange", lw=1.0, ls=":", label="typical Arduino drift (~400 ppm)")
     ax.axhline(5000, color="red", lw=1.0, ls=":", label="poor threshold (5000 ppm)")
     ax.set_xticks(bar_x)
@@ -280,9 +303,8 @@ def plot_sync_methods_comparison(
     ax.set_title("Absolute drift — lower is better")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
-    _annotate_selected(ax, bar_x, drift_vals)
-    for xi, v in zip(bar_x, drift_vals):
-        ax.text(xi, v + 1, f"{v:.1f}", ha="center", va="bottom", fontsize=8)
+    _annotate_selected(ax, bar_x, drift_vals, top=drift_top, selected_offset_frac=0.08)
+    _annotate_bar_values(ax, bar_x, drift_vals, top=drift_top, value_offset_frac=0.025, fmt=".1f")
 
     # --- Calibration scores ---
     ax = axes[1][0]
@@ -297,16 +319,15 @@ def plot_sync_methods_comparison(
             "#2ca02c" if (s or 0) >= 0.5 else "#d62728" for s in scores
         ]
         ax.bar(bx, scores, color=score_colors, width=0.4, alpha=0.85)
+        _, score_top = _set_bar_headroom(ax, scores, base_min_top=1.15)
         ax.axhline(0.5, color="orange", lw=1.0, ls="--", label="min threshold (0.5)")
         ax.set_xticks(bx)
         ax.set_xticklabels(["Opening anchor", "Closing anchor"])
         ax.set_ylabel("Calibration anchor score")
-        ax.set_title(f"Calibration method — anchor scores  (span: {span_s:.1f} s)")
+        ax.set_title(f"Calibration method — anchor scores  (span: {span_s:.1f} s)", pad=12)
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
-        for xi, v in zip(bx, scores):
-            if np.isfinite(v):
-                ax.text(xi, v + 0.02, f"{v:.4f}", ha="center", va="bottom", fontsize=9)
+        _annotate_bar_values(ax, bx, scores, top=score_top, value_offset_frac=0.035, fmt=".4f")
     else:
         ax.axis("off")
         ax.text(0.5, 0.5, "Calibration method\nnot available",
