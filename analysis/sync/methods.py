@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common.paths import write_csv
+from common.paths import project_relative_path, write_csv
 from common.calibration_segments import _acc_norm, _find_peaks, _smooth, find_calibration_segments
 from common.paths import find_sensor_csv, recording_stage_dir
 
@@ -101,8 +101,13 @@ def _prepare_recording_io(
     out_dir = recording_stage_dir(recording_name, method_stage(method))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{recording_name}/{method_stage(method)}] {reference_sensor} (ref) <- {ref_csv.name}")
-    print(f"[{recording_name}/{method_stage(method)}] {target_sensor} (target) <- {tgt_csv.name}")
+    log.info(
+        "sync %s/%s: reference=%s target=%s",
+        recording_name,
+        method_stage(method),
+        ref_csv.name,
+        tgt_csv.name,
+    )
     return ref_csv, tgt_csv, out_dir
 
 
@@ -131,11 +136,7 @@ def _write_recording_outputs(
         uniform_df = resample_aligned_stream(aligned_df, resample_rate_hz=float(resample_rate_hz))
         uniform_out = out_dir / f"{target_sensor}_uniform.csv"
         write_csv(_drop_alignment_columns(uniform_df), uniform_out)
-        print(f"[{recording_name}/{method_stage(method)}] {uniform_out.name}")
 
-    print(f"[{recording_name}/{method_stage(method)}] {ref_out.name}")
-    print(f"[{recording_name}/{method_stage(method)}] {tgt_out.name}")
-    print(f"[{recording_name}/{method_stage(method)}] {sync_json.name}")
     return ref_out, tgt_out, sync_json
 
 
@@ -339,14 +340,10 @@ def synchronize_recording(
         if uniform_csv_raw is not None:
             uniform_out = out_dir / f"{target_sensor}_uniform.csv"
             shutil.move(str(uniform_csv_raw), uniform_out)
-            print(f"[{recording_name}/{method_stage('lida')}] {uniform_out.name}")
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
 
-    print(f"[{recording_name}/{method_stage('lida')}] {ref_out.name}")
-    print(f"[{recording_name}/{method_stage('lida')}] {tgt_out.name}")
-    print(f"[{recording_name}/{method_stage('lida')}] {sync_json_out.name}")
     return ref_out, tgt_out, sync_json_out
 
 
@@ -775,14 +772,10 @@ def synchronize_recording_from_calibration(
         if uniform_csv_raw is not None:
             uniform_out = out_dir / f"{target_sensor}_uniform.csv"
             shutil.move(str(uniform_csv_raw), uniform_out)
-            print(f"[{recording_name}/{method_stage('calibration')}] {uniform_out.name}")
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
 
-    print(f"[{recording_name}/{method_stage('calibration')}] {ref_out.name}")
-    print(f"[{recording_name}/{method_stage('calibration')}] {tgt_out.name}")
-    print(f"[{recording_name}/{method_stage('calibration')}] {sync_json_out.name}")
     return ref_out, tgt_out, sync_json_out
 
 

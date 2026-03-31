@@ -3,8 +3,8 @@
   "recordings": [],
   "sync_method": "auto",
   "split_stage": "synced",
-  "frame_alignment": "gravity_only",
-  "orientation_filter": "madgwick",
+  "frame_alignment": "all",
+  "orientation_filter": "all",
   "sample_rate_hz": 100.0,
   "event_config_path": "",
   "event_centered_features": false,
@@ -20,5 +20,5 @@
   "thesis_protocol_path": "",
   "min_quality_label": "marginal",
   "stages": [],
-  "from_stage": ""
+  "from_stage": "sync"
 }

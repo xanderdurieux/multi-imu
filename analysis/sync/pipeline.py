@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from common import recordings_root
-from common.paths import recording_stage_dir
+from common.paths import project_relative_path, recording_stage_dir
 
 from .methods import (
     METHOD_LABELS,
@@ -148,21 +148,19 @@ def print_comparison(result: dict[str, Any]) -> None:
     rec = result["recording"]
     col_w = 14
 
-    print(f"\n{'─' * 70}")
-    print(f"  Recording : {rec}")
-    print(f"{'─' * 70}")
+    log.info("sync comparison for %s", rec)
 
     header = f"  {'Metric':<34}"
     for method in ALL_METHODS:
         header += f" {method_label(method):>{col_w}}"
-    print(header)
-    print(f"  {'─' * 68}")
+    log.info(header)
+    log.info("  %s", "─" * 68)
 
     def _row(label: str, values: list[str]) -> None:
         line = f"  {label:<34}"
         for value in values:
             line += f" {value:>{col_w}}"
-        print(line)
+        log.info(line)
 
     _row("Offset (s)", [
         _fmt(result[m]["offset_seconds"] if result[m] else None, "18.3f")
@@ -187,7 +185,7 @@ def print_comparison(result: dict[str, Any]) -> None:
             f"{_fmt(cal_block.get('closing', {}).get('score'), '.3f')}"
         ])
 
-    print(f"{'─' * 70}")
+    log.info("%s", "─" * 70)
 
 
 def _extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
@@ -282,7 +280,7 @@ def prune_method_stage_directories(recording_name: str) -> None:
         path = recording_stage_dir(recording_name, method_stage(method))
         if path.is_dir():
             shutil.rmtree(path)
-            print(f"[{recording_name}/synced] removed {path.name}/")
+            log.debug("sync pruned: %s", project_relative_path(path))
 
 
 def apply_selection(
@@ -305,11 +303,16 @@ def apply_selection(
     all_methods_path = out_dir / "all_methods.json"
     all_methods_path.write_text(json.dumps(result.metrics, indent=2), encoding="utf-8")
 
-    print(f"[{recording_name}/synced] Selected method: {result.method} (stage: {result.stage})")
-    print(f"[{recording_name}/synced] {reference_sensor}.csv")
-    print(f"[{recording_name}/synced] {target_sensor}.csv")
-    print(f"[{recording_name}/synced] sync_info.json")
-    print(f"[{recording_name}/synced] all_methods.json")
+    log.info(
+        "sync %s/synced: selected method=%s (stage=%s)",
+        recording_name,
+        result.method,
+        result.stage,
+    )
+    log.info(f"{project_relative_path(out_dir / f"{reference_sensor}.csv")}")
+    log.info(f"{project_relative_path(out_dir / f"{target_sensor}.csv")}")
+    log.info(f"{project_relative_path(out_dir / "sync_info.json")}")
+    log.info(f"{project_relative_path(all_methods_path)}")
 
     prune_method_stage_directories(recording_name)
     return out_dir
@@ -317,50 +320,46 @@ def apply_selection(
 
 def print_selection_result(result: SyncSelectionResult) -> None:
     """Print a short summary of the selected method and per-method metrics."""
-    print(f"Recording  : {result.recording_name}")
-    print(f"Selected   : {result.method} (stage: {result.stage})")
-    print()
+    log.info("Recording  : %s", result.recording_name)
+    log.info("Selected   : %s (stage: %s)", result.method, result.stage)
     for method in ALL_METHODS:
         q = result.qualities[method]
         if not q.available:
-            print(f"  {method_label(method):<14}  unavailable")
+            log.info("  %s  unavailable", f"{method_label(method):<14}")
             continue
         corr = _fmt(q.corr_offset_and_drift, ".4f")
         drift = _fmt(q.drift_ppm, ".1f")
         marker = " <- selected" if method == result.method else ""
-        print(f"  {method_label(method):<14}  corr={corr}  drift={drift} ppm{marker}")
+        log.info("  %-14s  corr=%s  drift=%s ppm%s", method_label(method), corr, drift, marker)
 
 
 def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
     """Run all four sync methods for a recording, then select and flatten the best result."""
     result = RecordingResult(recording_name=recording_name)
-    print(f"\n{'━' * 60}")
-    print(f"  {recording_name}")
-    print(f"{'━' * 60}")
+    log.info("sync start: %s", recording_name)
 
     for method in SYNC_METHODS:
         runner = _METHOD_RUNNERS[method]
-        print(f"  [{method_label(method)}] running ...", end="", flush=True)
+        log.info("sync %s: running %s", recording_name, method_label(method))
         try:
             runner(recording_name, _STAGE_IN)
             result.method_results.append(MethodResult(method=method, ok=True))
-            print("  done")
+            log.info("sync %s: %s done", recording_name, method_label(method))
         except Exception as exc:
             result.method_results.append(MethodResult(method=method, ok=False, error=str(exc)))
-            print(f"  FAILED: {exc}")
+            log.warning("sync %s: %s failed: %s", recording_name, method_label(method), exc)
             log.debug("Traceback for %s/%s:\n%s", recording_name, method, traceback.format_exc())
 
     if not result.succeeded:
-        print(f"  No method succeeded for {recording_name}; skipping selection.")
+        log.warning("sync %s: no method succeeded; skipping selection", recording_name)
         return result
 
     try:
         comparison = compare_sync_models(recording_name)
-        print()
         print_comparison(comparison)
         selection = select_best_sync_method(recording_name)
         result.selection = selection
-        print(f"\n  Selected: {selection.method} (stage: {selection.stage})")
+        log.info("sync %s: selected %s (stage=%s)", recording_name, selection.method, selection.stage)
         apply_selection(recording_name, selection)
     except Exception as exc:
         result.selection_error = str(exc)
@@ -381,9 +380,7 @@ def synchronize_recording_chosen_method(
         raise ValueError(f"Unknown sync method {method!r}; expected one of {CHOSEN_SYNC_METHODS}")
 
     if not quiet:
-        print(
-            f"\n{'━' * 60}\n  {recording_name}  [single sync: {method_label(method)}]\n{'━' * 60}"
-        )
+        log.info("sync start: %s (single method=%s)", recording_name, method_label(method))
 
     _METHOD_RUNNERS[method](recording_name, stage_in)
     comparison = compare_sync_models(recording_name)
@@ -408,7 +405,7 @@ def synchronize_session(session_name: str) -> list[RecordingResult]:
         log.warning("No recordings found matching prefix '%s_'.", session_name)
         return []
 
-    print(f"Session '{session_name}': {len(recordings)} recording(s) found.")
+    log.info("sync session %s: %d recording(s) found", session_name, len(recordings))
     results: list[RecordingResult] = []
     for rec in recordings:
         results.append(synchronize_recording_all_methods(rec))
@@ -417,9 +414,7 @@ def synchronize_session(session_name: str) -> list[RecordingResult]:
 
 
 def _print_session_summary(session_name: str, results: list[RecordingResult]) -> None:
-    print(f"\n{'━' * 60}")
-    print(f"  Session summary: {session_name}")
-    print(f"{'━' * 60}")
+    log.info("sync session summary: %s", session_name)
     for result in results:
         ok_str = ", ".join(method_label(m) for m in result.succeeded) or "none"
         fail_str = ", ".join(method_label(m) for m in result.failed)
@@ -427,8 +422,7 @@ def _print_session_summary(session_name: str, results: list[RecordingResult]) ->
         line = f"  {result.recording_name:<22}  ok=[{ok_str}]  {sel_str}"
         if fail_str:
             line += f"  failed=[{fail_str}]"
-        print(line)
-    print(f"{'━' * 60}")
+        log.info(line)
 
 
 def main(argv: list[str] | None = None) -> None:

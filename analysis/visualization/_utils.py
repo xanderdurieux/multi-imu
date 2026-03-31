@@ -10,7 +10,7 @@ def _as_float_vector(values: np.ndarray) -> np.ndarray:
     return np.ravel(np.asarray(values, dtype=float))
 
 
-def mask_valid_plot_x(x: np.ndarray) -> np.ndarray:
+def _mask_valid_plot_x(x: np.ndarray) -> np.ndarray:
     """Return boolean mask of finite, monotonically non-decreasing values."""
     x = _as_float_vector(x)
     if x.size == 0:
@@ -22,44 +22,40 @@ def mask_valid_plot_x(x: np.ndarray) -> np.ndarray:
     return finite & monotone
 
 
-def mask_valid_plot_xy(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Return boolean mask of points safe to plot for one series."""
-    x = _as_float_vector(x)
-    y = _as_float_vector(y)
-    if x.shape != y.shape:
-        raise ValueError(f"Plot arrays must have the same shape, got {x.shape} and {y.shape}")
-    return mask_valid_plot_x(x) & np.isfinite(y)
-
-
 def filter_valid_plot_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return x/y arrays already filtered to values safe to plot."""
     x = _as_float_vector(x)
     y = _as_float_vector(y)
-    valid = mask_valid_plot_xy(x, y)
+    if x.shape != y.shape:
+        raise ValueError(f"Plot arrays must have the same shape, got {x.shape} and {y.shape}")
+    valid = _mask_valid_plot_x(x) & np.isfinite(y)
     return x[valid], y[valid]
 
 
 def strict_vector_norm(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
-    """Compute vector norm, requiring all components to be finite."""
+    """Return row-wise vector norm while preserving NaN for incomplete rows."""
     if not cols:
         return np.array([], dtype=float)
-    arr = df[cols].to_numpy(dtype=float)
-    valid = np.all(np.isfinite(arr), axis=1)
-    norm = np.full(arr.shape[0], np.nan, dtype=float)
-    norm[valid] = np.sqrt(np.sum(arr[valid] ** 2, axis=1))
-    return norm
+    missing = [col for col in cols if col not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns for vector norm: {missing}")
+
+    arr = np.column_stack([pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float) for col in cols])
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    valid = np.isfinite(arr).all(axis=1)
+    out[valid] = np.linalg.norm(arr[valid], axis=1)
+    return out
 
 
-def mask_dropout_packets(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove rows where acc_norm is near-zero (sensor dropout packets)."""
-    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
-    if not acc_cols:
-        return df
-    arr = df[acc_cols].to_numpy(dtype=float)
-    norm = np.sqrt(np.nansum(arr ** 2, axis=1))
-    g_approx = float(np.nanmedian(norm))
-    if g_approx <= 0:
-        return df
-    threshold = 0.1 * g_approx
-    valid = norm >= threshold
-    return df.loc[valid].reset_index(drop=True)
+def timestamps_to_relative_seconds(values: pd.Series | np.ndarray) -> np.ndarray:
+    """Convert timestamp-like values in ms to relative seconds."""
+    ts = _as_float_vector(pd.to_numeric(values, errors="coerce").to_numpy(dtype=float))
+    if ts.size == 0:
+        return ts
+    finite = np.isfinite(ts)
+    if not finite.any():
+        return np.full_like(ts, np.nan, dtype=float)
+    t0 = ts[finite][0]
+    out = (ts - t0) / 1000.0
+    out[~finite] = np.nan
+    return out

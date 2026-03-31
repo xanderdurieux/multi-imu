@@ -13,10 +13,13 @@ from common.paths import (
     analysis_root,
     data_root,
     iter_sections_for_recording,
+    project_relative_path,
+    recording_stage_dir,
     recordings_root,
-    sections_root,
 )
 from .config import WorkflowConfig
+
+_ALL_ORIENTATION_FILTERS = ["madgwick", "complementary"]
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +70,29 @@ def _collect_sections(recordings: list[str]) -> list[Path]:
     return sections
 
 
+def _run_recording_stage_plots(recording_name: str, stage: str) -> None:
+    """Generate recording-level plots for a given stage output."""
+    if stage == "synced":
+        from visualization.plot_sync import plot_sync_stage
+        plot_sync_stage(recording_stage_dir(recording_name, stage))
+    elif stage == "parsed":
+        from visualization.plot_comparison import plot_stage_data
+        plot_stage_data(recording_stage_dir(recording_name, stage))
+
+
+def _run_section_stage_plots(section_dir: Path, stage: str) -> None:
+    """Generate section-level plots for a given stage output."""
+    if stage == "calibration":
+        from visualization.plot_calibration import plot_calibration_stage
+        plot_calibration_stage(section_dir)
+    elif stage == "orientation":
+        from visualization.plot_orientation import plot_orientation_stage
+        plot_orientation_stage(section_dir)
+    elif stage == "features":
+        from visualization.plot_features import plot_features_stage
+        plot_features_stage(section_dir)
+
+
 def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[str, Any]:
     """Run a single pipeline stage for all recordings/sections."""
     result: dict[str, Any] = {"stage": stage, "ok": 0, "failed": 0, "skipped": 0}
@@ -91,6 +117,11 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 else:
                     synchronize_recording_chosen_method(rec, cfg.sync_method)
                 result["ok"] += 1
+                if not cfg.no_plots:
+                    try:
+                        _run_recording_stage_plots(rec, "synced")
+                    except Exception as exc:
+                        log.warning("sync plots failed for %s: %s", rec, exc)
             except Exception as exc:
                 log.error("sync failed for %s: %s", rec, exc)
                 result["failed"] += 1
@@ -110,31 +141,66 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 result["failed"] += 1
 
     elif stage == "calibration":
-        from calibration.pipeline import calibrate_recording_sections
-        for rec in recordings:
-            try:
-                cals = calibrate_recording_sections(
-                    rec,
-                    frame_alignment=cfg.frame_alignment,
-                    sample_rate_hz=cfg.sample_rate_hz,
-                    force=cfg.force,
-                )
-                result["ok"] += len(cals)
-            except Exception as exc:
-                log.error("calibration failed for %s: %s", rec, exc)
-                result["failed"] += 1
+        if cfg.frame_alignment == "all":
+            from calibration.pipeline import calibrate_recording_sections_all_methods
+            for rec in recordings:
+                try:
+                    cals = calibrate_recording_sections_all_methods(
+                        rec,
+                        sample_rate_hz=cfg.sample_rate_hz,
+                        force=cfg.force,
+                    )
+                    result["ok"] += len(cals)
+                    if not cfg.no_plots:
+                        for section_dir in iter_sections_for_recording(rec):
+                            try:
+                                _run_section_stage_plots(section_dir, "calibration")
+                            except Exception as exc:
+                                log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
+                except Exception as exc:
+                    log.error("calibration failed for %s: %s", rec, exc)
+                    result["failed"] += 1
+        else:
+            from calibration.pipeline import calibrate_recording_sections
+            for rec in recordings:
+                try:
+                    cals = calibrate_recording_sections(
+                        rec,
+                        frame_alignment=cfg.frame_alignment,
+                        sample_rate_hz=cfg.sample_rate_hz,
+                        force=cfg.force,
+                    )
+                    result["ok"] += len(cals)
+                    if not cfg.no_plots:
+                        for section_dir in iter_sections_for_recording(rec):
+                            try:
+                                _run_section_stage_plots(section_dir, "calibration")
+                            except Exception as exc:
+                                log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
+                except Exception as exc:
+                    log.error("calibration failed for %s: %s", rec, exc)
+                    result["failed"] += 1
 
     elif stage == "orientation":
         from orientation.pipeline import process_recording_orientation
+        canonical = _ALL_ORIENTATION_FILTERS[0] if cfg.orientation_filter == "all" else cfg.orientation_filter
+        variants = _ALL_ORIENTATION_FILTERS if cfg.orientation_filter == "all" else None
         for rec in recordings:
             try:
                 results = process_recording_orientation(
                     rec,
-                    canonical_variant=cfg.orientation_filter,
+                    canonical_variant=canonical,
+                    variants=variants,
                     sample_rate_hz=cfg.sample_rate_hz,
                     force=cfg.force,
                 )
                 result["ok"] += len(results)
+                if not cfg.no_plots:
+                    for section_dir in iter_sections_for_recording(rec):
+                        try:
+                            _run_section_stage_plots(section_dir, "orientation")
+                        except Exception as exc:
+                            log.warning("orientation plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
                 log.error("orientation failed for %s: %s", rec, exc)
                 result["failed"] += 1
@@ -181,6 +247,12 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     force=cfg.force,
                 )
                 result["ok"] += 1
+                if not cfg.no_plots:
+                    for section_dir in iter_sections_for_recording(rec):
+                        try:
+                            _run_section_stage_plots(section_dir, "features")
+                        except Exception as exc:
+                            log.warning("features plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
                 log.error("features failed for %s: %s", rec, exc)
                 result["failed"] += 1
@@ -236,7 +308,11 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
 
     Returns a summary dict with per-stage results.
     """
-    stages = cfg.stages if cfg.stages else ALL_STAGES
+    if cfg.from_stage:
+        start_idx = ALL_STAGES.index(cfg.from_stage)
+        stages = ALL_STAGES[start_idx:]
+    else:
+        stages = cfg.stages if cfg.stages else ALL_STAGES
     recordings = _collect_recordings(cfg)
     log.info("Pipeline: %d recording(s), stages=%s", len(recordings), stages)
 
@@ -266,6 +342,6 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
     out_path = data_root() / "pipeline_run_summary.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-    log.info("Wrote pipeline run summary → %s", out_path)
+    log.info("Wrote pipeline run summary: %s", project_relative_path(out_path))
 
     return summary

@@ -25,7 +25,7 @@ import logging
 import sys
 from pathlib import Path
 
-from common.paths import sections_root
+from common.paths import iter_sections_for_recording, sections_root
 
 
 def _section_dir(name: str) -> Path:
@@ -34,6 +34,25 @@ def _section_dir(name: str) -> Path:
         print(f"Section not found: {d}", file=sys.stderr)
         sys.exit(1)
     return d
+
+
+def _run_stage_plots_for_sections(recording: str, stage: str) -> None:
+    """Generate stage plots for every section in a recording."""
+    for section_dir in iter_sections_for_recording(recording):
+        _run_stage_plots_for_section(section_dir, stage)
+
+
+def _run_stage_plots_for_section(section_dir: Path, stage: str) -> None:
+    """Generate stage plots for one section."""
+    if stage == "calibration":
+        from visualization.plot_calibration import plot_calibration_stage
+        plot_calibration_stage(section_dir)
+    elif stage == "orientation":
+        from visualization.plot_orientation import plot_orientation_stage
+        plot_orientation_stage(section_dir)
+    elif stage == "features":
+        from visualization.plot_features import plot_features_stage
+        plot_features_stage(section_dir)
 
 
 def _run_calibration(args: argparse.Namespace) -> None:
@@ -45,10 +64,14 @@ def _run_calibration(args: argparse.Namespace) -> None:
             force=args.force,
         )
         print(f"Calibrated {len(cals)} section(s).")
+        if not args.no_plots:
+            _run_stage_plots_for_sections(args.recording, "calibration")
     else:
         d = _section_dir(args.target)
         cal = calibrate_section(d, frame_alignment=args.frame, force=args.force)
         print(f"Quality: {cal.calibration_quality}")
+        if not args.no_plots:
+            _run_stage_plots_for_section(d, "calibration")
 
 
 def _run_orientation(args: argparse.Namespace) -> None:
@@ -60,12 +83,16 @@ def _run_orientation(args: argparse.Namespace) -> None:
             force=args.force,
         )
         print(f"Processed {len(results)} section(s).")
+        if not args.no_plots:
+            _run_stage_plots_for_sections(args.recording, "orientation")
     else:
         d = _section_dir(args.target)
         stats = process_section_orientation(
             d, canonical_variant=args.filter, force=args.force
         )
         print(f"Done. Canonical: {args.filter}")
+        if not args.no_plots:
+            _run_stage_plots_for_section(d, "orientation")
 
 
 def _run_derived(args: argparse.Namespace) -> None:
@@ -102,12 +129,16 @@ def _run_features(args: argparse.Namespace) -> None:
             force=args.force,
         )
         print(f"Extracted {len(df)} feature window(s).")
+        if not args.no_plots:
+            _run_stage_plots_for_sections(args.recording, "features")
     else:
         d = _section_dir(args.target)
         df = process_section_features(
             d, window_s=args.window, hop_s=args.hop, force=args.force
         )
         print(f"Extracted {len(df)} feature window(s).")
+        if not args.no_plots:
+            _run_stage_plots_for_section(d, "features")
 
 
 def _run_exports(args: argparse.Namespace) -> None:
@@ -184,6 +215,11 @@ def main(argv: list[str] | None = None) -> None:
         help="[exports] Minimum quality tier (default: marginal).",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing outputs.")
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip stage visualization plots.",
+    )
 
     args = parser.parse_args(argv)
 

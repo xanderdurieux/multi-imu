@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 import re
 from typing import Optional
@@ -15,8 +16,9 @@ from common import (
     session_input_dir,
     write_csv,
 )
+from common.paths import project_relative_path
 
-from visualization.plot_session import plot_recording
+from visualization.plot_comparison import plot_stage_data
 from visualization.plot_calibration_segments import (
     plot_calibration_segments_from_detection,
 )
@@ -24,6 +26,8 @@ from visualization.plot_calibration_segments import (
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
 from .stats import compute_stream_timing_stats, write_recording_stats
+
+log = logging.getLogger(__name__)
 
 
 def _process_file(sensor_type: str, src: Path, dst: Path):
@@ -62,7 +66,7 @@ def _extract_recording_number(filename: str) -> Optional[int]:
     return None
 
 
-def process_session(session_name: str) -> None:
+def process_session(session_name: str, *, plot: bool = True) -> None:
     """Parse a session and write processed CSV streams + plots + stats.
 
     Input layout::
@@ -88,7 +92,7 @@ def process_session(session_name: str) -> None:
     """
     in_root = session_input_dir(session_name)
     if not in_root.is_dir():
-        print(f"Sessions input folder not found: {in_root}")
+        log.warning("Sessions input folder not found: %s", project_relative_path(in_root))
         return
 
     sensor_dirs = {
@@ -103,16 +107,19 @@ def process_session(session_name: str) -> None:
         for src in sorted(sdir.glob("*.txt")):
             n = _extract_recording_number(src.name)
             if n is None:
-                print(f"[{session_name}] skipping (no recording nr): {src.name}")
+                log.info("parse %s: skipping file without recording number: %s", session_name, src.name)
                 continue
             recordings.setdefault(n, {})
             if sensor in recordings[n]:
-                print(f"[{session_name}] warning: duplicate {sensor} for rec {n}: {src.name}")
+                log.warning(
+                    "parse %s: duplicate %s for recording %s, ignoring %s",
+                    session_name, sensor, n, src.name,
+                )
                 continue
             recordings[n][sensor] = src
 
     if not recordings:
-        print(f"[{session_name}] No recordings found under {in_root}")
+        log.warning("parse %s: no recordings found under %s", session_name, project_relative_path(in_root))
         return
 
     session_summaries: list[dict] = []
@@ -129,20 +136,27 @@ def process_session(session_name: str) -> None:
             if src is None:
                 continue
             dst = out_dir / f"{sensor}.csv"
-            print(f"[{recording_name}/parsed] {sensor}: {src.name} -> {dst.name}")
+            log.info(
+                "parse %s/parsed: %s source=%s output=%s",
+                recording_name,
+                sensor,
+                src.name,
+                project_relative_path(dst),
+            )
             df = _process_file(sensor, src, dst)
             parsed_nonempty[sensor] = bool(df is not None and not df.empty)
 
         # Per-recording timing stats at recording root (see write_recording_stats).
         stats_path = write_recording_stats(recording_name)
-        print(f"[{recording_name}] stats: {stats_path.name}")
+        log.info("parse %s: wrote stats %s", recording_name, project_relative_path(stats_path))
 
-        # Per-recording sensor/comparison plots for the parsed stage.
-        plot_recording(recording_name, stage_filter="parsed")
-
-        # Calibration-segment diagnostic plots per sensor (sporsa, arduino) and
-        # compact, path-free summaries for the session stats JSON.
         calibration_segments_summary: dict[str, dict] = {}
+        if plot:
+            # Per-recording sensor/comparison plots for the parsed stage.
+            plot_stage_data(out_dir)
+
+        # Calibration-segment summaries are always computed for session stats;
+        # image output is optional based on ``plot``.
         for sensor_name in ("sporsa", "arduino"):
             csv_path = out_dir / f"{sensor_name}.csv"
             if not csv_path.exists():
@@ -164,7 +178,7 @@ def process_session(session_name: str) -> None:
                 peak_max_count=20,
                 peak_max_gap_s=3.0,
                 static_gap_max_s=8.0,
-                out_path=out_dir / f"{sensor_name}_calibration_segments.png",
+                out_path=(out_dir / f"{sensor_name}_calibration_segments.png") if plot else None,
             )
 
             if info_df.empty or "segment_index" not in info_df.columns:
@@ -278,7 +292,7 @@ def process_session(session_name: str) -> None:
         json.dumps(session_stats, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"[{session_name}] session stats: sessions/{session_name}/{out_session_stats.name}")
+    log.info("parse %s: wrote session stats %s", session_name, project_relative_path(out_session_stats))
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -290,13 +304,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "session_name",
         help="Date folder under data/sessions/ (e.g. 2026-02-26).",
     )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip generating parsed-stage diagnostic plots.",
+    )
     return parser
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-    process_session(args.session_name)
+    process_session(args.session_name, plot=not args.no_plot)
 
 
 if __name__ == "__main__":

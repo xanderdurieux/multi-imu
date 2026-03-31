@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import read_csv, resolve_data_dir
+from common.paths import project_relative_path, read_csv, resolve_data_dir
 from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
@@ -53,13 +53,21 @@ def plot_comparison_data(
     if output_path is None:
         output_path = stage_dir / f"comparison.png"
 
+    # Compute a single t0 across all sensors so overlaid signals stay aligned.
+    all_ts_arrays = [
+        pd.to_numeric(df.get("timestamp", pd.Series()), errors="coerce").to_numpy(dtype=float)
+        for df in sensor_dfs.values()
+    ]
+    valid_starts = [ts[np.isfinite(ts)][0] for ts in all_ts_arrays if np.isfinite(ts).any()]
+    t0_global = min(valid_starts) if valid_starts else 0.0
+
     fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
 
     for sensor, df in sensor_dfs.items():
         ts = pd.to_numeric(df.get("timestamp", pd.Series()), errors="coerce").to_numpy(dtype=float)
         if ts.size == 0:
             continue
-        ts_s = (ts - ts[0]) / 1000.0
+        ts_s = (ts - t0_global) / 1000.0
         color = COLORS.get(sensor, None)
 
         acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
@@ -87,6 +95,40 @@ def plot_comparison_data(
     plt.close(fig)
     log.debug("Saved comparison plot → %s", output_path)
     return output_path
+
+
+def plot_stage_data(
+    stage_ref: str | Path,
+    *,
+    sensors: list[str] | None = None,
+) -> list[Path]:
+    """Generate per-sensor and comparison plots for one stage directory."""
+    from visualization.plot_sensor import plot_sensor_data
+
+    stage_dir = resolve_data_dir(stage_ref)
+    selected_sensors = sensors if sensors is not None else list(SENSORS)
+    saved: list[Path] = []
+
+    for sensor in selected_sensors:
+        csv_path = stage_dir / f"{sensor}.csv"
+        if not csv_path.exists():
+            continue
+        out = stage_dir / f"{sensor}.png"
+        try:
+            saved_path = plot_sensor_data(csv_path, output_path=out)
+            saved.append(saved_path)
+            log.info("Plot written: %s", project_relative_path(saved_path))
+        except Exception as exc:
+            log.warning("Failed to plot %s/%s: %s", stage_dir.name, sensor, exc)
+
+    try:
+        saved_path = plot_comparison_data(stage_dir, output_path=stage_dir / "comparison.png")
+        saved.append(saved_path)
+        log.info("Plot written: %s", project_relative_path(saved_path))
+    except Exception as exc:
+        log.warning("Failed comparison plot for %s: %s", stage_dir, exc)
+
+    return saved
 
 
 def main(argv: list[str] | None = None) -> None:

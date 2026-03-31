@@ -68,6 +68,19 @@ def analysis_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def project_root() -> Path:
+    """Return the repository root (parent of ``analysis``)."""
+    return analysis_root().parent
+
+
+def project_relative_path(path: Path | str) -> str:
+    """Return a display path relative to repo parent (includes ``master-thesis/``)."""
+    p = Path(path).expanduser().resolve()
+    # relative_to_root = project_root()
+    relative_to_root = data_root()
+    return str(p.relative_to(relative_to_root))
+
+
 def data_root() -> Path:
     """Return the root directory containing project data folders."""
     override = os.environ.get("MULTI_IMU_DATA_ROOT", "").strip()

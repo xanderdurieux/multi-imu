@@ -5,6 +5,7 @@ Usage::
     python -m workflow configs/workflow.thesis.json
     python -m workflow configs/workflow.thesis.json --force
     python -m workflow configs/workflow.thesis.json --stage calibration orientation
+    python -m workflow configs/workflow.thesis.json --from-stage calibration
     python -m workflow configs/workflow.thesis.json --list-stages
 """
 
@@ -42,6 +43,15 @@ def main(argv: list[str] | None = None) -> None:
         nargs="+",
         metavar="STAGE",
         help=f"Run only these stages. Available: {', '.join(ALL_STAGES)}",
+    )
+    parser.add_argument(
+        "--from-stage",
+        choices=ALL_STAGES,
+        metavar="STAGE",
+        help=(
+            "Run from this stage onward using default stage order "
+            f"({', '.join(ALL_STAGES)})."
+        ),
     )
     parser.add_argument(
         "--force",
@@ -94,8 +104,18 @@ def main(argv: list[str] | None = None) -> None:
         cfg.force = True
     if args.no_plots:
         cfg.no_plots = True
+    if args.stage and args.from_stage:
+        parser.error("Use either --stage or --from-stage, not both.")
     if args.stage:
         cfg.stages = list(args.stage)
+        cfg.from_stage = ""
+    elif args.from_stage:
+        start_idx = ALL_STAGES.index(args.from_stage)
+        cfg.stages = ALL_STAGES[start_idx:]
+        cfg.from_stage = ""
+    elif cfg.from_stage and not cfg.stages:
+        start_idx = ALL_STAGES.index(cfg.from_stage)
+        cfg.stages = ALL_STAGES[start_idx:]
 
     print(f"\n{'━' * 60}")
     print(f"  Dual-IMU Cycling Pipeline")
