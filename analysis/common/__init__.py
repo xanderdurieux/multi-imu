@@ -13,6 +13,8 @@ from .paths import (
     recordings_root,
     resolve_data_dir,
     resolve_sensor_csv,
+    section_dir,
+    section_sensor_csv,
     session_input_dir,
     sessions_root,
     write_csv,
@@ -34,4 +36,6 @@ __all__ = [
     "recording_dir",
     "recording_stage_dir",
     "find_sensor_csv",
+    "section_dir",
+    "section_sensor_csv",
 ]

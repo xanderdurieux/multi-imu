@@ -18,7 +18,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
+from common.paths import (
+    iter_sections_for_recording,
+    read_csv,
+    section_labels_csv,
+    write_csv,
+)
+from labels.parser import load_labels
+from labels.section_transfer import transfer_labels_to_sections
 from .extraction import extract_window_features
 
 log = logging.getLogger(__name__)
@@ -64,6 +71,18 @@ def _slice_by_time(
         return pd.DataFrame()
     mask = (df[time_col] >= t_start) & (df[time_col] <= t_end)
     return df.loc[mask].copy()
+
+
+def _load_labels_for_section(section_dir: Path) -> pd.DataFrame:
+    """Load labels from the canonical section label path."""
+    labels_path = section_labels_csv(section_dir)
+    if not labels_path.exists():
+        return pd.DataFrame()
+
+    rows = load_labels(labels_path)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([row.to_dict() for row in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +182,11 @@ def extract_features_for_section(
             df_ref["timestamp"] = pd.to_numeric(df_ref["timestamp"], errors="coerce")
 
     # ------------------------------------------------------------------
-    # Load orientation (optional, Madgwick variant).
+    # Load orientation (optional, selected method with Madgwick fallback).
     # ------------------------------------------------------------------
     orient_dir = section_dir / "orientation"
-    orient_sporsa_df = _load_optional_csv(orient_dir / "sporsa__madgwick.csv")
-    orient_arduino_df = _load_optional_csv(orient_dir / "arduino__madgwick.csv")
+    orient_sporsa_df = _load_optional_csv(orient_dir / "sporsa.csv")
+    orient_arduino_df = _load_optional_csv(orient_dir / "arduino.csv")
 
     for df_ref in (orient_sporsa_df, orient_arduino_df):
         if not df_ref.empty and "timestamp" in df_ref.columns:
@@ -185,7 +204,7 @@ def extract_features_for_section(
     # ------------------------------------------------------------------
     # Load labels (optional).
     # ------------------------------------------------------------------
-    labels_df = _load_optional_csv(section_dir / "labels" / "labels.csv")
+    labels_df = _load_labels_for_section(section_dir)
     if not labels_df.empty:
         for col in ("start_ms", "end_ms"):
             if col in labels_df.columns:
@@ -381,6 +400,8 @@ def process_recording_features(
     if not section_dirs:
         log.warning("No sections found for recording '%s'.", recording_name)
         return pd.DataFrame()
+
+    transfer_labels_to_sections(recording_name)
 
     all_dfs: list[pd.DataFrame] = []
     for sec_dir in section_dirs:

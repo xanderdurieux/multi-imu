@@ -11,12 +11,11 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
 
-from common.paths import sections_root, iter_sections_for_recording
+from common.paths import parse_section_folder_name, section_dir
 from events.config import EventConfig
 from events.pipeline import process_section_events, process_recording_events
 
@@ -88,11 +87,16 @@ def main(argv: list[str] | None = None) -> None:
             _print_summary(section_name, events)
 
     elif args.section_name:
-        section_dir = sections_root() / args.section_name
-        if not section_dir.exists():
-            print(f"Section not found: {section_dir}", file=sys.stderr)
+        try:
+            recording_name, section_idx = parse_section_folder_name(args.section_name)
+            section_path = section_dir(recording_name, section_idx)
+        except ValueError:
+            print(f"Invalid section name: {args.section_name}", file=sys.stderr)
             sys.exit(1)
-        events = process_section_events(section_dir, config=shared_config, force=args.force)
+        if not section_path.exists():
+            print(f"Section not found: {section_path}", file=sys.stderr)
+            sys.exit(1)
+        events = process_section_events(section_path, config=shared_config, force=args.force)
         _print_summary(args.section_name, events)
 
     else:

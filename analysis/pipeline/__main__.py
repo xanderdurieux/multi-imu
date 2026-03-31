@@ -25,11 +25,16 @@ import logging
 import sys
 from pathlib import Path
 
-from common.paths import iter_sections_for_recording, sections_root
+from common.paths import iter_sections_for_recording, parse_section_folder_name, section_dir
 
 
 def _section_dir(name: str) -> Path:
-    d = sections_root() / name
+    try:
+        recording_name, section_idx = parse_section_folder_name(name)
+    except ValueError:
+        print(f"Invalid section name: {name}", file=sys.stderr)
+        sys.exit(1)
+    d = section_dir(recording_name, section_idx)
     if not d.exists():
         print(f"Section not found: {d}", file=sys.stderr)
         sys.exit(1)
@@ -52,7 +57,10 @@ def _run_stage_plots_for_section(section_dir: Path, stage: str) -> None:
         plot_orientation_stage(section_dir)
     elif stage == "features":
         from visualization.plot_features import plot_features_stage
+        from visualization.plot_labels import plot_labels
         plot_features_stage(section_dir)
+        plot_labels(section_dir, stage="sensor")
+        plot_labels(section_dir, stage="features")
 
 
 def _run_calibration(args: argparse.Namespace) -> None:

@@ -90,7 +90,10 @@ def _run_section_stage_plots(section_dir: Path, stage: str) -> None:
         plot_orientation_stage(section_dir)
     elif stage == "features":
         from visualization.plot_features import plot_features_stage
+        from visualization.plot_labels import plot_labels
         plot_features_stage(section_dir)
+        plot_labels(section_dir, stage="sensor")
+        plot_labels(section_dir, stage="features")
 
 
 def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[str, Any]:

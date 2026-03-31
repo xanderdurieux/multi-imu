@@ -12,9 +12,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
 
-from common.paths import sections_root, iter_sections_for_recording
+from common.paths import parse_section_folder_name, section_dir
 from .pipeline import calibrate_section, calibrate_recording_sections
 
 
@@ -63,12 +62,17 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(f"Calibrated {len(results)} section(s) for recording '{args.recording}'.")
     elif args.section_name:
-        section_dir = sections_root() / args.section_name
-        if not section_dir.exists():
-            print(f"Section not found: {section_dir}", file=sys.stderr)
+        try:
+            recording_name, section_idx = parse_section_folder_name(args.section_name)
+            section_path = section_dir(recording_name, section_idx)
+        except ValueError:
+            print(f"Invalid section name: {args.section_name}", file=sys.stderr)
+            sys.exit(1)
+        if not section_path.exists():
+            print(f"Section not found: {section_path}", file=sys.stderr)
             sys.exit(1)
         cal = calibrate_section(
-            section_dir,
+            section_path,
             frame_alignment=args.frame,
             sample_rate_hz=args.sample_rate_hz,
             force=args.force,
