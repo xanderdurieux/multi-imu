@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from common.calibration_segments import find_calibration_segments
+from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +48,9 @@ def plot_calibration_segments_from_detection(
     ts_s = (ts_ms - ts_ms[0]) / 1000.0 if ts_ms.size > 0 else np.array([])
 
     acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
-    acc_norm = np.zeros(len(df))
+    acc_norm = np.full(len(df), np.nan, dtype=float)
     if acc_cols:
-        arr = df[acc_cols].to_numpy(dtype=float)
-        acc_norm = np.sqrt(np.nansum(arr ** 2, axis=1))
+        acc_norm = strict_vector_norm(df, acc_cols)
 
     segments = find_calibration_segments(
         df,
@@ -82,7 +82,8 @@ def plot_calibration_segments_from_detection(
     fig, ax = plt.subplots(figsize=(14, 4))
 
     if ts_s.size > 0:
-        ax.plot(ts_s, acc_norm, lw=0.7, color="#555", label="|acc|")
+        x_plot, y_plot = filter_valid_plot_xy(ts_s, acc_norm)
+        ax.plot(x_plot, y_plot, lw=0.7, color="#555", label="|acc|")
         ax.axhline(y=9.81, color="blue", lw=0.5, ls="--", alpha=0.5, label="g")
 
     colors = plt.cm.tab10.colors

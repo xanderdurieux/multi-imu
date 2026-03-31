@@ -17,50 +17,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import analysis_root, sections_root, recording_stage_dir
+from common.paths import read_csv, resolve_sensor_csv
+from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
-
-
-def _resolve_csv(stage_ref: str, sensor_name: str) -> Path | None:
-    """Try to find <sensor>.csv under sections/ or recordings/ for the given stage_ref."""
-    # stage_ref examples:
-    #   "2026-02-26_r2/synced"                      (recording stage)
-    #   "2026-02-26_r2s1"                            (section shorthand)
-    data_root = analysis_root() / "data"
-
-    # Try sections root first
-    sec_dir = sections_root() / stage_ref
-    if not sec_dir.exists():
-        # Try as recording/stage
-        parts = stage_ref.split("/", 1)
-        if len(parts) == 2:
-            rec, stage = parts
-            # Check if it looks like a section folder name
-            if "s" in parts[1] and not parts[1].startswith("s"):
-                sec_dir = sections_root() / parts[1]
-            else:
-                sec_dir = recording_stage_dir(rec, stage)
-        else:
-            sec_dir = data_root / stage_ref
-
-    csv = sec_dir / f"{sensor_name}.csv"
-    if csv.exists():
-        return csv
-
-    # Try globbing
-    matches = list(sec_dir.glob(f"*{sensor_name}*.csv"))
-    if matches:
-        return matches[0]
-
-    return None
-
 
 def _ts_seconds(df: pd.DataFrame) -> np.ndarray:
     ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
     if ts.size > 0:
         ts = (ts - ts[0]) / 1000.0  # relative seconds
     return ts
+
+
+def _prepare_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep plotting rows aligned on valid, monotonic timestamps."""
+    return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
 
 def plot_sensor_data(
@@ -74,10 +45,11 @@ def plot_sensor_data(
 
     Returns the path of the saved figure.
     """
-    df = pd.read_csv(csv_path)
+    df = read_csv(csv_path)
     for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = _prepare_sensor_df(df)
 
     ts = _ts_seconds(df)
 
@@ -95,13 +67,13 @@ def plot_sensor_data(
     if norm_only:
         fig, ax = plt.subplots(figsize=(12, 3))
         if acc_cols:
-            acc_arr = df[acc_cols].to_numpy(dtype=float)
-            acc_norm = np.sqrt(np.nansum(acc_arr ** 2, axis=1))
-            ax.plot(ts, acc_norm, lw=0.8, label="|acc|")
+            acc_norm = strict_vector_norm(df, acc_cols)
+            x, y = filter_valid_plot_xy(ts, acc_norm)
+            ax.plot(x, y, lw=0.8, label="|acc|")
         if not acc_only and gyro_cols:
-            gyro_arr = df[gyro_cols].to_numpy(dtype=float)
-            gyro_norm = np.sqrt(np.nansum(gyro_arr ** 2, axis=1))
-            ax.plot(ts, gyro_norm, lw=0.8, label="|gyro|")
+            gyro_norm = strict_vector_norm(df, gyro_cols)
+            x, y = filter_valid_plot_xy(ts, gyro_norm)
+            ax.plot(x, y, lw=0.8, label="|gyro|")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Norm")
         ax.set_title(f"{csv_path.parent.name}/{csv_path.name} — norms")
@@ -114,13 +86,17 @@ def plot_sensor_data(
 
         if acc_cols:
             for col in acc_cols:
-                axes[0].plot(ts, df[col].to_numpy(dtype=float), lw=0.7, label=col)
+                y = df[col].to_numpy(dtype=float)
+                x_plot, y_plot = filter_valid_plot_xy(ts, y)
+                axes[0].plot(x_plot, y_plot, lw=0.7, label=col)
             axes[0].set_ylabel("Acc (m/s²)")
             axes[0].legend(loc="upper right", fontsize=7)
 
         if not acc_only and gyro_cols and rows > 1:
             for col in gyro_cols:
-                axes[1].plot(ts, df[col].to_numpy(dtype=float), lw=0.7, label=col)
+                y = df[col].to_numpy(dtype=float)
+                x_plot, y_plot = filter_valid_plot_xy(ts, y)
+                axes[1].plot(x_plot, y_plot, lw=0.7, label=col)
             axes[1].set_ylabel("Gyro (°/s or rad/s)")
             axes[1].legend(loc="upper right", fontsize=7)
 
@@ -145,11 +121,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("-o", "--output", help="Output PNG path (auto-derived if omitted)")
     args = parser.parse_args(argv)
 
-    csv_path = _resolve_csv(args.stage_ref, args.sensor_name)
-    if csv_path is None:
-        log.warning("Could not find CSV for %s/%s", args.stage_ref, args.sensor_name)
+    try:
+        csv_path = resolve_sensor_csv(args.stage_ref, args.sensor_name)
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning("Could not find CSV for %s/%s: %s", args.stage_ref, args.sensor_name, exc)
         return
-
     out = Path(args.output) if args.output else None
     try:
         saved = plot_sensor_data(csv_path, norm_only=args.norm, acc_only=args.acc, output_path=out)

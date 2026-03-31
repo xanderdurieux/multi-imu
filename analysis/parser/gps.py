@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from common.paths import read_csv
+
 
 GPS_COLUMNS = ("latitude", "longitude", "elevation_m", "time_utc")
 
@@ -189,7 +191,7 @@ def parse_gps_csv(
     if _csv_first_line_is_wrapped_record(path):
         df = _read_wrapped_inner_csv(path)
     else:
-        df = pd.read_csv(path)
+        df = read_csv(path)
     if df.empty:
         return pd.DataFrame(columns=list(GPS_COLUMNS))
 

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from common import CSV_COLUMNS, write_dataframe
+from common.paths import CSV_COLUMNS, write_csv
 
 GRAVITY = 9.81
 
@@ -254,7 +254,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     df = parse_arduino_log(args.source_txt)
-    write_dataframe(df, args.destination_csv)
+    write_csv(df, args.destination_csv)
 
 
 if __name__ == "__main__":

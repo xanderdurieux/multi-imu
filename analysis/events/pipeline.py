@@ -9,7 +9,7 @@ from typing import Optional
 
 import pandas as pd
 
-from common.paths import iter_sections_for_recording, sections_root
+from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
 from events.config import EventConfig
 from events.detectors import EventCandidate, detect_events
 
@@ -30,7 +30,7 @@ def _load_csv(path: Path, label: str) -> Optional[pd.DataFrame]:
         log.warning("Derived CSV not found, skipping: %s (%s)", path, label)
         return None
     try:
-        df = pd.read_csv(path)
+        df = read_csv(path)
         log.debug("Loaded %s: %d rows, columns=%s", label, len(df), list(df.columns))
         return df
     except Exception as exc:
@@ -129,7 +129,7 @@ def process_section_events(
         )
         # Return existing candidates
         try:
-            df = pd.read_csv(out_csv)
+            df = read_csv(out_csv)
             events: list[EventCandidate] = []
             for _, row in df.iterrows():
                 events.append(EventCandidate(
@@ -179,7 +179,7 @@ def process_section_events(
     events_dir.mkdir(parents=True, exist_ok=True)
 
     candidates_df = _candidates_to_df(events)
-    candidates_df.to_csv(out_csv, index=False)
+    write_csv(candidates_df, out_csv)
     log.info("Wrote event candidates → %s (%d rows)", out_csv, len(candidates_df))
 
     duration_s = _section_duration_s(

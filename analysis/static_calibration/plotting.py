@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from visualization._utils import mask_valid_plot_x
+from visualization._utils import filter_valid_plot_xy
 
 from .imu_static import AXES, FACE_ORDER, GRAVITY
 
@@ -68,12 +68,11 @@ def plot_recordings_overview(
         acc = df.dropna(subset=["ax", "ay", "az"]).copy()
         if not acc.empty:
             time_s = _relative_time_seconds(acc)
-            xm = mask_valid_plot_x(time_s)
             start_s, end_s = _selected_interval_seconds(record, acc)
             for axis in AXES:
                 y = acc[f"a{axis}"].to_numpy(dtype=float)
-                m = xm & np.isfinite(y)
-                axes[row, 0].plot(time_s[m], y[m], color=AXIS_COLORS[axis], linewidth=0.9, label=axis.upper())
+                x_plot, y_plot = filter_valid_plot_xy(time_s, y)
+                axes[row, 0].plot(x_plot, y_plot, color=AXIS_COLORS[axis], linewidth=0.9, label=axis.upper())
             axes[row, 0].axvspan(start_s, end_s, color=color, alpha=0.12)
             axes[row, 0].axhline(GRAVITY, color="#111827", linestyle="--", linewidth=0.8, alpha=0.35)
             axes[row, 0].axhline(-GRAVITY, color="#111827", linestyle="--", linewidth=0.8, alpha=0.35)
@@ -82,12 +81,11 @@ def plot_recordings_overview(
         gyro = df.dropna(subset=["gx", "gy", "gz"]).copy()
         if not gyro.empty:
             time_s = _relative_time_seconds(gyro)
-            xm = mask_valid_plot_x(time_s)
             start_s, end_s = _selected_interval_seconds(record, gyro)
             for axis in AXES:
                 y = gyro[f"g{axis}"].to_numpy(dtype=float)
-                m = xm & np.isfinite(y)
-                axes[row, 1].plot(time_s[m], y[m], color=AXIS_COLORS[axis], linewidth=0.9)
+                x_plot, y_plot = filter_valid_plot_xy(time_s, y)
+                axes[row, 1].plot(x_plot, y_plot, color=AXIS_COLORS[axis], linewidth=0.9)
             axes[row, 1].axvspan(start_s, end_s, color=color, alpha=0.12)
             axes[row, 1].axhline(0.0, color="#111827", linestyle=":", linewidth=0.8, alpha=0.35)
 
@@ -135,12 +133,11 @@ def plot_recording_details(
 
         if not acc.empty:
             time_s = _relative_time_seconds(acc)
-            xm = mask_valid_plot_x(time_s)
             start_s, end_s = _selected_interval_seconds(record, acc)
             for axis in AXES:
                 y = acc[f"a{axis}"].to_numpy(dtype=float)
-                m = xm & np.isfinite(y)
-                axes[0].plot(time_s[m], y[m], color=AXIS_COLORS[axis], linewidth=1.0, label=axis.upper())
+                x_plot, y_plot = filter_valid_plot_xy(time_s, y)
+                axes[0].plot(x_plot, y_plot, color=AXIS_COLORS[axis], linewidth=1.0, label=axis.upper())
             axes[0].axvspan(start_s, end_s, color=color, alpha=0.12)
             axes[0].axhline(GRAVITY, color="#111827", linestyle="--", linewidth=0.8, alpha=0.35)
             axes[0].axhline(-GRAVITY, color="#111827", linestyle="--", linewidth=0.8, alpha=0.35)
@@ -149,12 +146,11 @@ def plot_recording_details(
 
         if not gyro.empty:
             time_s = _relative_time_seconds(gyro)
-            xm = mask_valid_plot_x(time_s)
             start_s, end_s = _selected_interval_seconds(record, gyro)
             for axis in AXES:
                 y = gyro[f"g{axis}"].to_numpy(dtype=float)
-                m = xm & np.isfinite(y)
-                axes[1].plot(time_s[m], y[m], color=AXIS_COLORS[axis], linewidth=1.0)
+                x_plot, y_plot = filter_valid_plot_xy(time_s, y)
+                axes[1].plot(x_plot, y_plot, color=AXIS_COLORS[axis], linewidth=1.0)
             axes[1].axvspan(start_s, end_s, color=color, alpha=0.12)
             axes[1].axhline(0.0, color="#111827", linestyle=":", linewidth=0.8, alpha=0.35)
 

@@ -14,8 +14,7 @@ configured sensors into matching time windows saved under::
 
 CLI usage::
 
-    python -m parser.split_sections 2026-02-26_r5/synced_lida
-    python -m parser.split_sections 2026-02-26_r5/synced_cal --no-plot
+    python -m parser.split_sections 2026-02-26_r5/synced
 """
 
 from __future__ import annotations
@@ -28,8 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common.csv_schema import load_dataframe, write_dataframe
-from common.paths import find_sensor_csv, recording_dir
+from common.paths import find_sensor_csv, read_csv, recording_dir, write_csv
 from common.calibration_segments import CalibrationSegment, find_calibration_segments
 from labels.section_transfer import (
     load_recording_interval_rows_for_transfer,
@@ -119,7 +117,7 @@ def split_recording(
 
     # Load reference sensor and detect calibration segments.
     ref_csv = find_sensor_csv(recording_name, stage, reference_sensor)
-    ref_df = load_dataframe(ref_csv)
+    ref_df = read_csv(ref_csv)
     ref_df = ref_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     calibrations = find_calibration_segments(
@@ -141,7 +139,7 @@ def split_recording(
         except FileNotFoundError:
             log.warning("Sensor '%s' not found in %s/%s — skipping", sensor, recording_name, stage)
             continue
-        df = load_dataframe(csv_path)
+        df = read_csv(csv_path)
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         sensor_dfs[sensor] = df
 
@@ -175,7 +173,7 @@ def split_recording(
         paths: list[Path] = []
         for sensor, df in sensor_slices.items():
             out_path = section_dir / f"{sensor}.csv"
-            write_dataframe(df, out_path)
+            write_csv(df, out_path)
             paths.append(out_path)
             log.info("Wrote %s/%s (%d rows)", section_stage, out_path.name, len(df))
         if source_interval_rows and reference_sensor in sensor_slices:
@@ -263,7 +261,7 @@ def sync_sections(
     plot:
         If ``True``, regenerate sensor and comparison plots after syncing.
     """
-    from sync.calibration_sync import synchronize_from_calibration
+    from sync.methods import synchronize_from_calibration
 
     from common.paths import iter_sections_for_recording
 

@@ -17,6 +17,8 @@ from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+from common.paths import read_csv, write_csv
+
 logger = logging.getLogger(__name__)
 
 _QUALITY_ORDER = ["poor", "marginal", "good"]
@@ -173,7 +175,7 @@ def run_evaluation(
     if not features_path.exists():
         raise FileNotFoundError(f"Features file not found: {features_path}")
 
-    df = pd.read_csv(features_path)
+    df = read_csv(features_path)
     logger.info("Loaded %d rows, %d columns", len(df), len(df.columns))
 
     # Apply quality filter
@@ -285,7 +287,7 @@ def run_evaluation(
                 index=le.classes_,
                 columns=le.classes_,
             )
-            cm_df.to_csv(cm_path)
+            write_csv(cm_df, cm_path)
             logger.debug("Wrote confusion matrix to %s", cm_path)
 
             # Write feature importances
@@ -297,7 +299,7 @@ def run_evaluation(
                         "importance": result["feature_importances"],
                     }
                 ).sort_values("importance", ascending=False)
-                fi_df.to_csv(fi_path, index=False)
+                write_csv(fi_df, fi_path)
                 logger.debug("Wrote feature importances to %s", fi_path)
 
     # ------------------------------------------------------------------
@@ -306,7 +308,7 @@ def run_evaluation(
     if metrics_rows:
         metrics_df = pd.DataFrame(metrics_rows)
         metrics_path = output_dir / "metrics_table.csv"
-        metrics_df.to_csv(metrics_path, index=False)
+        write_csv(metrics_df, metrics_path)
         logger.info("Wrote metrics table to %s", metrics_path)
 
     # ------------------------------------------------------------------

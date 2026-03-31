@@ -11,6 +11,7 @@ from typing import Any
 
 from common.paths import (
     analysis_root,
+    data_root,
     iter_sections_for_recording,
     recordings_root,
     sections_root,
@@ -199,7 +200,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "evaluation":
         from evaluation.experiments import run_evaluation
-        fused = analysis_root() / "data" / "exports" / "features_fused.csv"
+        fused = data_root() / "exports" / "features_fused.csv"
         out = analysis_root() / "outputs" / "evaluation"
         if fused.exists():
             try:
@@ -262,7 +263,7 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
     summary["finished_at_utc"] = datetime.now(UTC).isoformat()
 
     # Write run summary.
-    out_path = analysis_root() / "data" / "pipeline_run_summary.json"
+    out_path = data_root() / "pipeline_run_summary.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     log.info("Wrote pipeline run summary → %s", out_path)

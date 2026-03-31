@@ -8,7 +8,7 @@ recording. A calibration sequence has the pattern::
 The detection logic is used by:
 
 - :mod:`parser.split_sections` to form calibration-bounded recording sections.
-- :mod:`sync.calibration_sync` to locate calibration anchors for
+- :mod:`sync.methods` to locate calibration anchors for
   calibration-based time synchronisation.
 - :mod:`visualization.plot_calibration_segments` for diagnostic figures.
 
@@ -400,4 +400,3 @@ def find_calibration_segments(
         )
 
     return _deduplicate_segments(segments, max_gap_samples=static_min_samples)
-

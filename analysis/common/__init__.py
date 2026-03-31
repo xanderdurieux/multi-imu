@@ -1,21 +1,33 @@
-"""Shared CSV schema utilities and path helpers for locating data directories."""
+"""Shared path utilities for locating data directories."""
 
-from .csv_schema import CSV_COLUMNS, load_dataframe, write_dataframe
 from .paths import (
+    CSV_COLUMNS,
     analysis_root,
-    sessions_root,
-    recordings_root,
-    session_input_dir,
+    data_root,
+    find_csv_in_dir,
+    find_sensor_csv,
+    list_csv_files,
+    read_csv,
     recording_dir,
     recording_stage_dir,
-    find_sensor_csv,
+    recordings_root,
+    resolve_data_dir,
+    resolve_sensor_csv,
+    session_input_dir,
+    sessions_root,
+    write_csv,
 )
 
 __all__ = [
     "CSV_COLUMNS",
-    "load_dataframe",
-    "write_dataframe",
     "analysis_root",
+    "data_root",
+    "read_csv",
+    "write_csv",
+    "resolve_data_dir",
+    "resolve_sensor_csv",
+    "list_csv_files",
+    "find_csv_in_dir",
     "sessions_root",
     "recordings_root",
     "session_input_dir",

@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt
 
-from common import load_dataframe
+from common.paths import read_csv
 
 # ---------------------------------------------------------------------------
 # Stream utilities
@@ -28,7 +28,7 @@ VECTOR_AXES: dict[str, list[str]] = {
 def load_stream(csv_path: Path | str) -> pd.DataFrame:
     """Load an IMU CSV, coerce numeric schema, and sort by timestamp."""
     path = Path(csv_path)
-    df = load_dataframe(path).copy()
+    df = read_csv(path).copy()
     df = df.dropna(subset=["timestamp"])
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df

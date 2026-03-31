@@ -1,9 +1,66 @@
-"""Path utilities for locating data directories."""
+"""Shared path resolution and CSV I/O helpers."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+
+import pandas as pd
+
+
+CSV_COLUMNS: list[str] = [
+    "timestamp",
+    "ax",
+    "ay",
+    "az",
+    "gx",
+    "gy",
+    "gz",
+    "mx",
+    "my",
+    "mz",
+]
+
+_IMU_VALUE_COLUMNS = [col for col in CSV_COLUMNS if col != "timestamp"]
+
+
+def _looks_like_imu_dataframe(df: pd.DataFrame) -> bool:
+    columns = set(df.columns)
+    return "timestamp" in columns and any(col in columns for col in _IMU_VALUE_COLUMNS)
+
+
+def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    for col in CSV_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    extra = [c for c in out.columns if c not in CSV_COLUMNS]
+    out = out[CSV_COLUMNS + extra]
+
+    for col in CSV_COLUMNS:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    return out
+
+
+def read_csv(csv_path: Path | str) -> pd.DataFrame:
+    """Load a CSV from disk using the project's single shared entry point."""
+    path = Path(csv_path)
+    df = pd.read_csv(path)
+    if _looks_like_imu_dataframe(df):
+        return _normalize_imu_dataframe(df)
+    return df
+
+
+def write_csv(df: pd.DataFrame, csv_path: Path | str) -> None:
+    """Write a CSV to disk using the project's single shared entry point."""
+    path = Path(csv_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    out = _normalize_imu_dataframe(df) if _looks_like_imu_dataframe(df) else df.copy()
+    out.to_csv(path, index=False)
 
 
 def analysis_root() -> Path:
@@ -11,7 +68,8 @@ def analysis_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _data_root() -> Path:
+def data_root() -> Path:
+    """Return the root directory containing project data folders."""
     override = os.environ.get("MULTI_IMU_DATA_ROOT", "").strip()
     if override:
         return Path(override).expanduser().resolve()
@@ -20,12 +78,12 @@ def _data_root() -> Path:
 
 def sessions_root() -> Path:
     """Return the directory containing raw session input folders."""
-    return _data_root() / "sessions"
+    return data_root() / "sessions"
 
 
 def recordings_root() -> Path:
     """Return the directory containing all processed recording folders."""
-    return _data_root() / "recordings"
+    return data_root() / "recordings"
 
 
 def session_input_dir(session_name: str) -> Path:
@@ -43,7 +101,7 @@ def recording_dir(recording_name: str) -> Path:
 
 def sections_root() -> Path:
     """Return the directory containing all processed per-section folders."""
-    return _data_root() / "sections"
+    return data_root() / "sections"
 
 
 def section_dir(recording_name: str, section_idx: int) -> Path:
@@ -101,40 +159,91 @@ def recording_stage_dir(recording_name: str, stage: str) -> Path:
     return recording_dir(recording_name) / stage
 
 
-def find_sensor_csv(
-    recording_name: str,
-    stage: str,
-    sensor_name: str,
-) -> Path:
-    """Find a single CSV for a given sensor within a recording stage directory.
+def resolve_data_dir(target: str | Path) -> Path:
+    """Resolve a directory reference inside the project data tree.
 
-    Looks for ``*.csv`` files under
-    ``data/recordings/<recording_name>/<stage>/`` whose filename contains
-    ``sensor_name`` (case-insensitive). Raises if none or more than one match.
+    Supported references:
+    - absolute or relative directory paths
+    - ``<recording>/<stage>``
+    - ``<recording>s<section_idx>``
+    - paths relative to :func:`data_root`
     """
-    stage_dir = recording_stage_dir(recording_name, stage)
-    if not stage_dir.exists():
-        raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
+    if isinstance(target, Path):
+        path = target.expanduser()
+        if path.is_dir():
+            return path.resolve()
+        raise FileNotFoundError(f"Directory not found: {path}")
 
-    csv_files = list(stage_dir.glob("*.csv"))
-    token = sensor_name.lower()
+    ref = str(target).strip().rstrip("/").replace("\\", "/")
+    if not ref:
+        raise FileNotFoundError("Empty data directory reference.")
+
+    direct = Path(ref).expanduser()
+    if direct.is_dir():
+        return direct.resolve()
+
+    try:
+        parse_section_folder_name(ref)
+    except ValueError:
+        pass
+    else:
+        section_path = sections_root() / ref
+        if section_path.is_dir():
+            return section_path.resolve()
+
+    parts = ref.split("/", 1)
+    if len(parts) == 2:
+        stage_path = recording_stage_dir(parts[0], parts[1])
+        if stage_path.is_dir():
+            return stage_path.resolve()
+
+    rooted = data_root() / ref
+    if rooted.is_dir():
+        return rooted.resolve()
+
+    raise FileNotFoundError(f"Could not resolve data directory reference: {target!r}")
+
+
+def list_csv_files(directory: Path | str) -> list[Path]:
+    """Return all CSV files directly inside *directory*, sorted by name."""
+    path = Path(directory)
+    if not path.is_dir():
+        raise FileNotFoundError(f"Directory not found: {path}")
+    return sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
+
+
+def find_csv_in_dir(directory: Path | str, name_token: str) -> Path:
+    """Find a single CSV in *directory* matching *name_token*."""
+    path = Path(directory)
+    csv_files = list_csv_files(path)
+    token = name_token.lower()
 
     exact = [f for f in csv_files if f.stem.lower() == token]
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
         names = ", ".join(sorted(f.name for f in exact))
-        raise ValueError(f"Multiple CSV files named like '{sensor_name}.csv' in {stage_dir}: {names}")
+        raise ValueError(f"Multiple CSV files named like '{name_token}.csv' in {path}: {names}")
 
     matching = [f for f in csv_files if token in f.name.lower()]
     if not matching:
-        raise FileNotFoundError(
-            f"No CSV file containing '{sensor_name}' in {stage_dir}"
-        )
+        raise FileNotFoundError(f"No CSV file containing '{name_token}' in {path}")
     if len(matching) > 1:
         names = ", ".join(sorted(f.name for f in matching))
-        raise ValueError(
-            f"Multiple files matching '{sensor_name}' in {stage_dir}: {names}"
-        )
+        raise ValueError(f"Multiple files matching '{name_token}' in {path}: {names}")
 
     return matching[0]
+
+
+def resolve_sensor_csv(stage_ref: str | Path, sensor_name: str) -> Path:
+    """Resolve a stage reference and find the matching sensor CSV inside it."""
+    return find_csv_in_dir(resolve_data_dir(stage_ref), sensor_name)
+
+
+def find_sensor_csv(
+    recording_name: str,
+    stage: str,
+    sensor_name: str,
+) -> Path:
+    """Find a single sensor CSV within a recording stage directory."""
+    return find_csv_in_dir(recording_stage_dir(recording_name, stage), sensor_name)

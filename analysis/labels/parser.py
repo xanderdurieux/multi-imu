@@ -28,6 +28,8 @@ from typing import Any
 
 import pandas as pd
 
+from common.paths import read_csv, write_csv
+
 
 @dataclass
 class LabelRow:
@@ -87,7 +89,7 @@ def load_labels(path: Path | str) -> list[LabelRow]:
 
 def _load_csv_labels(path: Path) -> list[LabelRow]:
     try:
-        df = pd.read_csv(path)
+        df = read_csv(path)
     except Exception:
         return []
     rows: list[LabelRow] = []
@@ -134,4 +136,4 @@ def write_labels(labels: list[LabelRow], path: Path | str) -> None:
         )
     else:
         df = pd.DataFrame([r.to_dict() for r in labels])
-    df.to_csv(p, index=False)
+    write_csv(df, p)

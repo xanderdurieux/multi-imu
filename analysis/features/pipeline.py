@@ -18,8 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.csv_schema import load_dataframe
-from common.paths import iter_sections_for_recording, sections_root
+from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
 from .extraction import extract_window_features
 
 log = logging.getLogger(__name__)
@@ -37,7 +36,7 @@ def _load_optional_csv(path: Path) -> pd.DataFrame:
         log.debug("Optional CSV not found: %s", path)
         return pd.DataFrame()
     try:
-        return pd.read_csv(path)
+        return read_csv(path)
     except Exception as exc:
         log.warning("Failed to load %s: %s", path, exc)
         return pd.DataFrame()
@@ -113,7 +112,7 @@ def extract_features_for_section(
             "Features already exist for %s — skipping (use force=True to overwrite)",
             section_dir.name,
         )
-        return pd.read_csv(features_csv)
+        return read_csv(features_csv)
 
     section_id = section_dir.name
 
@@ -129,13 +128,13 @@ def extract_features_for_section(
         return pd.DataFrame()
 
     try:
-        sporsa_df = load_dataframe(sporsa_cal_path)
+        sporsa_df = read_csv(sporsa_cal_path)
     except Exception as exc:
         log.error("Failed to load sporsa.csv for %s: %s", section_id, exc)
         return pd.DataFrame()
 
     try:
-        arduino_df = load_dataframe(arduino_cal_path) if arduino_cal_path.exists() else pd.DataFrame()
+        arduino_df = read_csv(arduino_cal_path) if arduino_cal_path.exists() else pd.DataFrame()
     except Exception as exc:
         log.warning("Failed to load arduino.csv for %s: %s", section_id, exc)
         arduino_df = pd.DataFrame()
@@ -312,7 +311,7 @@ def extract_features_for_section(
     features_dir.mkdir(parents=True, exist_ok=True)
     features_df = pd.DataFrame(rows)
 
-    features_df.to_csv(features_csv, index=False)
+    write_csv(features_df, features_csv)
     log.info("Wrote %d windows to %s", len(features_df), features_csv)
 
     # ------------------------------------------------------------------

@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import recording_stage_dir, sections_root
+from common.paths import read_csv, recording_stage_dir, sections_root
+from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,11 @@ def _ts_s(df: pd.DataFrame) -> np.ndarray:
     return ts
 
 
+def _prepare_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep plotting rows aligned on valid, monotonic timestamps."""
+    return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+
 def _plot_sensor_panels(
     stage_dir: Path,
     sensor_name: str,
@@ -34,9 +40,10 @@ def _plot_sensor_panels(
     csv = stage_dir / f"{sensor_name}.csv"
     if not csv.exists():
         return
-    df = pd.read_csv(csv)
+    df = read_csv(csv)
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = _prepare_sensor_df(df)
     ts = _ts_s(df)
 
     acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
@@ -52,17 +59,21 @@ def _plot_sensor_panels(
     idx = 0
     if acc_cols:
         for col in acc_cols:
-            axes[idx].plot(ts, df[col].to_numpy(dtype=float), lw=0.6, label=col)
-        acc_arr = df[acc_cols].to_numpy(dtype=float)
-        acc_norm = np.sqrt(np.nansum(acc_arr ** 2, axis=1))
-        axes[idx].plot(ts, acc_norm, lw=1.0, color="k", alpha=0.4, label="|acc|")
+            y = df[col].to_numpy(dtype=float)
+            x_plot, y_plot = filter_valid_plot_xy(ts, y)
+            axes[idx].plot(x_plot, y_plot, lw=0.6, label=col)
+        acc_norm = strict_vector_norm(df, acc_cols)
+        x_plot, y_plot = filter_valid_plot_xy(ts, acc_norm)
+        axes[idx].plot(x_plot, y_plot, lw=1.0, color="k", alpha=0.4, label="|acc|")
         axes[idx].set_ylabel("Acc (m/s²)")
         axes[idx].legend(loc="upper right", fontsize=7)
         idx += 1
 
     if gyro_cols:
         for col in gyro_cols:
-            axes[idx].plot(ts, df[col].to_numpy(dtype=float), lw=0.6, label=col)
+            y = df[col].to_numpy(dtype=float)
+            x_plot, y_plot = filter_valid_plot_xy(ts, y)
+            axes[idx].plot(x_plot, y_plot, lw=0.6, label=col)
         axes[idx].set_ylabel("Gyro")
         axes[idx].legend(loc="upper right", fontsize=7)
 
@@ -79,10 +90,10 @@ def _plot_comparison(stage_dir: Path, output_path: Path) -> None:
     for sensor in SENSORS:
         csv = stage_dir / f"{sensor}.csv"
         if csv.exists():
-            df = pd.read_csv(csv)
+            df = read_csv(csv)
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-            sensor_dfs[sensor] = df
+            sensor_dfs[sensor] = _prepare_sensor_df(df)
 
     if not sensor_dfs:
         return
@@ -94,11 +105,13 @@ def _plot_comparison(stage_dir: Path, output_path: Path) -> None:
         acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
         gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
         if acc_cols:
-            norm = np.sqrt(np.nansum(df[acc_cols].to_numpy(dtype=float) ** 2, axis=1))
-            axes[0].plot(ts, norm, lw=0.8, color=color, label=f"{sensor} |acc|", alpha=0.8)
+            norm = strict_vector_norm(df, acc_cols)
+            x_plot, y_plot = filter_valid_plot_xy(ts, norm)
+            axes[0].plot(x_plot, y_plot, lw=0.8, color=color, label=f"{sensor} |acc|", alpha=0.8)
         if gyro_cols:
-            norm = np.sqrt(np.nansum(df[gyro_cols].to_numpy(dtype=float) ** 2, axis=1))
-            axes[1].plot(ts, norm, lw=0.8, color=color, label=f"{sensor} |gyro|", alpha=0.8)
+            norm = strict_vector_norm(df, gyro_cols)
+            x_plot, y_plot = filter_valid_plot_xy(ts, norm)
+            axes[1].plot(x_plot, y_plot, lw=0.8, color=color, label=f"{sensor} |gyro|", alpha=0.8)
 
     axes[0].set_ylabel("|acc| (m/s²)")
     axes[0].legend(fontsize=7)

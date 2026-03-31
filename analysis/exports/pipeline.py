@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from common.paths import sections_root, recordings_root, analysis_root
+from common.paths import analysis_root, data_root, read_csv, recordings_root, sections_root, write_csv
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def aggregate_features(
             continue
 
         try:
-            df = pd.read_csv(features_csv)
+            df = read_csv(features_csv)
         except Exception as exc:
             logger.warning("Failed to read %s: %s", features_csv, exc)
             continue
@@ -157,7 +157,7 @@ def export_feature_tables(
         ("features_fused", df_fused),
     ]:
         out_path = output_dir / f"{name}.csv"
-        frame.to_csv(out_path, index=False)
+        write_csv(frame, out_path)
         paths[name] = out_path
         logger.info("Wrote %s (%d rows, %d cols)", out_path, len(frame), len(frame.columns))
 
@@ -168,7 +168,6 @@ def export_feature_tables(
 
     n_sections = df["section_id"].nunique() if "section_id" in df.columns else 0
 
-    data_root_rel = analysis_root() / "data"
     manifest = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "filtering_policy": "min_quality_label=marginal",
@@ -210,7 +209,7 @@ def run_exports(
         If ``False`` and outputs already exist, skip and return existing paths.
     """
     if output_dir is None:
-        output_dir = analysis_root() / "data" / "exports"
+        output_dir = data_root() / "exports"
     output_dir = Path(output_dir)
 
     manifest_path = output_dir / "export_manifest.json"

@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from common.csv_schema import load_dataframe, write_dataframe
-from common.paths import iter_sections_for_recording, sections_root
+from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
 from .core import (
     CalibrationParams,
     SectionCalibration,
@@ -72,7 +71,7 @@ def calibrate_section(
             all_quality_tags.append(f"missing_{sensor}")
             continue
 
-        df = load_dataframe(csv_path)
+        df = read_csv(csv_path)
         try:
             params = estimate_calibration(
                 df,
@@ -91,7 +90,7 @@ def calibrate_section(
         # Apply and write calibrated CSV.
         cal_df = apply_calibration(df, params)
         out_csv = cal_dir / f"{sensor}.csv"
-        write_dataframe(cal_df, out_csv)
+        write_csv(cal_df, out_csv)
         log.info("Wrote calibrated %s → %s (%d rows)", sensor, out_csv, len(cal_df))
 
     # Overall quality.

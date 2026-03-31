@@ -15,8 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common.csv_schema import load_dataframe, write_dataframe
-from common.paths import iter_sections_for_recording, sections_root
+from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
 from common.quaternion import euler_from_quat
 from .madgwick import MadgwickFilter
 from .complementary import ComplementaryFilter
@@ -284,7 +283,7 @@ def process_section_orientation(
             )
             continue
 
-        df = load_dataframe(cal_csv)
+        df = read_csv(cal_csv)
         if df.empty:
             log.warning("Empty calibrated CSV for %s/%s — skipping", section_dir.name, sensor)
             continue
@@ -300,7 +299,7 @@ def process_section_orientation(
         for variant, df_orient in orient_results.items():
             # Write orientation CSV.
             out_csv = orient_dir / f"{sensor}__{variant}.csv"
-            write_dataframe(df_orient, out_csv)
+            write_csv(df_orient, out_csv)
             log.info(
                 "Wrote orientation %s/%s → %s (%d rows)",
                 sensor, variant, out_csv, len(df_orient),

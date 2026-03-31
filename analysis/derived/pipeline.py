@@ -5,8 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from common.csv_schema import load_dataframe
-from common.paths import iter_sections_for_recording, sections_root
+from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
 from .signals import compute_sensor_signals, compute_cross_sensor_signals
 
 log = logging.getLogger(__name__)
@@ -67,7 +66,7 @@ def process_section_derived(
             log.warning("Calibrated %s CSV not found in %s — skipping section.", sensor, section_dir.name)
             return False
         try:
-            sensor_dfs[sensor] = load_dataframe(csv_path)
+            sensor_dfs[sensor] = read_csv(csv_path)
         except Exception as exc:
             log.error("Failed to load %s for %s: %s", csv_path, section_dir.name, exc)
             return False
@@ -85,7 +84,7 @@ def process_section_derived(
 
         out_path = derived_dir / f"{sensor}_signals.csv"
         try:
-            sig_df.to_csv(out_path, index=False)
+            write_csv(sig_df, out_path)
         except Exception as exc:
             log.error("Failed to write %s: %s", out_path, exc)
             return False
@@ -106,7 +105,7 @@ def process_section_derived(
 
     cross_path = derived_dir / "cross_sensor_signals.csv"
     try:
-        cross_df.to_csv(cross_path, index=False)
+        write_csv(cross_df, cross_path)
     except Exception as exc:
         log.error("Failed to write %s: %s", cross_path, exc)
         return False

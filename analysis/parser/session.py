@@ -9,11 +9,11 @@ from typing import Optional
 import json
 
 from common import (
-    load_dataframe,
     recording_dir,
     recording_stage_dir,
+    read_csv,
     session_input_dir,
-    write_dataframe,
+    write_csv,
 )
 
 from visualization.plot_session import plot_recording
@@ -38,7 +38,7 @@ def _process_file(sensor_type: str, src: Path, dst: Path):
     else:
         return None
 
-    write_dataframe(df, dst)
+    write_csv(df, dst)
     return df
 
 
@@ -147,7 +147,7 @@ def process_session(session_name: str) -> None:
             csv_path = out_dir / f"{sensor_name}.csv"
             if not csv_path.exists():
                 continue
-            df_sensor = load_dataframe(csv_path)
+            df_sensor = read_csv(csv_path)
             if df_sensor.empty:
                 continue
 
@@ -246,7 +246,7 @@ def process_session(session_name: str) -> None:
                     csv_path = section_dir / f"{sensor_name}.csv"
                     if not csv_path.exists():
                         continue
-                    df_sec = load_dataframe(csv_path)
+                    df_sec = read_csv(csv_path)
                     if df_sec.empty:
                         continue
                     timing = compute_stream_timing_stats(df_sec, timestamp_col="timestamp")
