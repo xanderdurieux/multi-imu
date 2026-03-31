@@ -1,22 +1,29 @@
-"""Event-centered candidate extraction for dual-IMU sections."""
+"""Dual-IMU cycling event detection stage.
 
+Detects bump, brake, swerve, disagreement, and fall events from derived
+IMU signals produced by the ``derived/`` pipeline stage.
 
-def __getattr__(name):
-    if name in {"EventConfig", "extract_event_candidates_section", "extract_events_from_args", "load_event_windows"}:
-        from .extract import EventConfig, extract_event_candidates_section, extract_events_from_args, load_event_windows
+Usage
+-----
+From Python::
 
-        return {
-            "EventConfig": EventConfig,
-            "extract_event_candidates_section": extract_event_candidates_section,
-            "extract_events_from_args": extract_events_from_args,
-            "load_event_windows": load_event_windows,
-        }[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from events import detect_events, process_section_events, process_recording_events
+    from events import EventConfig, EventCandidate
 
+CLI::
+
+    python -m events <section_name>
+    python -m events --recording <recording_name>
+"""
+
+from events.config import EventConfig
+from events.detectors import EventCandidate, detect_events
+from events.pipeline import process_section_events, process_recording_events
 
 __all__ = [
     "EventConfig",
-    "extract_event_candidates_section",
-    "extract_events_from_args",
-    "load_event_windows",
+    "EventCandidate",
+    "detect_events",
+    "process_section_events",
+    "process_recording_events",
 ]

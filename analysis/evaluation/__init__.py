@@ -1,5 +1,5 @@
-"""Lightweight thesis-oriented evaluation utilities (descriptives + baseline classifiers)."""
+"""Evaluation package: train and evaluate models on extracted features."""
 
-from .experiments import run_evaluation_report
+from evaluation.experiments import run_evaluation
 
-__all__ = ["run_evaluation_report"]
+__all__ = ["run_evaluation"]

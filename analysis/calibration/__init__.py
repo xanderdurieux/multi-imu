@@ -1,16 +1,34 @@
-"""Ride-level world-frame calibration for multi-IMU sections."""
+"""IMU calibration and world-frame alignment.
 
-from __future__ import annotations
+Stages
+------
+1. Estimate accelerometer and gyroscope biases from static segments.
+2. Compute gravity vector in sensor frame.
+3. Optionally estimate forward direction from motion segments.
+4. Build a rotation matrix (sensor → world frame).
+5. Apply calibration to produce ``calibrated/<sensor>.csv`` and
+   ``calibrated/calibration.json``.
 
+CLI::
 
-def __getattr__(name):  # noqa: D401
-    if name == "calibrate_section":
-        from .calibrate import calibrate_section
-        return calibrate_section
-    if name == "validate":
-        from .validate import validate
-        return validate
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    python -m calibration <section_name>
+    python -m calibration <section_name> --frame gravity_plus_forward
+    python -m calibration --session 2026-02-26 --all
+"""
 
+from .core import (
+    CalibrationParams,
+    SectionCalibration,
+    estimate_calibration,
+    apply_calibration,
+)
+from .pipeline import calibrate_section, calibrate_recording_sections
 
-__all__ = ["calibrate_section", "validate"]
+__all__ = [
+    "CalibrationParams",
+    "SectionCalibration",
+    "estimate_calibration",
+    "apply_calibration",
+    "calibrate_section",
+    "calibrate_recording_sections",
+]

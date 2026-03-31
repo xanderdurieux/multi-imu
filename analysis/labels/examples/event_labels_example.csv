@@ -1,4 +1,0 @@
-scope,recording_id,section_id,window_start_s,window_end_s,event_id,event_type,event_time_s,scenario_label,label_source,labeler,labeled_at_utc,label_confidence,label_notes,label_status,label_schema_version,suggestion_source,suggestion_rank
-event,2026-02-26_r1,2026-02-26_r1s2,,,,evt_0007,braking_burst,14.2,hard_braking,manual,reviewer_b,2026-03-27T12:01:00Z,0.92,"longitudinal decel and pitch-rate agree",confirmed,thesis_v1,events.event_candidates,1
-event,2026-02-26_r1,2026-02-26_r1s2,,,,evt_0008,bump_shock_candidate,17.3,surface_disturbance,manual,reviewer_b,2026-03-27T12:02:00Z,0.78,"vertical impulse but weak cross-sensor",confirmed,thesis_v1,events.event_candidates,2
-event,2026-02-26_r1,2026-02-26_r1s2,,,,,swerve_roll_rate_candidate,20.1,unknown,manual,reviewer_b,2026-03-27T12:05:00Z,0.35,"candidate appears noisy",unknown,thesis_v1,events.event_candidates,3

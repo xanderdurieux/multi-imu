@@ -1,167 +1,139 @@
-"""Session-level plotting utilities for the thesis pipeline.
-
-For a given session (date), this module iterates all matching recording
-directories under ``data/recordings/`` and regenerates plots for each
-relevant processing stage.  The resulting figures are used to visually
-assess data quality, synchronisation, calibration, and orientation before
-including recordings in motion or incident analysis.
-
-Stages plotted per recording
-------------------------------
-- ``parsed``:
-  Sensor + comparison plots, timing quality (interval histograms,
-  interval timeline, Arduino clock drift).
-- ``synced``:
-  Flat selected-stream CSVs plus multi-method comparison PNGs
-  (acc/gyro/mag norms, metrics) and ``sporsa`` vs ``arduino`` overlays.
-- ``sections/section_*``:
-  Sensor + comparison plots for each section.
-- ``calibrated``:
-  World-frame calibration diagnostics.
-- ``orientation``:
-  Euler angles, gravity-compensated acceleration, sensor comparison, and
-  relative (head vs handlebar) orientation.
-
-During a full sync run, methods write to ``synced/sda/`` … temporarily;
-after selection those folders are removed and only flat ``synced/*.csv``
-and comparison figures remain.
-"""
+"""Plot all sensors for a recording stage (acc, gyro, comparison)."""
 
 from __future__ import annotations
 
-import argparse
-from typing import Iterable, Optional
+import logging
+from pathlib import Path
 
-from common import recording_stage_dir, recordings_root
-from common.paths import iter_sections_for_recording, parse_section_folder_name
-from visualization import (
-    plot_calibration,
-    plot_comparison,
-    plot_orientation,
-    plot_sensor,
-    plot_sync,
-    plot_timing,
-)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
+from common.paths import recording_stage_dir, sections_root
 
-SENSOR_NAMES: tuple[str, str] = ("sporsa", "arduino")
+log = logging.getLogger(__name__)
 
-# Stages to skip entirely during session plotting.
-_SKIP_STAGES: frozenset[str] = frozenset()
+SENSORS = ["sporsa", "arduino"]
+COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 
 
-def _iter_session_recordings(session_name: str) -> Iterable[str]:
-    """Yield recording names that belong to ``session_name`` (prefix match)."""
-    root = recordings_root()
-    if not root.exists():
-        raise FileNotFoundError(f"Recordings root not found: {root}")
-    prefix = f"{session_name}_"
-    for entry in sorted(root.iterdir()):
-        if entry.is_dir() and entry.name.startswith(prefix):
-            yield entry.name
+def _ts_s(df: pd.DataFrame) -> np.ndarray:
+    ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+    if ts.size > 0:
+        ts = (ts - ts[0]) / 1000.0
+    return ts
 
 
-def _iter_recording_stages(recording_name: str) -> Iterable[str]:
-    """Yield stage identifiers for a recording.
+def _plot_sensor_panels(
+    stage_dir: Path,
+    sensor_name: str,
+    output_path: Path,
+) -> None:
+    csv = stage_dir / f"{sensor_name}.csv"
+    if not csv.exists():
+        return
+    df = pd.read_csv(csv)
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    ts = _ts_s(df)
 
-    The ``sections`` directory (now a top-level ``data/sections/`` root) is
-    expanded into virtual stages ``sections/section_N``.
-    """
-    rec_dir = recordings_root() / recording_name
-    for child in sorted(rec_dir.iterdir()):
-        if not child.is_dir() or child.name in _SKIP_STAGES:
-            continue
-        yield child.name
+    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
+    gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
+    rows = sum([bool(acc_cols), bool(gyro_cols)])
+    if rows == 0:
+        return
 
-    # Add per-section virtual stages.
-    section_entries: list[tuple[int, str]] = []
-    for sec_dir in iter_sections_for_recording(recording_name):
-        _rec, sec_idx = parse_section_folder_name(sec_dir.name)
-        section_entries.append((sec_idx, f"sections/section_{sec_idx}"))
-    for _sec_idx, stage in sorted(section_entries, key=lambda t: t[0]):
-        yield stage
+    fig, axes = plt.subplots(rows, 1, figsize=(14, 3 * rows), sharex=True)
+    if rows == 1:
+        axes = [axes]
+
+    idx = 0
+    if acc_cols:
+        for col in acc_cols:
+            axes[idx].plot(ts, df[col].to_numpy(dtype=float), lw=0.6, label=col)
+        acc_arr = df[acc_cols].to_numpy(dtype=float)
+        acc_norm = np.sqrt(np.nansum(acc_arr ** 2, axis=1))
+        axes[idx].plot(ts, acc_norm, lw=1.0, color="k", alpha=0.4, label="|acc|")
+        axes[idx].set_ylabel("Acc (m/s²)")
+        axes[idx].legend(loc="upper right", fontsize=7)
+        idx += 1
+
+    if gyro_cols:
+        for col in gyro_cols:
+            axes[idx].plot(ts, df[col].to_numpy(dtype=float), lw=0.6, label=col)
+        axes[idx].set_ylabel("Gyro")
+        axes[idx].legend(loc="upper right", fontsize=7)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(f"{stage_dir.name} / {sensor_name}")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+    log.debug("Saved %s", output_path)
 
 
-def _plot_sensor_and_comparison(recording_name: str, stage: str) -> None:
-    """Run sensor + comparison plots for a given ``<recording_name>/<stage>``."""
-    stage_ref = f"{recording_name}/{stage}"
-    for sensor_name in SENSOR_NAMES:
+def _plot_comparison(stage_dir: Path, output_path: Path) -> None:
+    sensor_dfs: dict[str, pd.DataFrame] = {}
+    for sensor in SENSORS:
+        csv = stage_dir / f"{sensor}.csv"
+        if csv.exists():
+            df = pd.read_csv(csv)
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            sensor_dfs[sensor] = df
+
+    if not sensor_dfs:
+        return
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+    for sensor, df in sensor_dfs.items():
+        ts = _ts_s(df)
+        color = COLORS.get(sensor)
+        acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
+        gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
+        if acc_cols:
+            norm = np.sqrt(np.nansum(df[acc_cols].to_numpy(dtype=float) ** 2, axis=1))
+            axes[0].plot(ts, norm, lw=0.8, color=color, label=f"{sensor} |acc|", alpha=0.8)
+        if gyro_cols:
+            norm = np.sqrt(np.nansum(df[gyro_cols].to_numpy(dtype=float) ** 2, axis=1))
+            axes[1].plot(ts, norm, lw=0.8, color=color, label=f"{sensor} |gyro|", alpha=0.8)
+
+    axes[0].set_ylabel("|acc| (m/s²)")
+    axes[0].legend(fontsize=7)
+    axes[1].set_ylabel("|gyro|")
+    axes[1].legend(fontsize=7)
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(f"{stage_dir.name} — comparison")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+    log.debug("Saved %s", output_path)
+
+
+def plot_recording(
+    recording_name: str,
+    *,
+    stage_filter: str = "parsed",
+    sensors: list[str] | None = None,
+) -> None:
+    """Generate per-sensor and comparison plots for a recording stage."""
+    if sensors is None:
+        sensors = list(SENSORS)
+    stage_dir = recording_stage_dir(recording_name, stage_filter)
+    if not stage_dir.exists():
+        log.warning("Stage dir not found: %s", stage_dir)
+        return
+
+    for sensor in sensors:
+        out = stage_dir / f"{sensor}.png"
         try:
-            plot_sensor.main([stage_ref, sensor_name])
-            plot_sensor.main([stage_ref, sensor_name, "--norm", "--acc"])
-        except SystemExit:
-            pass
+            _plot_sensor_panels(stage_dir, sensor, out)
+        except Exception as exc:
+            log.warning("Failed to plot %s/%s: %s", recording_name, sensor, exc)
 
     try:
-        plot_comparison.main([stage_ref])
-        plot_comparison.main([stage_ref, "--norm"])
-    except SystemExit:
-        pass
-
-
-def plot_recording(recording_name: str, stage_filter: Optional[str] = None) -> None:
-    """Generate all plots for a single recording across its stages."""
-    for stage in _iter_recording_stages(recording_name):
-        if stage_filter is not None and stage != stage_filter:
-            continue
-
-        # --- Orientation stage ---
-        if stage == "orientation":
-            plot_orientation.plot_orientation_stage(recording_name, stage)
-            continue
-
-        # --- Calibration stage ---
-        if stage == "calibrated":
-            plot_calibration.plot_calibration_stage(recording_name)
-            continue
-
-        # --- Parsed stage: sensor plots + timing quality ---
-        if stage == "parsed":
-            _plot_sensor_and_comparison(recording_name, stage)
-            plot_timing.plot_timing_stage(recording_name)
-            continue
-
-        # --- Best selected sync stage: sensor plots + sync quality ---
-        if stage == "synced":
-            _plot_sensor_and_comparison(recording_name, stage)
-            plot_sync.plot_sync_stage(recording_name)
-            continue
-
-        # --- Sections: sensor + comparison plots ---
-        _plot_sensor_and_comparison(recording_name, stage)
-
-
-def plot_session(session_name: str, stage_filter: Optional[str] = None) -> None:
-    """Generate plots for all recordings belonging to ``session_name``."""
-    for recording_name in _iter_session_recordings(session_name):
-        plot_recording(recording_name, stage_filter=stage_filter)
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m visualization.plot_session",
-        description="Generate plots for all recordings of a session (date).",
-    )
-    parser.add_argument(
-        "session_names",
-        nargs="+",
-        help="One or more session names (dates) whose recordings will be plotted.",
-    )
-    parser.add_argument(
-        "--stage",
-        dest="stage",
-        default=None,
-        help="Only plot this stage (e.g. parsed, synced, orientation).",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args(argv)
-    for session_name in args.session_names:
-        plot_session(session_name, stage_filter=args.stage)
-
-
-if __name__ == "__main__":
-    main()
+        _plot_comparison(stage_dir, stage_dir / "comparison.png")
+    except Exception as exc:
+        log.warning("Failed comparison plot for %s: %s", recording_name, exc)

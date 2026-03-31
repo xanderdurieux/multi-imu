@@ -1,3 +1,0 @@
-scope,recording_id,section_id,window_start_s,window_end_s,event_id,event_type,event_time_s,scenario_label,label_source,labeler,labeled_at_utc,label_confidence,label_notes,label_status,label_schema_version,suggestion_source,suggestion_rank
-event,2026-02-26_r1,2026-02-26_r1s2,,,,evt_0007,braking_burst,14.2,hard_braking,event_candidate_suggestion,,,0.82,"candidate suggestion; human review required",suggested,thesis_v1,events.event_candidates,1
-event,2026-02-26_r1,2026-02-26_r1s2,,,,evt_0008,bump_shock_candidate,17.3,surface_disturbance,event_candidate_suggestion,,,0.69,"candidate suggestion; human review required",suggested,thesis_v1,events.event_candidates,2

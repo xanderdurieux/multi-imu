@@ -1,8 +1,0 @@
-{
-  "schema_version": "locked_recording_splits.v1",
-  "splits": {
-    "train": ["2026-02-26_r1", "2026-02-26_r2", "2026-02-26_r3"],
-    "validation": ["2026-02-26_r4"],
-    "test": ["2026-02-26_r5"]
-  }
-}

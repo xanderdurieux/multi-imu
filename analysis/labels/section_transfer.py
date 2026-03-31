@@ -1,108 +1,61 @@
-"""Copy recording-level interval labels into section folders when splitting.
+"""Transfer recording-level interval labels to section-level label files.
 
-Labels exported from the event labeler under ``<recording>/<stage>/`` use
-``window_start_s`` / ``window_end_s`` as seconds from the **first sporsa
-timestamp in that stage folder** (same origin as the labeler). When
-``parser.split_sections`` cuts the recording into sections, this module
-rewrites overlapping intervals in **section-relative** seconds (first sporsa
-timestamp in the section CSV) and sets ``section_id`` to the section folder
-name (e.g. ``2026-02-26_r2s1``).
+When a recording is split into sections, any time-interval labels that overlap
+with a section are clipped to that section's time range and written to
+``<section_dir>/labels.csv``.
 
-Source files: any ``labels*.csv`` in the stage directory (e.g.
-``labels_intervals_*.csv``). Only rows with ``scope=interval`` and matching
-``recording_id`` are considered. Empty ``section_id`` in the source file is
-allowed (recording-wide intervals).
+The expected label file in the recording stage directory is named
+``labels.csv`` or ``labels.json`` and uses the standard :class:`LabelRow`
+schema (columns: start_ms, end_ms, label, scenario_label, …).
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from .parser import LabelRow, load_labels, write_labels
+
 log = logging.getLogger(__name__)
-
-LABEL_CSV_PREFIX_GLOB = "labels*.csv"
-
-# Same columns as ``labels.event_labeler.LABEL_CSV_HEADER``.
-INTERVAL_CSV_COLUMNS = [
-    "scope",
-    "recording_id",
-    "section_id",
-    "window_start_s",
-    "window_end_s",
-    "scenario_label",
-    "label_source",
-]
-
-
-def _recording_slug(recording_id: str) -> str:
-    s = recording_id.strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_") or "labels"
-
-
-def discover_label_csvs(stage_dir: Path) -> list[Path]:
-    """Return sorted unique ``labels*.csv`` paths directly under ``stage_dir``."""
-    if not stage_dir.is_dir():
-        return []
-    paths = sorted({p.resolve() for p in stage_dir.glob(LABEL_CSV_PREFIX_GLOB) if p.is_file()})
-    return paths
 
 
 def load_recording_interval_rows_for_transfer(
-    stage_dir: Path,
-    recording_id: str,
-) -> list[dict[str, Any]]:
-    """Parse interval rows that belong to ``recording_id`` (recording-relative windows)."""
-    need = (
-        "scope",
-        "recording_id",
-        "window_start_s",
-        "window_end_s",
-        "scenario_label",
-    )
-    out: list[dict[str, Any]] = []
-    for path in discover_label_csvs(stage_dir):
-        try:
-            df = pd.read_csv(path)
-        except (OSError, ValueError, pd.errors.ParserError) as exc:
-            log.warning("Skip label file %s: %s", path.name, exc)
-            continue
-        if not all(c in df.columns for c in need):
-            log.debug("Skip %s: need columns %s", path.name, need)
-            continue
-        for _, row in df.iterrows():
-            if str(row["scope"]).strip().lower() != "interval":
-                continue
-            rid = str(row["recording_id"]).strip()
-            if rid != recording_id:
-                continue
-            try:
-                t0 = float(row["window_start_s"])
-                t1 = float(row["window_end_s"])
-            except (TypeError, ValueError):
-                continue
-            lab = str(row["scenario_label"]).strip()
-            if not lab:
-                continue
-            src = row.get("label_source")
-            if src is None or (isinstance(src, float) and pd.isna(src)):
-                src_s = "manual"
-            else:
-                src_s = str(src).strip() or "manual"
-            out.append(
-                {
-                    "window_start_s": t0,
-                    "window_end_s": t1,
-                    "scenario_label": lab,
-                    "label_source": src_s,
-                }
-            )
-    return out
+    recording_stage_dir: Path,
+    recording_name: str,
+) -> list[LabelRow]:
+    """Load label rows from a recording stage directory for section transfer.
+
+    Looks for ``labels.csv`` or ``labels.json`` inside *recording_stage_dir*.
+    Falls back to ``data/sessions/<session>/labels.csv`` if none found in the
+    stage directory.
+
+    Returns an empty list if no label file is found.
+    """
+    candidates = [
+        recording_stage_dir / "labels.csv",
+        recording_stage_dir / "labels.json",
+    ]
+    # Also look in recording root (sibling of the stage dir).
+    rec_root = recording_stage_dir.parent
+    candidates += [
+        rec_root / "labels.csv",
+        rec_root / "labels.json",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            rows = load_labels(path)
+            if rows:
+                log.debug(
+                    "Loaded %d label row(s) for %s from %s",
+                    len(rows), recording_name, path,
+                )
+                return rows
+
+    return []
 
 
 def write_section_labels_from_recording_intervals(
@@ -114,61 +67,63 @@ def write_section_labels_from_recording_intervals(
     section_abs_start_ms: float,
     section_abs_end_ms: float,
     sporsa_section_df: pd.DataFrame,
-    intervals: list[dict[str, Any]],
-) -> Path | None:
-    """Write ``labels_intervals_<slug>s<idx>.csv`` under ``section_dir``.
+    intervals: list[LabelRow],
+) -> None:
+    """Clip and write recording-level interval labels to a section directory.
 
-    Clips each interval to ``[section_abs_start_ms, section_abs_end_ms]`` in
-    absolute host time, then expresses bounds in section-relative seconds
-    (origin = first sporsa timestamp in ``sporsa_section_df``).
+    Parameters
+    ----------
+    recording_name:
+        Name of the recording (for logging).
+    section_idx:
+        Section index (for logging).
+    section_dir:
+        Directory where ``labels.csv`` will be written.
+    recording_origin_ms:
+        Absolute timestamp (ms) of the recording's first sample — used to
+        convert any relative timestamps if needed (not currently used, but
+        reserved for future relative-time label formats).
+    section_abs_start_ms:
+        Absolute start of this section in ms.
+    section_abs_end_ms:
+        Absolute end of this section in ms.
+    sporsa_section_df:
+        The reference sensor's DataFrame for this section (used to get the
+        exact actual time range if needed).
+    intervals:
+        Recording-level :class:`LabelRow` objects to transfer.
     """
-    if not intervals or sporsa_section_df.empty or "timestamp" not in sporsa_section_df.columns:
-        return None
-    section_origin_ms = float(sporsa_section_df["timestamp"].iloc[0])
-    section_id = section_dir.name
-    rows_out: list[dict[str, Any]] = []
+    if not intervals:
+        return
 
-    for it in intervals:
-        w0 = float(it["window_start_s"])
-        w1 = float(it["window_end_s"])
-        if w1 <= w0:
+    clipped: list[LabelRow] = []
+    for row in intervals:
+        # Keep only intervals that overlap [section_abs_start_ms, section_abs_end_ms].
+        if row.end_ms <= section_abs_start_ms or row.start_ms >= section_abs_end_ms:
             continue
-        abs_0 = recording_origin_ms + w0 * 1000.0
-        abs_1 = recording_origin_ms + w1 * 1000.0
-        if abs_1 < section_abs_start_ms or abs_0 > section_abs_end_ms:
-            continue
-        c0 = max(abs_0, section_abs_start_ms)
-        c1 = min(abs_1, section_abs_end_ms)
-        if c1 <= c0:
-            continue
-        ws = (c0 - section_origin_ms) / 1000.0
-        we = (c1 - section_origin_ms) / 1000.0
-        rows_out.append(
-            {
-                "scope": "interval",
-                "recording_id": recording_name,
-                "section_id": section_id,
-                "window_start_s": ws,
-                "window_end_s": we,
-                "scenario_label": it["scenario_label"],
-                "label_source": it["label_source"],
-            }
+        clipped_row = LabelRow(
+            start_ms=max(row.start_ms, section_abs_start_ms),
+            end_ms=min(row.end_ms, section_abs_end_ms),
+            label=row.label,
+            scenario_label=row.scenario_label,
+            scope=row.scope,
+            annotator=row.annotator,
+            confidence=row.confidence,
+            ambiguous=row.ambiguous,
+            notes=row.notes,
         )
+        clipped.append(clipped_row)
 
-    if not rows_out:
+    if not clipped:
         log.debug(
-            "No interval labels overlap %s %s in absolute time; skip label CSV",
-            recording_name,
-            section_id,
+            "No labels overlap section %s s%d [%.0f, %.0f]",
+            recording_name, section_idx, section_abs_start_ms, section_abs_end_ms,
         )
-        return None
+        return
 
-    out_path = section_dir / f"labels_intervals_{_recording_slug(recording_name)}s{section_idx}.csv"
-    pd.DataFrame(rows_out, columns=INTERVAL_CSV_COLUMNS).to_csv(out_path, index=False)
+    out_path = section_dir / "labels.csv"
+    write_labels(clipped, out_path)
     log.info(
-        "Wrote %d interval row(s) for %s → %s",
-        len(rows_out),
-        section_id,
-        out_path.name,
+        "Wrote %d label row(s) to %s",
+        len(clipped), out_path,
     )
-    return out_path

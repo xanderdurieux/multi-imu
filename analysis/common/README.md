@@ -11,17 +11,6 @@ Small helpers shared across the thesis analysis pipeline.
   `parser.split_sections` and by sync methods that rely on calibration anchors.
 - `quaternion.py`: quaternion math used by the orientation estimation stage.
 
-## Most commonly used APIs
-```python
-from common import load_dataframe, write_dataframe
-from common.paths import (
-  recordings_root,
-  recording_dir,
-  sections_root,
-  section_dir,
-  iter_sections_for_recording,
-)
-```
 
 ## Data conventions (IMU CSVs)
 All pipeline stages assume the same baseline columns:

@@ -1,17 +1,111 @@
-"""CLI entry for orientation: uv run -m orientation.estimate."""
+"""CLI entry point for the orientation estimation stage.
+
+Usage::
+
+    python -m orientation <section_name>
+    python -m orientation <section_name> --force
+    python -m orientation --recording <recording_name>
+    python -m orientation --recording <recording_name> --variants madgwick complementary
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from pathlib import Path
 
-# When run as python -m orientation, run estimate
+from common.paths import sections_root, iter_sections_for_recording
+from .pipeline import process_section_orientation, process_recording_orientation
+
+
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    argv = list(argv if argv is not None else sys.argv[1:])
+
+    parser = argparse.ArgumentParser(
+        prog="python -m orientation",
+        description="Run orientation filters on calibrated IMU data.",
+    )
+    parser.add_argument(
+        "section_name",
+        nargs="?",
+        help="Section folder name (e.g. 2026-02-26_r1s1).",
+    )
+    parser.add_argument(
+        "--recording",
+        metavar="RECORDING",
+        help="Recording name to process all its sections (e.g. 2026-02-26_r1).",
+    )
+    parser.add_argument(
+        "--sample-rate-hz",
+        type=float,
+        default=100.0,
+        metavar="HZ",
+        help="Sampling rate in Hz (default: 100).",
+    )
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=["madgwick", "complementary"],
+        choices=["madgwick", "complementary"],
+        metavar="VARIANT",
+        help="Filter variants to run (default: madgwick complementary).",
+    )
+    parser.add_argument(
+        "--canonical-variant",
+        default="madgwick",
+        choices=["madgwick", "complementary"],
+        metavar="VARIANT",
+        help="Canonical (primary) variant to record in stats (default: madgwick).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing orientation outputs.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.recording:
+        results = process_recording_orientation(
+            args.recording,
+            sample_rate_hz=args.sample_rate_hz,
+            force=args.force,
+            canonical_variant=args.canonical_variant,
+            variants=args.variants,
+        )
+        print(f"Processed {len(results)} section(s) for recording '{args.recording}'.")
+        for i, stats in enumerate(results):
+            print(f"  Section {i}: {json.dumps({k: v for k, v in stats.items() if k not in ('created_at_utc', 'canonical_variant')}, indent=4)}")
+    elif args.section_name:
+        section_dir = sections_root() / args.section_name
+        if not section_dir.exists():
+            print(f"Section not found: {section_dir}", file=sys.stderr)
+            sys.exit(1)
+        stats = process_section_orientation(
+            section_dir,
+            sample_rate_hz=args.sample_rate_hz,
+            force=args.force,
+            canonical_variant=args.canonical_variant,
+            variants=args.variants,
+        )
+        # Print per-sensor quality summary.
+        for sensor in ("sporsa", "arduino"):
+            if sensor not in stats:
+                print(f"  {sensor}: not processed (CSV missing?)")
+                continue
+            for variant, s in stats[sensor].items():
+                print(
+                    f"  {sensor}/{variant}: quality={s['quality']}"
+                    f"  gravity_alignment={s['gravity_alignment']:.3f}"
+                    f"  pitch_std={s['pitch_std_deg']:.2f}°"
+                    f"  roll_std={s['roll_std_deg']:.2f}°"
+                )
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    from .estimate import estimate_sections_from_args
-    parser = argparse.ArgumentParser(prog="python -m orientation.estimate")
-    parser.add_argument("name", help="Section path or recording with --all-sections")
-    parser.add_argument("--all-sections", action="store_true")
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    estimate_sections_from_args(args.name, all_sections=args.all_sections)
+    main()

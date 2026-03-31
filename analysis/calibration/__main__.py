@@ -1,29 +1,85 @@
-"""CLI entry for calibration: uv run -m calibration (dispatches to calibrate or validate)."""
+"""CLI entry point for the calibration stage.
+
+Usage::
+
+    python -m calibration <section_name>
+    python -m calibration <section_name> --frame gravity_plus_forward
+    python -m calibration --recording 2026-02-26_r1 --all-sections
+"""
 
 from __future__ import annotations
 
-# When run as "python -m calibration", run calibrate by default.
-# Use "python -m calibration.validate" for validation.
-if __name__ == "__main__":
-    from .calibrate import calibrate_sections_from_args
-    import argparse
-    import logging
-    parser = argparse.ArgumentParser(prog="python -m calibration")
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+from common.paths import sections_root, iter_sections_for_recording
+from .pipeline import calibrate_section, calibrate_recording_sections
+
+
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    argv = list(argv if argv is not None else sys.argv[1:])
+
+    parser = argparse.ArgumentParser(
+        prog="python -m calibration",
+        description="Estimate and apply IMU calibration for one or more sections.",
+    )
     parser.add_argument(
-        "name",
-        help=(
-            "Section directory (e.g. 'data/sections/2026-02-26_r2s1' or '2026-02-26_r2s1'). "
-            "With --all-sections, pass a recording name like '2026-02-26_r2'."
-        ),
+        "section_name",
+        nargs="?",
+        help="Section folder name (e.g. 2026-02-26_r1s1).",
     )
-    parser.add_argument("--all-sections", action="store_true")
-    parser.add_argument("--static-window", type=float, default=3.0)
-    parser.add_argument("--variance-threshold", type=float, default=0.5)
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    calibrate_sections_from_args(
-        args.name,
-        all_sections=args.all_sections,
-        static_window_seconds=args.static_window,
-        variance_threshold=args.variance_threshold,
+    parser.add_argument(
+        "--recording",
+        help="Recording name to calibrate all its sections (e.g. 2026-02-26_r1).",
     )
+    parser.add_argument(
+        "--frame",
+        default="gravity_only",
+        choices=["gravity_only", "gravity_plus_forward"],
+        help="Frame alignment mode (default: gravity_only).",
+    )
+    parser.add_argument(
+        "--sample-rate-hz",
+        type=float,
+        default=100.0,
+        help="Approximate sampling rate in Hz (default: 100).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing calibration outputs.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.recording:
+        results = calibrate_recording_sections(
+            args.recording,
+            frame_alignment=args.frame,
+            sample_rate_hz=args.sample_rate_hz,
+            force=args.force,
+        )
+        print(f"Calibrated {len(results)} section(s) for recording '{args.recording}'.")
+    elif args.section_name:
+        section_dir = sections_root() / args.section_name
+        if not section_dir.exists():
+            print(f"Section not found: {section_dir}", file=sys.stderr)
+            sys.exit(1)
+        cal = calibrate_section(
+            section_dir,
+            frame_alignment=args.frame,
+            sample_rate_hz=args.sample_rate_hz,
+            force=args.force,
+        )
+        print(f"Quality: {cal.calibration_quality}")
+        if cal.quality_tags:
+            print(f"Tags: {', '.join(cal.quality_tags)}")
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

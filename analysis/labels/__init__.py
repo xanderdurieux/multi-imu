@@ -1,17 +1,14 @@
-"""Scenario labeling utilities for recordings, sections, intervals, and events.
+"""Label loading, parsing, and section-transfer utilities."""
 
-Interactive IMU + GPS labeling HTML:
-``python -m labels.event_labeler <recording/stage>``.
-
-Lightweight annotation workflow helpers:
-``python -m labels.workflow --help``.
-"""
-
-from .parser import PROVENANCE_FIELDS, LabelIndex, load_labels_from_path, warn_unlabeled_windows
+from .parser import load_labels, LabelRow
+from .section_transfer import (
+    load_recording_interval_rows_for_transfer,
+    write_section_labels_from_recording_intervals,
+)
 
 __all__ = [
-    "PROVENANCE_FIELDS",
-    "LabelIndex",
-    "load_labels_from_path",
-    "warn_unlabeled_windows",
+    "load_labels",
+    "LabelRow",
+    "load_recording_interval_rows_for_transfer",
+    "write_section_labels_from_recording_intervals",
 ]

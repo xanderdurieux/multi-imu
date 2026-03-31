@@ -1,0 +1,17 @@
+{
+  "bump_acc_threshold_ms2": 4.0,
+  "bump_min_duration_s": 0.05,
+  "bump_max_duration_s": 0.8,
+  "bump_min_confidence": 0.3,
+  "brake_acc_threshold_ms2": 3.0,
+  "brake_min_duration_s": 0.3,
+  "brake_max_duration_s": 5.0,
+  "swerve_gyro_threshold_dps": 30.0,
+  "swerve_min_duration_s": 0.2,
+  "swerve_max_duration_s": 4.0,
+  "disagree_threshold": 4.0,
+  "disagree_min_duration_s": 0.5,
+  "fall_acc_threshold_ms2": 15.0,
+  "fall_gyro_threshold_dps": 150.0,
+  "merge_gap_s": 0.1
+}

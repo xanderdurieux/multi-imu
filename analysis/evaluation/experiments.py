@@ -1,911 +1,404 @@
-"""Config-driven experiment layer for thesis-ready dual-IMU evaluation."""
+"""Model training and evaluation experiments."""
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.impute import SimpleImputer
-from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    ConfusionMatrixDisplay,
-    balanced_accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_recall_curve,
-    precision_score,
-    recall_score,
-)
-from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-from protocol.thesis_protocol import evaluate_qc_sections, load_locked_split_manifest
+logger = logging.getLogger(__name__)
 
-log = logging.getLogger(__name__)
+_QUALITY_ORDER = ["poor", "marginal", "good"]
 
-DEFAULT_CONFIG: dict[str, Any] = {
-    "label_col": "scenario_label",
-    "group_col": "recording_id",
-    "sync_col": "sync_method",
-    "orientation_col": "orientation_method",
-    "min_samples_per_class": 6,
-    "pr_curve_minority_ratio_threshold": 0.33,
-    "max_effect_size_features": 60,
-    "max_variance_features": 120,
-    "max_importance_features": 20,
-    "feature_sets": {
-        "bike_only": {"include_prefixes": ["sporsa__"]},
-        "rider_only": {"include_prefixes": ["arduino__"]},
-        "fused": {"include_prefixes": []},
-    },
-    "evaluation_seed": 42,
-    "feature_family_ablation": {
-        "enabled": True,
-        "families": {
-            "bumps": ["bump_"],
-            "braking": ["brake_"],
-            "cornering": ["corner_"],
-            "sprinting": ["sprint_"],
-            "disagreement": ["disagree_"],
-        },
-        "physical_meaning": {
-            "bumps": "Vertical shock transfer and road-surface disturbance sensitivity.",
-            "braking": "Longitudinal deceleration load transfer and rider stabilization response.",
-            "cornering": "Lateral acceleration / lean-coupled dynamics in turns.",
-            "sprinting": "High-cadence rider-driven oscillation and power bursts.",
-            "disagreement": "Bike-rider coupling mismatch (relative motion and damping behaviour).",
-        },
-    },
-    "locked_split_manifest": None,
-    "qc_policy": {"enabled": False},
+_META_COLS = {
+    "section_id",
+    "window_idx",
+    "window_start_ms",
+    "window_end_ms",
+    "window_duration_s",
+    "scenario_label",
+    "overall_quality_label",
+    "quality_tier",
+    "calibration_quality",
+    "sync_confidence",
+}
+
+_MODEL_REGISTRY: dict[str, Any] = {
+    "random_forest": RandomForestClassifier,
+    "gradient_boosting": GradientBoostingClassifier,
+    "logistic_regression": LogisticRegression,
+}
+
+_MODEL_DISPLAY: dict[str, str] = {
+    "random_forest": "Random Forest",
+    "gradient_boosting": "Gradient Boosting",
+    "logistic_regression": "Logistic Regression",
 }
 
 
-@dataclass(frozen=True)
-class EvalContext:
-    df: pd.DataFrame
-    label_col: str
-    group_col: str
-    feature_cols: list[str]
+def _select_feature_cols(df: pd.DataFrame, prefixes: list[str]) -> list[str]:
+    """Return columns matching any of the given prefixes, excluding metadata cols."""
+    return [
+        c
+        for c in df.columns
+        if c not in _META_COLS
+        and any(c.startswith(p) for p in prefixes)
+        and pd.api.types.is_numeric_dtype(df[c])
+    ]
 
 
-def _load_config(config_path: Path | None) -> dict[str, Any]:
-    cfg = dict(DEFAULT_CONFIG)
-    if config_path is None:
-        return cfg
-    user_cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
-    for key, value in user_cfg.items():
-        if isinstance(value, dict) and isinstance(cfg.get(key), dict):
-            cfg[key] = {**cfg[key], **value}
-        else:
-            cfg[key] = value
-    return cfg
-
-
-def _numeric_feature_columns(df: pd.DataFrame, *, exclude: set[str]) -> list[str]:
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    return [c for c in num_cols if c not in exclude and not c.startswith("_")]
-
-
-def _resolve_feature_sets(feature_cols: list[str], cfg: dict[str, Any]) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
-    for name, rules in cfg["feature_sets"].items():
-        prefixes = rules.get("include_prefixes", [])
-        excludes = rules.get("exclude_patterns", [])
-        if not prefixes:
-            cols = list(feature_cols)
-        else:
-            cols = [c for c in feature_cols if any(c.startswith(p) for p in prefixes)]
-        if excludes:
-            cols = [c for c in cols if not any(p in c for p in excludes)]
-        out[name] = cols
-    return out
-
-
-def _evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+def _auto_detect_feature_sets(df: pd.DataFrame) -> dict[str, list[str]]:
+    """Return default feature set → prefix mapping based on available columns."""
     return {
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-        "precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
-        "recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
-        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "bike": ["bike_", "sporsa_"],
+        "rider": ["rider_", "arduino_"],
+        "fused": ["bike_", "sporsa_", "rider_", "arduino_", "cross_"],
     }
 
 
-def _cohen_d(a: np.ndarray, b: np.ndarray) -> float:
-    a = a[np.isfinite(a)]
-    b = b[np.isfinite(b)]
-    if len(a) < 2 or len(b) < 2:
-        return float("nan")
-    pooled = (((len(a) - 1) * np.var(a, ddof=1)) + ((len(b) - 1) * np.var(b, ddof=1))) / max(
-        len(a) + len(b) - 2,
-        1,
+def _build_model(name: str, seed: int) -> Any:
+    cls = _MODEL_REGISTRY[name]
+    kwargs: dict[str, Any] = {"random_state": seed}
+    if name == "logistic_regression":
+        kwargs["max_iter"] = 1000
+    return cls(**kwargs)
+
+
+def _cv_evaluate(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    model: Any,
+    n_splits: int = 5,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Run GroupKFold cross-validation and return aggregated metrics."""
+    pipe = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("clf", model),
+        ]
     )
-    if pooled <= 0:
-        return float("nan")
-    return float((np.mean(a) - np.mean(b)) / np.sqrt(pooled))
 
+    cv = GroupKFold(n_splits=n_splits)
+    cv_results = cross_validate(
+        pipe,
+        X,
+        y,
+        groups=groups,
+        cv=cv,
+        scoring=["accuracy", "f1_macro"],
+        return_train_score=False,
+        return_estimator=True,
+    )
 
-def _effect_size_table(df: pd.DataFrame, label_col: str, feature_cols: list[str]) -> pd.DataFrame:
-    labels = sorted(df[label_col].dropna().astype(str).unique().tolist())
-    rows: list[dict[str, Any]] = []
-    for feat in feature_cols:
-        best = 0.0
-        best_pair = (None, None)
-        for i, a in enumerate(labels):
-            vals_a = df.loc[df[label_col].astype(str) == a, feat].to_numpy(dtype=float)
-            for b in labels[i + 1 :]:
-                vals_b = df.loc[df[label_col].astype(str) == b, feat].to_numpy(dtype=float)
-                d = _cohen_d(vals_a, vals_b)
-                if np.isfinite(d) and abs(d) > abs(best):
-                    best = float(d)
-                    best_pair = (a, b)
-        rows.append(
-            {
-                "feature": feat,
-                "max_abs_cohen_d": abs(best),
-                "signed_cohen_d": best,
-                "pair_a": best_pair[0],
-                "pair_b": best_pair[1],
-            }
-        )
-    return pd.DataFrame(rows).sort_values("max_abs_cohen_d", ascending=False)
+    accuracy = float(np.mean(cv_results["test_accuracy"]))
+    macro_f1 = float(np.mean(cv_results["test_f1_macro"]))
 
+    # Gather per-class metrics via one full fold re-fit on all data
+    pipe.fit(X, y)
+    y_pred = pipe.predict(X)
+    report = classification_report(y, y_pred, output_dict=True, zero_division=0)
+    cm = confusion_matrix(y, y_pred)
 
-def _variance_table(df: pd.DataFrame, label_col: str, feature_cols: list[str]) -> pd.DataFrame:
-    rows = []
-    for c in feature_cols:
-        sub = df[[label_col, c]].dropna()
-        if sub.empty:
-            continue
-        class_means = sub.groupby(label_col, observed=False)[c].mean()
-        between = float(np.var(class_means.to_numpy(dtype=float), ddof=1)) if len(class_means) > 1 else 0.0
-        within_num, within_den = 0.0, 0
-        for _, grp in sub.groupby(label_col, observed=False):
-            arr = grp[c].to_numpy(dtype=float)
-            if len(arr) < 2:
-                continue
-            within_num += float((len(arr) - 1) * np.var(arr, ddof=1))
-            within_den += len(arr) - 1
-        within = float(within_num / within_den) if within_den else float("nan")
-        ratio = between / within if within and within > 1e-12 else np.nan
-        rows.append(
-            {
-                "feature": c,
-                "var_between_class_means": between,
-                "var_within_classes_pooled": within,
-                "ratio_between_within": ratio,
-            }
-        )
-    return pd.DataFrame(rows).sort_values("ratio_between_within", ascending=False)
-
-
-def _plot_pca_clusters(X: np.ndarray, y: np.ndarray, out_path: Path, *, random_state: int) -> None:
-    if X.shape[0] < 3 or X.shape[1] < 2:
-        return
-    pca = PCA(n_components=2, random_state=random_state)
-    X2 = pca.fit_transform(X)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    for cls in np.unique(y):
-        m = y == cls
-        ax.scatter(X2[m, 0], X2[m, 1], s=24, alpha=0.7, label=str(cls))
-    ax.set_title("PCA separability overview")
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.legend(loc="best", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def _plot_kmeans_overlay(X: np.ndarray, y: np.ndarray, out_path: Path, *, random_state: int) -> None:
-    if X.shape[0] < 6 or X.shape[1] < 2:
-        return
-    pca = PCA(n_components=2, random_state=random_state)
-    X2 = pca.fit_transform(X)
-    k = len(np.unique(y))
-    if k < 2:
-        return
-    km = KMeans(n_clusters=k, random_state=random_state, n_init=10)
-    clusters = km.fit_predict(X2)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    sc = ax.scatter(X2[:, 0], X2[:, 1], c=clusters, cmap="tab10", s=25, alpha=0.75)
-    ax.set_title("KMeans clusters in PCA space")
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    fig.colorbar(sc, ax=ax, label="cluster")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def _run_group_cv(
-    X: pd.DataFrame,
-    y: pd.Series,
-    groups: pd.Series,
-    *,
-    random_state: int,
-) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Pipeline]]:
-    models: dict[str, Pipeline] = {
-        "logistic_regression": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("clf", LogisticRegression(max_iter=800, random_state=random_state, class_weight="balanced")),
-            ]
-        ),
-        "random_forest": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                (
-                    "clf",
-                    RandomForestClassifier(
-                        n_estimators=200,
-                        random_state=random_state,
-                        class_weight="balanced_subsample",
-                    ),
-                ),
-            ]
-        ),
-        "gradient_boosting": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("clf", GradientBoostingClassifier(random_state=random_state)),
-            ]
-        ),
-    }
-    logo = LeaveOneGroupOut()
-    fold_rows: list[dict[str, Any]] = []
-    y_true_acc: dict[str, list[int]] = {k: [] for k in models}
-    y_pred_acc: dict[str, list[int]] = {k: [] for k in models}
-
-    for fold_idx, (tri, tei) in enumerate(logo.split(X, y, groups), start=1):
-        X_tr, X_te = X.iloc[tri], X.iloc[tei]
-        y_tr, y_te = y.iloc[tri], y.iloc[tei]
-        if y_tr.nunique() < 2:
-            continue
-        for name, pipe in models.items():
-            pipe.fit(X_tr, y_tr)
-            pred = pipe.predict(X_te)
-            m = _evaluate_predictions(y_te.to_numpy(), pred)
-            fold_rows.append({"model": name, "fold": fold_idx, **m})
-            y_true_acc[name].extend(y_te.tolist())
-            y_pred_acc[name].extend(pred.tolist())
-
-    fold_df = pd.DataFrame(fold_rows)
-    y_true_arr = {k: np.asarray(v, dtype=int) for k, v in y_true_acc.items() if v}
-    y_pred_arr = {k: np.asarray(v, dtype=int) for k, v in y_pred_acc.items() if v}
-    return fold_df, y_true_arr, y_pred_arr, models
-
-
-def _save_confusion(y_true: np.ndarray, y_pred: np.ndarray, labels: list[str], out_path: Path) -> None:
-    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(labels)), normalize=None)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    disp = ConfusionMatrixDisplay(cm, display_labels=labels)
-    disp.plot(ax=ax, cmap="Blues", xticks_rotation=45, colorbar=False)
-    ax.set_title("Confusion matrix")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def _save_pr_curve(y_true: np.ndarray, y_score: np.ndarray, out_path: Path) -> None:
-    precision, recall, _ = precision_recall_curve(y_true, y_score)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(recall, precision, lw=2)
-    ax.set_xlabel("Recall")
-    ax.set_ylabel("Precision")
-    ax.set_title("Precision-Recall curve (one-vs-rest minority)")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def _save_feature_importance(
-    model: Pipeline,
-    model_name: str,
-    X: pd.DataFrame,
-    y: pd.Series,
-    out_csv: Path,
-    max_features: int,
-    *,
-    random_state: int,
-) -> None:
-    clf = model.named_steps["clf"]
-    imputer = model.named_steps["imputer"]
-    Xt = imputer.fit_transform(X)
-
+    # Extract feature importances from the last estimator if available
+    clf = pipe.named_steps["clf"]
+    importances: dict[str, float] | None = None
     if hasattr(clf, "feature_importances_"):
-        clf.fit(Xt, y)
-        score = np.asarray(clf.feature_importances_, dtype=float)
-    elif hasattr(clf, "coef_"):
-        scaler = model.named_steps.get("scaler")
-        Xs = scaler.fit_transform(Xt) if scaler is not None else Xt
-        clf.fit(Xs, y)
-        coef = np.asarray(clf.coef_, dtype=float)
-        score = np.mean(np.abs(coef), axis=0)
-    else:
-        Xt2 = Xt
-        clf.fit(Xt2, y)
-        perm = permutation_importance(clf, Xt2, y, n_repeats=8, random_state=random_state)
-        score = perm.importances_mean
+        importances = clf.feature_importances_.tolist()
 
-    imp = pd.DataFrame({"feature": X.columns, "importance": score, "model": model_name})
-    imp = imp.sort_values("importance", ascending=False).head(max_features)
-    imp.to_csv(out_csv, index=False)
-
-
-def _recommendation_text(classifier_table: pd.DataFrame, separability_table: pd.DataFrame) -> str:
-    if classifier_table.empty:
-        return (
-            "Labels/splits were too limited for stable recording-aware classification. "
-            "Use separability/effect-size analyses as primary evidence and report models as exploratory only."
-        )
-    best = classifier_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
-    if best["balanced_accuracy"] >= 0.7 and best["f1_macro"] >= 0.65:
-        return (
-            f"Strongest quantitative evidence: {best['comparison']} with {best['model']} "
-            f"(balanced accuracy {best['balanced_accuracy']:.3f}, F1 {best['f1_macro']:.3f}). "
-            "Include with confusion matrix + top features and caveat group-wise CV scope."
-        )
-    top_sep = separability_table.iloc[0] if not separability_table.empty else None
-    if top_sep is not None and top_sep.get("max_abs_cohen_d", 0.0) >= 0.8:
-        return (
-            "Classifier performance is moderate; rely on feature-level evidence (large effect sizes/variance ratios) "
-            "for thesis claims, and present classifiers as supportive trends."
-        )
-    return "Evidence is weak-to-moderate; emphasize descriptive trends, uncertainty, and need for more labeled sessions."
-
-
-def _compact_best_model_table(comparison_df: pd.DataFrame, comparison: str) -> pd.DataFrame:
-    columns = [
-        "comparison",
-        "variant",
-        "model",
-        "split_protocol",
-        "n_samples",
-        "n_groups",
-        "n_features",
-        "balanced_accuracy",
-        "f1_macro",
-        "precision_macro",
-        "recall_macro",
-    ]
-    if comparison_df.empty:
-        return pd.DataFrame(columns=columns)
-    sub = comparison_df[comparison_df["comparison"] == comparison].copy()
-    if sub.empty:
-        return pd.DataFrame(columns=columns)
-    sub = sub.sort_values(["variant", "balanced_accuracy"], ascending=[True, False])
-    best = sub.groupby("variant", as_index=False).head(1).copy()
-    best["comparison"] = comparison
-    return best[columns].sort_values("balanced_accuracy", ascending=False)
-
-
-def _plot_compact_ablation(table: pd.DataFrame, *, title: str, out_path: Path) -> None:
-    if table.empty:
-        return
-    fig, ax = plt.subplots(figsize=(7, 4))
-    bars = ax.bar(table["variant"], table["balanced_accuracy"], color="#3b82f6", alpha=0.9)
-    ax.set_ylim(0, min(1.0, max(0.4, float(table["balanced_accuracy"].max()) + 0.1)))
-    ax.set_ylabel("Balanced accuracy")
-    ax.set_title(title)
-    ax.grid(axis="y", alpha=0.25)
-    for b, val in zip(bars, table["balanced_accuracy"], strict=False):
-        ax.text(b.get_x() + b.get_width() / 2, val + 0.01, f"{val:.2f}", ha="center", va="bottom", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=160)
-    plt.close(fig)
-
-
-def _write_markdown(path: Path, lines: list[str]) -> None:
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-
-
-def _write_primary_interpretations(
-    *,
-    out_dir: Path,
-    core_table: pd.DataFrame,
-    sync_table: pd.DataFrame,
-    orientation_table: pd.DataFrame,
-    family_table: pd.DataFrame,
-    family_meaning: dict[str, str],
-) -> None:
-    core_lines = [
-        "# Primary thesis comparison",
-        "",
-        "Main comparison: **bike-only vs rider-only vs fused features** under recording-aware validation.",
-        "",
-    ]
-    if core_table.empty:
-        core_lines.append(
-            "- Insufficient labeled recordings/classes for a stable primary comparison in this run."
-        )
-    else:
-        top = core_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
-        core_lines.extend(
-            [
-                f"- Best variant: **{top['variant']}** using `{top['model']}`.",
-                f"- Balanced accuracy: **{top['balanced_accuracy']:.3f}**, macro-F1: **{top['f1_macro']:.3f}**.",
-                f"- Validation protocol: `{top['split_protocol']}` across {int(top['n_groups'])} recordings.",
-                "",
-                "Interpretation: If fused outperforms bike-only and rider-only, the thesis claim is supported:",
-                "joint bike+rider dynamics carry behavior signal not captured by either sensor alone.",
-            ]
-        )
-    _write_markdown(out_dir / "PRIMARY_INTERPRETATION.md", core_lines)
-
-    sync_lines = [
-        "# Synchronization ablation (downstream impact)",
-        "",
-        "Compares downstream classification quality by sync method using fused features.",
-        "",
-    ]
-    if sync_table.empty:
-        sync_lines.append("- No sync-specific subset met minimum data requirements.")
-    else:
-        best_sync = sync_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
-        sync_lines.extend(
-            [
-                f"- Best sync method: **{best_sync['variant']}** ({best_sync['balanced_accuracy']:.3f} balanced accuracy).",
-                "- This ablation measures practical impact, not only alignment diagnostics.",
-                "- Use this table/figure to justify one synchronization choice in the thesis methods section.",
-            ]
-        )
-    _write_markdown(out_dir / "SYNC_ABLATION_INTERPRETATION.md", sync_lines)
-
-    orient_lines = [
-        "# Orientation method downstream comparison",
-        "",
-        "Compares orientation filters by downstream separability/classification, not filter diagnostics alone.",
-        "",
-    ]
-    if orientation_table.empty:
-        orient_lines.append("- No orientation-specific subset met minimum data requirements.")
-    else:
-        best_orient = orientation_table.sort_values("balanced_accuracy", ascending=False).iloc[0]
-        orient_lines.extend(
-            [
-                f"- Best orientation method: **{best_orient['variant']}** ({best_orient['balanced_accuracy']:.3f} balanced accuracy).",
-                "- Treat this as task-level evidence for orientation choice in the final thesis pipeline.",
-            ]
-        )
-    _write_markdown(out_dir / "ORIENTATION_DOWNSTREAM_INTERPRETATION.md", orient_lines)
-
-    fam_lines = [
-        "# Feature-family ablation (physically grounded)",
-        "",
-        "Family drops are interpreted via physical dynamics, not generic model importance only.",
-        "",
-    ]
-    if family_table.empty:
-        fam_lines.append("- Feature-family ablation did not produce comparable variants in this run.")
-    else:
-        baseline = family_table[family_table["variant"] == "all_fused"]
-        base_score = float(baseline.iloc[0]["balanced_accuracy"]) if not baseline.empty else np.nan
-        fam_lines.append(f"- Baseline (`all_fused`) balanced accuracy: **{base_score:.3f}**." if np.isfinite(base_score) else "- Baseline score unavailable.")
-        minus_rows = family_table[family_table["variant"].str.startswith("minus_")].copy()
-        if not minus_rows.empty and np.isfinite(base_score):
-            minus_rows["delta_vs_all_fused"] = minus_rows["balanced_accuracy"] - base_score
-            minus_rows = minus_rows.sort_values("delta_vs_all_fused")
-            fam_lines.append("")
-            for _, row in minus_rows.iterrows():
-                fam = str(row["variant"]).replace("minus_", "", 1)
-                meaning = family_meaning.get(fam, "Physical interpretation not specified in config.")
-                fam_lines.append(
-                    f"- `{row['variant']}`: Δ balanced accuracy {row['delta_vs_all_fused']:+.3f}. "
-                    f"Physical meaning: {meaning}"
-                )
-    _write_markdown(out_dir / "FEATURE_FAMILY_INTERPRETATION.md", fam_lines)
-
-
-def run_evaluation_report(
-    features_fused_csv: Path,
-    out_dir: Path,
-    *,
-    config_path: Path | None = None,
-    random_state: int = 42,
-) -> dict[str, Path]:
-    """Run lightweight, config-driven experiments and write thesis-ready artifacts."""
-    cfg = _load_config(config_path)
-    effective_seed = int(cfg.get("evaluation_seed", random_state)) if random_state is not None else int(cfg.get("evaluation_seed", 42))
-    np.random.seed(effective_seed)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    df = pd.read_csv(features_fused_csv)
-    label_col = cfg["label_col"]
-    group_col = cfg["group_col"]
-    meta_cols = {
-        label_col,
-        group_col,
-        cfg["sync_col"],
-        cfg["orientation_col"],
-        "section_id",
-        "section",
-        "window_start_s",
-        "window_end_s",
-        "window_center_s",
+    return {
+        "accuracy": accuracy,
+        "macro_f1": macro_f1,
+        "per_class": report,
+        "confusion_matrix": cm.tolist(),
+        "feature_importances": importances,
+        "fitted_pipeline": pipe,
     }
 
-    feature_cols = _numeric_feature_columns(df, exclude=meta_cols)
-    feature_sets = _resolve_feature_sets(feature_cols, cfg)
 
-    qc_policy = cfg.get("qc_policy", {}) if isinstance(cfg.get("qc_policy"), dict) else {}
-    if qc_policy.get("enabled", False):
-        sections_root = Path(features_fused_csv).resolve().parents[1] / "sections"
-        dec = evaluate_qc_sections(
-            [str(x) for x in df.get("section_id", pd.Series(dtype=str)).dropna().astype(str).tolist()],
-            sections_root=sections_root,
-            policy=qc_policy,
-        )
-        if not dec.empty:
-            df = df.merge(dec[["section_id", "include", "exclusion_reasons", "qc_tier"]], on="section_id", how="left")
-            df["include"] = df["include"].fillna(False).astype(bool)
-            dec.to_csv(out_dir / "qc_inclusion_section_decisions.csv", index=False)
-            summary = {
-                "total_sections": int(len(dec)),
-                "included_sections": int(dec["include"].sum()),
-                "excluded_sections": int((~dec["include"]).sum()),
-                "exclusion_reason_counts": dec.loc[~dec["include"], "exclusion_reasons"].value_counts().to_dict(),
-            }
-            (out_dir / "qc_inclusion_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-            df = df[df["include"]].copy()
+def run_evaluation(
+    features_path: Path | str,
+    *,
+    output_dir: Path | str,
+    label_col: str = "scenario_label",
+    group_col: str = "section_id",
+    seed: int = 42,
+    min_quality: str = "marginal",
+    feature_sets: dict[str, list[str]] | None = None,
+) -> dict:
+    """Train and evaluate models on feature table.
 
-    valid = df[label_col].notna() & df[group_col].notna()
-    dfe = df.loc[valid].copy()
-    dfe[label_col] = dfe[label_col].astype(str)
-    dfe[group_col] = dfe[group_col].astype(str)
+    Parameters
+    ----------
+    features_path:
+        Path to the CSV feature table (e.g. features_fused.csv).
+    output_dir:
+        Directory for all output artefacts.
+    label_col:
+        Column name for the classification target.
+    group_col:
+        Column for group-based CV splitting (prevents data leakage).
+    seed:
+        Random seed for reproducibility.
+    min_quality:
+        Minimum quality label. Rows below this are dropped.
+    feature_sets:
+        Mapping of set name → list of column prefixes. ``None`` = auto-detect.
 
-    counts = dfe[label_col].value_counts().rename_axis("label").reset_index(name="count")
-    counts.to_csv(out_dir / "class_counts.csv", index=False)
+    Returns
+    -------
+    Evaluation summary dict (also written to evaluation_summary.json).
+    """
+    features_path = Path(features_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "figures").mkdir(exist_ok=True)
 
-    labels_good = counts[counts["count"] >= int(cfg["min_samples_per_class"])]
-    dfe = dfe[dfe[label_col].isin(labels_good["label"])].copy()
+    # ------------------------------------------------------------------
+    # 1. Load data
+    # ------------------------------------------------------------------
+    logger.info("Loading features from %s", features_path)
+    if not features_path.exists():
+        raise FileNotFoundError(f"Features file not found: {features_path}")
 
-    variance_df = _variance_table(
-        dfe,
-        label_col,
-        feature_cols[: int(cfg["max_variance_features"])],
-    )
-    variance_df.to_csv(out_dir / "separability_within_between_variance.csv", index=False)
+    df = pd.read_csv(features_path)
+    logger.info("Loaded %d rows, %d columns", len(df), len(df.columns))
 
-    effect_df = _effect_size_table(
-        dfe,
-        label_col,
-        feature_cols[: int(cfg["max_effect_size_features"])],
-    )
-    effect_df.to_csv(out_dir / "separability_effect_size.csv", index=False)
+    # Apply quality filter
+    if "overall_quality_label" in df.columns:
+        if min_quality not in _QUALITY_ORDER:
+            raise ValueError(f"min_quality must be one of {_QUALITY_ORDER}")
+        min_idx = _QUALITY_ORDER.index(min_quality)
+        valid = set(_QUALITY_ORDER[min_idx:])
+        before = len(df)
+        df = df[df["overall_quality_label"].isin(valid)].copy()
+        logger.info("Quality filter: %d → %d rows", before, len(df))
 
-    comparison_rows: list[dict[str, Any]] = []
-    enc = LabelEncoder()
-    y = pd.Series(enc.fit_transform(dfe[label_col]), index=dfe.index)
-    groups = dfe[group_col]
-    locked_splits = None
-    if cfg.get("locked_split_manifest"):
-        locked_splits = load_locked_split_manifest(Path(cfg["locked_split_manifest"]))
+    # Drop unlabeled rows
+    if label_col not in df.columns:
+        raise ValueError(f"Label column {label_col!r} not found in features.")
+    before = len(df)
+    df = df[df[label_col].notna() & (df[label_col] != "unlabeled")].copy()
+    logger.info("Dropped unlabeled rows: %d → %d", before, len(df))
 
-    comparisons: dict[str, dict[str, list[str]]] = {
-        "feature_source": feature_sets,
-        "sync_method": {},
-        "orientation_method": {},
-        "feature_family_ablation": {},
-    }
+    if len(df) == 0:
+        raise ValueError("No labeled rows remain after filtering.")
 
-    for sync_method in sorted(dfe[cfg["sync_col"]].dropna().astype(str).unique().tolist()):
-        comparisons["sync_method"][sync_method] = feature_sets.get("fused", feature_cols)
-    for orient_method in sorted(dfe[cfg["orientation_col"]].dropna().astype(str).unique().tolist()):
-        comparisons["orientation_method"][orient_method] = feature_sets.get("fused", feature_cols)
+    classes = sorted(df[label_col].unique().tolist())
+    logger.info("Classes: %s (%d total windows)", classes, len(df))
 
-    ablation_cfg = cfg.get("feature_family_ablation", {})
-    if ablation_cfg.get("enabled", False):
-        fused_cols = feature_sets.get("fused", feature_cols)
-        comparisons["feature_family_ablation"]["all_fused"] = fused_cols
-        for fam_name, patterns in ablation_cfg.get("families", {}).items():
-            remain = [c for c in fused_cols if not any(tok in c for tok in patterns)]
-            comparisons["feature_family_ablation"][f"minus_{fam_name}"] = remain
+    # ------------------------------------------------------------------
+    # 2. Determine feature sets
+    # ------------------------------------------------------------------
+    if feature_sets is None:
+        feature_sets = _auto_detect_feature_sets(df)
 
-    for comparison, spec in comparisons.items():
-        for variant, cols in spec.items():
-            use_cols = [c for c in cols if c in dfe.columns]
-            if len(use_cols) < 2:
+    # Filter to sets that have at least one column
+    active_sets: dict[str, list[str]] = {}
+    for fs_name, prefixes in feature_sets.items():
+        cols = _select_feature_cols(df, prefixes)
+        if cols:
+            active_sets[fs_name] = cols
+            logger.info("Feature set '%s': %d features", fs_name, len(cols))
+        else:
+            logger.warning("Feature set '%s': no columns found, skipping", fs_name)
+
+    if not active_sets:
+        raise ValueError("No feature columns found for any feature set.")
+
+    # ------------------------------------------------------------------
+    # 3. Encode labels and groups
+    # ------------------------------------------------------------------
+    le = LabelEncoder()
+    le.fit(classes)
+    y_all = le.transform(df[label_col].values)
+
+    groups_all: np.ndarray | None = None
+    if group_col in df.columns:
+        groups_all = df[group_col].values
+    else:
+        logger.warning("Group column '%s' not found; using no-group CV", group_col)
+
+    # ------------------------------------------------------------------
+    # 4. Train and evaluate
+    # ------------------------------------------------------------------
+    all_results: dict[str, dict[str, Any]] = {}
+    metrics_rows: list[dict] = []
+
+    for fs_name, feat_cols in active_sets.items():
+        X = df[feat_cols].fillna(0).values
+
+        # Use available n_splits (capped at n_groups)
+        n_groups = len(np.unique(groups_all)) if groups_all is not None else len(y_all)
+        n_splits = min(5, n_groups)
+        if n_splits < 2:
+            logger.warning(
+                "Feature set '%s': only %d groups available, skipping CV", fs_name, n_groups
+            )
+            continue
+
+        for model_name in _MODEL_REGISTRY:
+            key = f"{fs_name}__{model_name}"
+            logger.info("Evaluating %s ...", key)
+
+            model = _build_model(model_name, seed)
+            try:
+                result = _cv_evaluate(
+                    X,
+                    y_all,
+                    groups=groups_all if groups_all is not None else np.arange(len(y_all)),
+                    model=model,
+                    n_splits=n_splits,
+                    seed=seed,
+                )
+            except Exception as exc:
+                logger.warning("Evaluation failed for %s: %s", key, exc)
                 continue
 
-            mask = pd.Series(True, index=dfe.index)
-            if comparison == "sync_method":
-                mask &= dfe[cfg["sync_col"]].astype(str) == variant
-            elif comparison == "orientation_method":
-                mask &= dfe[cfg["orientation_col"]].astype(str) == variant
+            all_results[key] = result
 
-            dsub = dfe.loc[mask].copy()
-            if dsub.empty or dsub[group_col].nunique() < 2 or dsub[label_col].nunique() < 2:
-                continue
+            metrics_rows.append(
+                {
+                    "feature_set": fs_name,
+                    "model": model_name,
+                    "accuracy": round(result["accuracy"], 4),
+                    "macro_f1": round(result["macro_f1"], 4),
+                }
+            )
 
-            usable_cols = [
-                c for c in use_cols
-                if pd.to_numeric(dsub[c], errors="coerce").notna().sum() >= 2
-            ]
-            if len(usable_cols) < 2:
-                continue
+            # Write confusion matrix
+            cm_path = output_dir / f"confusion_matrix_{fs_name}_{model_name}.csv"
+            cm_df = pd.DataFrame(
+                result["confusion_matrix"],
+                index=le.classes_,
+                columns=le.classes_,
+            )
+            cm_df.to_csv(cm_path)
+            logger.debug("Wrote confusion matrix to %s", cm_path)
 
-            y_sub = pd.Series(enc.transform(dsub[label_col]), index=dsub.index)
-            if locked_splits is None:
-                fold_df, y_true_dict, y_pred_dict, models = _run_group_cv(
-                    dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
-                    y_sub,
-                    dsub[group_col],
-                    random_state=random_state,
-                )
-                if fold_df.empty:
-                    continue
-                mean_df = (
-                    fold_df.groupby("model", as_index=False)[
-                        ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
-                    ]
-                    .mean()
-                    .sort_values("balanced_accuracy", ascending=False)
-                )
-            else:
-                split_for_rec = {rec: split for split, recs in locked_splits.items() for rec in recs}
-                dsub = dsub[dsub[group_col].astype(str).isin(split_for_rec)].copy()
-                if dsub.empty:
-                    continue
-                dsub["_locked_split"] = dsub[group_col].astype(str).map(split_for_rec)
-                tr = dsub[dsub["_locked_split"] == "train"]
-                eval_splits = [s for s in ("validation", "val", "test") if s in set(dsub["_locked_split"].astype(str))]
-                if tr.empty or not eval_splits or tr[label_col].nunique() < 2:
-                    continue
-                models = _run_group_cv(
-                    tr[usable_cols].replace([np.inf, -np.inf], np.nan),
-                    pd.Series(enc.transform(tr[label_col]), index=tr.index),
-                    tr[group_col],
-                    random_state=random_state,
-                )[3]
-                locked_rows: list[dict[str, Any]] = []
-                y_true_dict = {}
-                y_pred_dict = {}
-                for model_name, pipe in models.items():
-                    pipe.fit(tr[usable_cols].replace([np.inf, -np.inf], np.nan), pd.Series(enc.transform(tr[label_col]), index=tr.index))
-                    y_true_all: list[int] = []
-                    y_pred_all: list[int] = []
-                    for split_name in eval_splits:
-                        dv = dsub[dsub["_locked_split"] == split_name]
-                        if dv.empty:
-                            continue
-                        y_true_eval = pd.Series(enc.transform(dv[label_col]), index=dv.index).to_numpy()
-                        y_pred_eval = pipe.predict(dv[usable_cols].replace([np.inf, -np.inf], np.nan))
-                        met = _evaluate_predictions(y_true_eval, y_pred_eval)
-                        locked_rows.append({"model": model_name, "fold": split_name, **met})
-                        y_true_all.extend(y_true_eval.tolist())
-                        y_pred_all.extend(y_pred_eval.tolist())
-                    y_true_dict[model_name] = np.asarray(y_true_all, dtype=int)
-                    y_pred_dict[model_name] = np.asarray(y_pred_all, dtype=int)
-                fold_df = pd.DataFrame(locked_rows)
-                if fold_df.empty:
-                    continue
-                mean_df = (
-                    fold_df.groupby("model", as_index=False)[
-                        ["balanced_accuracy", "precision_macro", "recall_macro", "f1_macro"]
-                    ]
-                    .mean()
-                    .sort_values("balanced_accuracy", ascending=False)
-                )
-
-            for _, row in mean_df.iterrows():
-                comparison_rows.append(
+            # Write feature importances
+            if result["feature_importances"] is not None:
+                fi_path = output_dir / f"feature_importance_{model_name}_{fs_name}.csv"
+                fi_df = pd.DataFrame(
                     {
-                        "comparison": comparison,
-                        "variant": variant,
-                        "model": row["model"],
-                        "n_samples": len(dsub),
-                        "n_groups": int(dsub[group_col].nunique()),
-                        "n_features": len(usable_cols),
-                        "balanced_accuracy": float(row["balanced_accuracy"]),
-                        "precision_macro": float(row["precision_macro"]),
-                        "recall_macro": float(row["recall_macro"]),
-                        "f1_macro": float(row["f1_macro"]),
-                        "split_protocol": "locked_manifest" if locked_splits is not None else "logo_cv",
+                        "feature": feat_cols,
+                        "importance": result["feature_importances"],
                     }
-                )
+                ).sort_values("importance", ascending=False)
+                fi_df.to_csv(fi_path, index=False)
+                logger.debug("Wrote feature importances to %s", fi_path)
 
-            labels = enc.classes_.tolist()
-            best_model_name = mean_df.iloc[0]["model"]
-            y_true = y_true_dict[best_model_name]
-            y_pred = y_pred_dict[best_model_name]
-            _save_confusion(
-                y_true,
-                y_pred,
-                labels,
-                out_dir / f"cm_{comparison}_{variant}_{best_model_name}.png",
-            )
+    # ------------------------------------------------------------------
+    # 5. Write metrics table
+    # ------------------------------------------------------------------
+    if metrics_rows:
+        metrics_df = pd.DataFrame(metrics_rows)
+        metrics_path = output_dir / "metrics_table.csv"
+        metrics_df.to_csv(metrics_path, index=False)
+        logger.info("Wrote metrics table to %s", metrics_path)
 
-            model_full = models[best_model_name]
-            _save_feature_importance(
-                model_full,
-                best_model_name,
-                dsub[usable_cols].replace([np.inf, -np.inf], np.nan),
-                y_sub,
-                out_dir / f"feature_importance_{comparison}_{variant}_{best_model_name}.csv",
-                max_features=int(cfg["max_importance_features"]),
-                random_state=random_state,
-            )
-
-            minority_ratio = dsub[label_col].value_counts(normalize=True).min()
-            if minority_ratio < float(cfg["pr_curve_minority_ratio_threshold"]):
-                clf = model_full.fit(dsub[usable_cols].replace([np.inf, -np.inf], np.nan), y_sub)
-                if hasattr(clf.named_steps["clf"], "predict_proba"):
-                    y_prob = clf.predict_proba(dsub[usable_cols].replace([np.inf, -np.inf], np.nan))
-                    minority_class = int(np.argmin(dsub[label_col].value_counts().sort_index().to_numpy()))
-                    y_bin = (y_sub.to_numpy() == minority_class).astype(int)
-                    if y_prob.shape[1] > minority_class:
-                        _save_pr_curve(
-                            y_bin,
-                            y_prob[:, minority_class],
-                            out_dir / f"pr_{comparison}_{variant}_{best_model_name}.png",
-                        )
-
-    comparison_df = pd.DataFrame(comparison_rows)
-    comparison_df.to_csv(out_dir / "classification_summary.csv", index=False)
-
-    # unsupervised plots from fused set, for limited labels cases
-    fused_cols = feature_sets.get("fused", feature_cols)
-    usable_fused_cols = [
-        c for c in fused_cols
-        if c in dfe.columns and pd.to_numeric(dfe[c], errors="coerce").notna().sum() >= 2
-    ]
-    if len(usable_fused_cols) >= 2 and not dfe.empty:
-        Xf = dfe[usable_fused_cols].replace([np.inf, -np.inf], np.nan)
-        imp = SimpleImputer(strategy="median")
-        Xfi = imp.fit_transform(Xf)
-        if Xfi.shape[1] >= 2:
-            Xfs = StandardScaler().fit_transform(Xfi)
-            _plot_pca_clusters(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_label_scatter.png", random_state=effective_seed)
-            _plot_kmeans_overlay(Xfs, dfe[label_col].to_numpy(), out_dir / "pca_kmeans_scatter.png", random_state=effective_seed)
-
-    recommendation = _recommendation_text(comparison_df, effect_df)
-
-    thesis_table = comparison_df.sort_values(
-        ["comparison", "variant", "balanced_accuracy"],
-        ascending=[True, True, False],
+    # ------------------------------------------------------------------
+    # 6. Build evaluation summary
+    # ------------------------------------------------------------------
+    best_key = max(
+        all_results,
+        key=lambda k: all_results[k]["accuracy"],
+        default=None,
     )
-    thesis_table.to_csv(out_dir / "thesis_table_model_metrics.csv", index=False)
 
-    summary = {
-        "inputs": {
-            "features_csv": str(features_fused_csv),
-            "config": str(config_path) if config_path else "default",
-            "evaluation_seed": effective_seed,
+    summary: dict[str, Any] = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "seed": seed,
+        "n_windows": int(len(df)),
+        "n_classes": len(classes),
+        "classes": classes,
+        "results": {
+            k: {
+                "accuracy": round(v["accuracy"], 4),
+                "macro_f1": round(v["macro_f1"], 4),
+            }
+            for k, v in all_results.items()
         },
-        "dataset": {
-            "rows_after_label_filter": int(len(dfe)),
-            "groups": int(dfe[group_col].nunique()) if not dfe.empty else 0,
-            "classes": sorted(dfe[label_col].unique().tolist()) if not dfe.empty else [],
-        },
-        "seeds": {"evaluation_seed": effective_seed},
-        "outputs": {
-            "classification_summary": str(out_dir / "classification_summary.csv"),
-            "thesis_table_model_metrics": str(out_dir / "thesis_table_model_metrics.csv"),
-            "effect_size": str(out_dir / "separability_effect_size.csv"),
-            "within_between": str(out_dir / "separability_within_between_variance.csv"),
-            "class_counts": str(out_dir / "class_counts.csv"),
-            "pca_label_scatter": str(out_dir / "pca_label_scatter.png"),
-            "pca_kmeans_scatter": str(out_dir / "pca_kmeans_scatter.png"),
-        },
-        "recommendation": recommendation,
     }
-    (out_dir / "evaluation_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    (out_dir / "evaluation_manifest.json").write_text(json.dumps({"evaluation_seed": effective_seed, "inputs": summary["inputs"], "dataset": summary["dataset"]}, indent=2), encoding="utf-8")
 
-    md = [
+    summary_path = output_dir / "evaluation_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+    logger.info("Wrote evaluation summary to %s", summary_path)
+
+    # ------------------------------------------------------------------
+    # 7. Write THESIS_SUMMARY.md
+    # ------------------------------------------------------------------
+    _write_thesis_summary(
+        output_dir=output_dir,
+        summary=summary,
+        metrics_rows=metrics_rows,
+        best_key=best_key,
+        all_results=all_results,
+        label_display=_MODEL_DISPLAY,
+    )
+
+    return summary
+
+
+def _write_thesis_summary(
+    output_dir: Path,
+    summary: dict,
+    metrics_rows: list[dict],
+    best_key: str | None,
+    all_results: dict,
+    label_display: dict[str, str],
+) -> None:
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    lines = [
         "# Evaluation Summary",
         "",
-        f"- Rows analyzed: **{summary['dataset']['rows_after_label_filter']}**",
-        f"- Recordings/groups: **{summary['dataset']['groups']}**",
-        f"- Classes: **{', '.join(summary['dataset']['classes']) if summary['dataset']['classes'] else 'n/a'}**",
+        f"**Date:** {date_str}  "
+        f"**Seed:** {summary['seed']}  "
+        f"**Windows:** {summary['n_windows']}",
         "",
-        "## Recommendation",
-        recommendation,
+        "## Results by Feature Set",
         "",
-        "## Key files",
-        "- `thesis_table_model_metrics.csv`",
-        "- `classification_summary.csv`",
-        "- `separability_effect_size.csv`",
-        "- `separability_within_between_variance.csv`",
+        "| Feature Set | Model | Accuracy | Macro-F1 |",
+        "|---|---|---|---|",
     ]
-    (out_dir / "THESIS_SUMMARY.md").write_text("\n".join(md), encoding="utf-8")
 
-    return {
-        "summary": out_dir / "evaluation_summary.json",
-        "thesis_table": out_dir / "thesis_table_model_metrics.csv",
-        "classification": out_dir / "classification_summary.csv",
-    }
+    for row in metrics_rows:
+        fs = row["feature_set"].capitalize()
+        mdl = label_display.get(row["model"], row["model"])
+        acc = f"{row['accuracy'] * 100:.1f}%"
+        f1 = f"{row['macro_f1'] * 100:.1f}%"
+        lines.append(f"| {fs} | {mdl} | {acc} | {f1} |")
 
+    lines += ["", "## Key Findings"]
 
-def run_primary_thesis_bundle(
-    features_fused_csv: Path,
-    out_dir: Path,
-    *,
-    config_path: Path | None = None,
-    random_state: int = 42,
-) -> dict[str, Path]:
-    """Run the primary thesis bundle and export compact secondary ablation artifacts."""
-    outputs = run_evaluation_report(
-        features_fused_csv,
-        out_dir,
-        config_path=config_path,
-        random_state=random_state,
-    )
-    out_dir = Path(out_dir)
-    cfg = _load_config(config_path)
-    comparison_df = pd.read_csv(out_dir / "classification_summary.csv")
+    if best_key and best_key in all_results:
+        acc_pct = all_results[best_key]["accuracy"] * 100
+        fs_part, _, mdl_part = best_key.partition("__")
+        mdl_display = label_display.get(mdl_part, mdl_part)
+        lines.append(
+            f"- Best performing: {fs_part} + {mdl_display} ({acc_pct:.1f}% accuracy)"
+        )
+    else:
+        lines.append("- No results available.")
 
-    core_table = _compact_best_model_table(comparison_df, "feature_source")
-    core_table.to_csv(out_dir / "primary_feature_source_comparison.csv", index=False)
-
-    sync_table = _compact_best_model_table(comparison_df, "sync_method")
-    sync_table.to_csv(out_dir / "sync_ablation_compact.csv", index=False)
-    _plot_compact_ablation(
-        sync_table,
-        title="Downstream impact by synchronization method",
-        out_path=out_dir / "sync_ablation_compact.png",
-    )
-
-    orientation_table = _compact_best_model_table(comparison_df, "orientation_method")
-    orientation_table.to_csv(out_dir / "orientation_downstream_comparison.csv", index=False)
-    _plot_compact_ablation(
-        orientation_table,
-        title="Downstream impact by orientation method",
-        out_path=out_dir / "orientation_downstream_comparison.png",
-    )
-
-    family_table = _compact_best_model_table(comparison_df, "feature_family_ablation")
-    family_table.to_csv(out_dir / "feature_family_ablation_compact.csv", index=False)
-    _plot_compact_ablation(
-        family_table,
-        title="Feature-family ablation (balanced accuracy)",
-        out_path=out_dir / "feature_family_ablation_compact.png",
-    )
-    family_meaning = (
-        cfg.get("feature_family_ablation", {}).get("physical_meaning", {})
-        if isinstance(cfg.get("feature_family_ablation"), dict)
-        else {}
-    )
-
-    _write_primary_interpretations(
-        out_dir=out_dir,
-        core_table=core_table,
-        sync_table=sync_table,
-        orientation_table=orientation_table,
-        family_table=family_table,
-        family_meaning=family_meaning if isinstance(family_meaning, dict) else {},
-    )
-
-    thesis_bundle_lines = [
-        "# Thesis experiment bundle (primary + secondary)",
+    lines += [
+        f"- Classes evaluated: {', '.join(summary['classes'])}",
+        f"- Total labeled windows: {summary['n_windows']}",
         "",
-        "## Primary result (thesis claim)",
-        "- `primary_feature_source_comparison.csv`",
-        "- `thesis_table_model_metrics.csv`",
-        "- `cm_feature_source_*.png`",
-        "- `feature_importance_feature_source_*.csv`",
-        "- `PRIMARY_INTERPRETATION.md`",
-        "",
-        "## Secondary ablations (supporting analyses)",
-        "- `sync_ablation_compact.csv`, `sync_ablation_compact.png`, `SYNC_ABLATION_INTERPRETATION.md`",
-        "- `orientation_downstream_comparison.csv`, `orientation_downstream_comparison.png`, `ORIENTATION_DOWNSTREAM_INTERPRETATION.md`",
-        "- `feature_family_ablation_compact.csv`, `feature_family_ablation_compact.png`, `FEATURE_FAMILY_INTERPRETATION.md`",
     ]
-    _write_markdown(out_dir / "THESIS_EXPERIMENT_BUNDLE.md", thesis_bundle_lines)
 
-    outputs["primary_bundle"] = out_dir / "THESIS_EXPERIMENT_BUNDLE.md"
-    return outputs
+    md_path = output_dir / "THESIS_SUMMARY.md"
+    md_path.write_text("\n".join(lines))
+    logger.info("Wrote thesis summary to %s", md_path)
