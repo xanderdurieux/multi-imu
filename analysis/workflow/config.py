@@ -33,7 +33,7 @@ class WorkflowConfig:
     recordings: list[str] = field(default_factory=list)
 
     # Stage options
-    sync_method: str = "auto"                        # "sda"|"lida"|"calibration"|"online"|"auto"
+    sync_method: str = "auto"                        # "sda"|"lida"|"calibration"|"online"|"adaptive"|"auto"
     split_stage: str = "synced"                      # "parsed"|"synced"
     frame_alignment: str = "auto"                    # "gravity_only"|"gravity_plus_forward"|"auto"
     orientation_filter: str = "auto"                 # "madgwick"|"complementary"|"auto"
@@ -72,7 +72,7 @@ class WorkflowConfig:
     def validate(self) -> list[str]:
         """Return list of validation errors (empty = valid)."""
         errors: list[str] = []
-        valid_sync = {"sda", "lida", "calibration", "online", "auto"}
+        valid_sync = {"sda", "lida", "calibration", "online", "adaptive", "auto"}
         if self.sync_method not in valid_sync:
             errors.append(f"sync_method must be one of {valid_sync}, got {self.sync_method!r}")
         valid_split = {"parsed", "synced"}

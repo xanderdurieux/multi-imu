@@ -570,6 +570,141 @@ def _windowed_lag_refinement(
     )
 
 
+def _adaptive_windowed_refinement(
+    reference_series: AlignmentSeries,
+    target_series: AlignmentSeries,
+    *,
+    initial_offset_seconds: float,
+    initial_drift_seconds_per_second: float = 0.0,
+    target_origin_seconds: float,
+    window_seconds: float = DEFAULT_WINDOW_SECONDS,
+    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
+    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_points_for_drift: int = 3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Causal windowed lag refinement that updates the running model after each accepted window.
+
+    Unlike :func:`_windowed_lag_refinement`, which uses the same global coarse lag for
+    all window searches, this function feeds the model fitted on *past* windows back as
+    the search centre for each *future* window — so no future data is ever used.
+
+    Parameters
+    ----------
+    initial_offset_seconds, initial_drift_seconds_per_second:
+        Seed model, typically obtained from the opening calibration anchor.
+    target_origin_seconds:
+        First target sample time in seconds; used as the drift-fit anchor.
+    min_points_for_drift:
+        Minimum accepted windows before the drift estimate is updated.
+        Below this count the offset is adjusted but the seed drift is preserved.
+
+    Returns
+    -------
+    ``(target_times_sec, offsets_sec, scores)`` – one entry per accepted window.
+    """
+    ref_signal = reference_series.signal
+    tgt_signal = target_series.signal
+    ref_ts = reference_series.timestamps_seconds
+    tgt_ts = target_series.timestamps_seconds
+    sample_rate_hz = float(reference_series.sample_rate_hz)
+
+    n_ref = ref_signal.size
+    n_tgt = tgt_signal.size
+    if n_ref == 0 or n_tgt == 0:
+        empty = np.asarray([], dtype=float)
+        return empty, empty, empty
+
+    window_n = max(20, int(round(float(window_seconds) * sample_rate_hz)))
+    step_n = max(5, int(round(float(window_step_seconds) * sample_rate_hz)))
+    search_n = max(1, int(round(float(local_search_seconds) * sample_rate_hz)))
+    half = window_n // 2
+
+    if n_ref < window_n:
+        empty = np.asarray([], dtype=float)
+        return empty, empty, empty
+
+    # Running model — seeded from opening calibration, updated as windows accumulate.
+    current_offset = float(initial_offset_seconds)
+    current_drift = float(initial_drift_seconds_per_second)
+
+    target_times: list[float] = []
+    offsets: list[float] = []
+    scores: list[float] = []
+
+    for center in range(half, n_ref - half, step_n):
+        t_ref_center = float(ref_ts[center])
+
+        # First-order inversion of t_ref = t_tgt + offset(t_tgt):
+        #   t_tgt ≈ t_ref − offset − drift*(t_ref − offset − t_origin)
+        t_tgt_predicted = (
+            t_ref_center
+            - current_offset
+            - current_drift * (t_ref_center - current_offset - target_origin_seconds)
+        )
+        predicted_tgt_idx = int(np.clip(
+            np.searchsorted(tgt_ts, t_tgt_predicted), 0, n_tgt - 1
+        ))
+        predicted_lag = center - predicted_tgt_idx
+
+        left = center - half
+        right = center + half
+        ref_win = ref_signal[left:right]
+        if ref_win.size < 10:
+            continue
+
+        best_lag: int | None = None
+        best_score = float("-inf")
+
+        for delta in range(-search_n, search_n + 1):
+            lag = predicted_lag + delta
+            t_left = left - lag
+            t_right = right - lag
+            if t_left < 0 or t_right > n_tgt:
+                continue
+            tgt_win = tgt_signal[t_left:t_right]
+            if tgt_win.size != ref_win.size:
+                continue
+            score = _ncc(ref_win, tgt_win)
+            if score > best_score:
+                best_score = score
+                best_lag = lag
+
+        if best_lag is None or best_score < min_window_score:
+            continue
+
+        tgt_idx = center - best_lag
+        if tgt_idx < 0 or tgt_idx >= tgt_ts.size:
+            continue
+
+        target_times.append(float(tgt_ts[tgt_idx]))
+        offsets.append(float(ref_ts[center]) - float(tgt_ts[tgt_idx]))
+        scores.append(best_score)
+
+        # Update running model with all accepted observations so far.
+        n_pts = len(target_times)
+        if n_pts >= min_points_for_drift:
+            t_arr = np.asarray(target_times, dtype=float)
+            o_arr = np.asarray(offsets, dtype=float)
+            w_arr = np.clip(np.asarray(scores, dtype=float), 0.0, None)
+            intercept, slope, _ = _fit_offset_drift(
+                t_arr, o_arr,
+                target_origin_seconds=target_origin_seconds,
+                weights=w_arr,
+            )
+            current_offset = intercept
+            current_drift = slope
+        elif n_pts >= 1:
+            # Adjust offset by weighted mean; preserve seed drift.
+            current_offset = float(np.average(offsets, weights=np.clip(scores, 0.0, None)))
+
+    return (
+        np.asarray(target_times, dtype=float),
+        np.asarray(offsets, dtype=float),
+        np.asarray(scores, dtype=float),
+    )
+
+
 def _fit_offset_drift(
     target_times_sec: np.ndarray,
     offsets_sec: np.ndarray,

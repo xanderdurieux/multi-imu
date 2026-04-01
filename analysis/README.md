@@ -1,13 +1,12 @@
 ### TODO
 
-- Add comparison metrics across recordings in exports stage, maybe move plotting to visualization (sync params, calibration params)
-- Orientation usage: flatten the files. Rename config param to "auto"
+- Add comparison metrics across recordings in exports stage, maybe move plotting of exports to visualization (sync params, calibration params)
+- Fix faulty calibration sequence extraction in r5
 
 #### Necessary pipeline features
 - Magnetometer-aware heading and better yaw calculation
 - Add EKF Filter to orientation stage
 - Add reporting module
-- Config reformatting -> all stages are defined in config, not hardcoded in workflow
 
 #### Verify existing correctness
 - Review orientation correctness

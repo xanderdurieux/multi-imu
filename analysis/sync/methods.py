@@ -32,7 +32,10 @@ from .core import (
     DEFAULT_WINDOW_SECONDS,
     DEFAULT_WINDOW_STEP_SECONDS,
     SyncModel,
+    _adaptive_windowed_refinement,
+    _fit_offset_drift,
     apply_sync_model,
+    build_alignment_series,
     compute_sync_correlations,
     estimate_offset,
     estimate_sync_model,
@@ -48,20 +51,22 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_RATE_HZ = 100.0
 DEFAULT_MAX_LAG_SECONDS = 60.0
-DEFAULT_DRIFT_PPM = 400.0
+DEFAULT_DRIFT_PPM = 300.0
 
-SYNC_METHODS: tuple[str, ...] = ("sda", "lida", "calibration", "online")
+SYNC_METHODS: tuple[str, ...] = ("sda", "lida", "calibration", "online", "adaptive")
 METHOD_STAGES: dict[str, str] = {
     "sda": "synced/sda",
     "lida": "synced/lida",
     "calibration": "synced/cal",
     "online": "synced/online",
+    "adaptive": "synced/adaptive",
 }
 METHOD_LABELS: dict[str, str] = {
     "sda": "SDA only",
     "lida": "SDA + LIDA",
     "calibration": "Calibration",
     "online": "Online",
+    "adaptive": "Adaptive",
 }
 DRIFT_CHAR_JSON = Path(__file__).parent.parent / "data" / "drift_characterisation.json"
 
@@ -912,6 +917,247 @@ def synchronize_recording_online(
     return _write_recording_outputs(
         recording_name=recording_name,
         method="online",
+        ref_csv=ref_csv,
+        tgt_csv=tgt_csv,
+        out_dir=out_dir,
+        aligned_df=aligned_df,
+        sync_payload=payload,
+        reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
+    )
+
+
+def estimate_sync_adaptive(
+    ref_df: pd.DataFrame,
+    tgt_df: pd.DataFrame,
+    *,
+    reference_name: str = "",
+    target_name: str = "",
+    sample_rate_hz: float = 100.0,
+    peak_min_height: float = 3.0,
+    peak_min_count: int = 3,
+    peak_max_gap_s: float = 3.0,
+    cal_search_s: float = 5.0,
+    peak_buffer_s: float = 1.0,
+    window_seconds: float = DEFAULT_WINDOW_SECONDS,
+    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
+    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+) -> tuple[SyncModel, dict]:
+    """Estimate sync using the adaptive online algorithm.
+
+    Bootstraps an initial offset from the opening calibration anchor (falling back
+    to SDA if no calibration is found), then processes activity-signal windows in
+    strict chronological order.  After each accepted window the running linear model
+    (offset + drift) is updated, so no future data is ever used.
+
+    Returns
+    -------
+    model : SyncModel
+        Final linear sync model fitted to all accumulated window observations.
+    meta : dict
+        Metadata for the ``adaptive`` block in ``sync_info.json``:
+        ``initial_offset_s``, ``initial_method``, ``opening_anchor`` (if found),
+        ``n_windows_used``, ``fit_r2``, ``drift_source``.
+    """
+    # 1. Bootstrap: opening calibration anchor or SDA fallback.
+    ref_cals = find_calibration_segments(
+        ref_df,
+        sample_rate_hz=sample_rate_hz,
+        peak_min_height=peak_min_height,
+        peak_min_count=peak_min_count,
+        peak_max_gap_s=peak_max_gap_s,
+    )
+
+    opening_anchor: CalibrationWindowResult | None = None
+    initial_method = "sda_fallback"
+    initial_offset_s = 0.0
+
+    if ref_cals:
+        tgt_clean = remove_dropouts(tgt_df)
+        try:
+            coarse_offset_s = _coarse_offset_from_opening_calibration(
+                ref_df,
+                tgt_clean,
+                ref_cals[0],
+                peak_min_height=peak_min_height,
+                peak_min_count=peak_min_count,
+            )
+            opening_anchor = _refine_offset_at_calibration(
+                ref_df,
+                tgt_df,
+                ref_cals[0],
+                coarse_offset_s=coarse_offset_s,
+                sample_rate_hz=sample_rate_hz,
+                peak_buffer_s=peak_buffer_s,
+                search_s=cal_search_s,
+            )
+            initial_offset_s = opening_anchor.offset_seconds
+            initial_method = "calibration_anchor"
+            log.info("Adaptive sync: initial offset from calibration anchor: %.4f s", initial_offset_s)
+        except Exception as exc:
+            log.warning("Adaptive sync: opening calibration failed (%s); falling back to SDA.", exc)
+            opening_anchor = None
+
+    if opening_anchor is None:
+        tgt_clean = remove_dropouts(tgt_df)
+        coarse = estimate_offset(
+            ref_df,
+            tgt_clean,
+            sample_rate_hz=5.0,
+            max_lag_seconds=120.0,
+            use_acc=True,
+            use_gyro=False,
+            differentiate=False,
+        )
+        initial_offset_s = float(coarse.offset_seconds)
+        initial_method = "sda_fallback"
+        log.info("Adaptive sync: initial offset from SDA fallback: %.4f s", initial_offset_s)
+
+    # 2. Build activity signals for the windowed pass.
+    ref_series = build_alignment_series(
+        ref_df, sample_rate_hz=sample_rate_hz, use_acc=True, use_gyro=False
+    )
+    tgt_series = build_alignment_series(
+        tgt_df, sample_rate_hz=sample_rate_hz, use_acc=True, use_gyro=False
+    )
+    tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
+
+    # 3. Causal windowed refinement — updates its own running model after each window.
+    target_times, offsets, scores = _adaptive_windowed_refinement(
+        ref_series,
+        tgt_series,
+        initial_offset_seconds=initial_offset_s,
+        initial_drift_seconds_per_second=0.0,
+        target_origin_seconds=tgt_origin_s,
+        window_seconds=window_seconds,
+        window_step_seconds=window_step_seconds,
+        local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
+    )
+
+    # 4. Fit final linear model to all accumulated observations.
+    fit_r2 = 0.0
+    if offsets.size == 0:
+        final_offset_s = initial_offset_s
+        final_drift_s_per_s = 0.0
+        drift_source = "initial_only"
+    else:
+        weights = np.clip(scores, 0.0, None)
+        final_offset_s, final_drift_s_per_s, fit_r2 = _fit_offset_drift(
+            target_times,
+            offsets,
+            target_origin_seconds=tgt_origin_s,
+            weights=weights,
+        )
+        if fit_r2 < min_fit_r2:
+            final_drift_s_per_s = 0.0
+            drift_source = "initial_only"
+        else:
+            drift_source = "adaptive_windowed_fit"
+
+    log.info(
+        "Adaptive sync: %d windows accepted, drift=%.1f ppm (R²=%.3f, source=%s)",
+        int(offsets.size),
+        final_drift_s_per_s * 1e6,
+        fit_r2,
+        drift_source,
+    )
+
+    model = SyncModel(
+        reference_csv=reference_name,
+        target_csv=target_name,
+        target_time_origin_seconds=tgt_origin_s,
+        offset_seconds=final_offset_s,
+        drift_seconds_per_second=final_drift_s_per_s,
+        sample_rate_hz=float(sample_rate_hz),
+        max_lag_seconds=float(cal_search_s + 1.0),
+        created_at_utc=datetime.now(UTC).isoformat(),
+    )
+
+    meta: dict = {
+        "initial_offset_s": round(float(initial_offset_s), 6),
+        "initial_method": initial_method,
+        "n_windows_used": int(offsets.size),
+        "fit_r2": round(float(fit_r2), 4),
+        "drift_source": drift_source,
+    }
+    if opening_anchor is not None:
+        meta["opening_anchor"] = {
+            "offset_s": round(opening_anchor.offset_seconds, 6),
+            "t_tgt_s": round(opening_anchor.t_tgt_seconds, 3),
+            "score": round(opening_anchor.correlation_score, 4),
+            "window_duration_s": round(opening_anchor.window_duration_s, 2),
+        }
+    return model, meta
+
+
+def synchronize_recording_adaptive(
+    recording_name: str,
+    stage_in: str = "parsed",
+    *,
+    reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
+    sample_rate_hz: float = 100.0,
+    peak_min_height: float = 3.0,
+    peak_min_count: int = 3,
+    cal_search_s: float = 5.0,
+    peak_buffer_s: float = 1.0,
+    window_seconds: float = DEFAULT_WINDOW_SECONDS,
+    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
+    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
+    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+) -> tuple[Path, Path, Path]:
+    """Synchronize a recording using adaptive online estimation.
+
+    Bootstraps from the opening calibration anchor (or SDA fallback if absent),
+    then fits offset + drift by processing activity-signal windows in chronological
+    order — no future data is used at any step.
+    """
+    ref_csv, tgt_csv, out_dir = _prepare_recording_io(
+        recording_name, stage_in, "adaptive", reference_sensor, target_sensor
+    )
+
+    ref_df = load_stream(ref_csv)
+    tgt_df = load_stream(tgt_csv)
+    if ref_df.empty or tgt_df.empty:
+        raise ValueError("Reference and target streams must both be non-empty.")
+
+    model, meta = estimate_sync_adaptive(
+        ref_df,
+        tgt_df,
+        reference_name=str(ref_csv),
+        target_name=str(tgt_csv),
+        sample_rate_hz=sample_rate_hz,
+        peak_min_height=peak_min_height,
+        peak_min_count=peak_min_count,
+        cal_search_s=cal_search_s,
+        peak_buffer_s=peak_buffer_s,
+        window_seconds=window_seconds,
+        window_step_seconds=window_step_seconds,
+        local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
+        min_fit_r2=min_fit_r2,
+    )
+
+    aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
+    drift_source = meta.pop("drift_source")
+    payload = _sync_payload(
+        model,
+        sync_method="adaptive_online",
+        ref_df=ref_df,
+        tgt_df=tgt_df,
+        sample_rate_hz=sample_rate_hz,
+        extra={
+            "drift_source": drift_source,
+            "adaptive": meta,
+        },
+    )
+    return _write_recording_outputs(
+        recording_name=recording_name,
+        method="adaptive",
         ref_csv=ref_csv,
         tgt_csv=tgt_csv,
         out_dir=out_dir,

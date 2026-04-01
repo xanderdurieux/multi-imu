@@ -1,4 +1,4 @@
-"""Export pipeline: aggregate features from sections and write split tables."""
+"""Export pipeline: aggregate features, calibration params, and sync params."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from common.paths import (
     data_root,
     project_relative_path,
     read_csv,
-    recordings_root,
     sections_root,
     write_csv,
 )
+from exports.aggregate import aggregate_calibration_params, aggregate_sync_params
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +125,10 @@ def aggregate_features(
 def export_feature_tables(
     df: pd.DataFrame,
     output_dir: Path,
-) -> dict[str, Path]:
-    """Split and write bike-only, rider-only, and fused feature tables.
+    *,
+    recording_names: list[str] | None = None,
+) -> tuple[dict[str, Path], pd.DataFrame, pd.DataFrame]:
+    """Split and write bike-only, rider-only, fused, calibration, and sync tables.
 
     Parameters
     ----------
@@ -134,10 +136,13 @@ def export_feature_tables(
         Combined feature DataFrame from :func:`aggregate_features`.
     output_dir:
         Directory where CSV files and manifest are written.
+    recording_names:
+        Optional list of recording names; passed to the calibration and sync
+        aggregators to restrict which recordings are collected.
 
     Returns
     -------
-    dict mapping table name → absolute Path.
+    Tuple of (paths dict, calibration params DataFrame, sync params DataFrame).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +179,34 @@ def export_feature_tables(
             len(frame.columns),
         )
 
+    # Calibration parameters (one row per section)
+    cal_df = aggregate_calibration_params(recording_names)
+    if not cal_df.empty:
+        cal_path = output_dir / "calibration_params.csv"
+        cal_df.to_csv(cal_path, index=False)
+        paths["calibration_params"] = cal_path
+        logger.info(
+            "Wrote %s (%d sections)",
+            project_relative_path(cal_path),
+            len(cal_df),
+        )
+    else:
+        logger.warning("No calibration params found; calibration_params.csv not written")
+
+    # Sync parameters (one row per recording)
+    sync_df = aggregate_sync_params(recording_names)
+    if not sync_df.empty:
+        sync_path = output_dir / "sync_params.csv"
+        sync_df.to_csv(sync_path, index=False)
+        paths["sync_params"] = sync_path
+        logger.info(
+            "Wrote %s (%d recordings)",
+            project_relative_path(sync_path),
+            len(sync_df),
+        )
+    else:
+        logger.warning("No sync params found; sync_params.csv not written")
+
     # Build manifest
     label_dist: dict[str, int] = {}
     if "scenario_label" in df.columns:
@@ -186,6 +219,7 @@ def export_feature_tables(
         "filtering_policy": "min_quality_label=marginal",
         "total_sections": int(n_sections),
         "total_windows": int(len(df)),
+        "total_recordings": int(len(sync_df)) if not sync_df.empty else 0,
         "label_distribution": {k: int(v) for k, v in label_dist.items()},
         "tables": {
             name: str(path.relative_to(analysis_root()))
@@ -198,7 +232,7 @@ def export_feature_tables(
     paths["export_manifest"] = manifest_path
     logger.info("Wrote manifest to %s", project_relative_path(manifest_path))
 
-    return paths
+    return paths, cal_df, sync_df
 
 
 def run_exports(
@@ -257,14 +291,21 @@ def run_exports(
         logger.warning("No data after aggregation; nothing to export.")
         return {}
 
-    paths = export_feature_tables(df, output_dir)
+    paths, cal_df, sync_df = export_feature_tables(df, output_dir, recording_names=recording_names)
 
     if not no_plots:
         try:
-            from exports.analysis import run_eda
+            from visualization.plot_exports import run_eda
             run_eda(df, output_dir)
         except Exception as exc:
-            logger.warning("EDA figure generation failed: %s", exc)
+            logger.warning("Feature EDA figure generation failed: %s", exc)
+
+        try:
+            from visualization.plot_exports import run_calibration_eda, run_sync_eda
+            run_calibration_eda(cal_df, output_dir)
+            run_sync_eda(sync_df, output_dir)
+        except Exception as exc:
+            logger.warning("Params EDA figure generation failed: %s", exc)
 
     return paths
 
@@ -274,7 +315,7 @@ def _run_eda_safe(fused_path: Path | None, output_dir: Path) -> None:
     if fused_path is None or not fused_path.exists():
         return
     try:
-        from exports.analysis import run_eda
+        from visualization.plot_exports import run_eda
         df = read_csv(fused_path)
         if not df.empty:
             run_eda(df, output_dir)

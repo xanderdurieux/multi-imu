@@ -42,14 +42,16 @@ _METHOD_COLORS = {
     "lida":        "#1f77b4",
     "sda":         "#ff7f0e",
     "online":      "#9467bd",
+    "adaptive":    "#8c564b",
 }
 _METHOD_LABELS = {
     "calibration": "Calibration",
     "lida":        "SDA + LIDA",
     "sda":         "SDA only",
     "online":      "Online",
+    "adaptive":    "Adaptive",
 }
-_ALL_METHODS = ["calibration", "lida", "sda", "online"]
+_ALL_METHODS = ["calibration", "lida", "sda", "online", "adaptive"]
 
 
 # ---------------------------------------------------------------------------
@@ -402,12 +404,14 @@ def plot_sync_detail(
     drift_ppm = (drift_sps * 1e6) if drift_sps is not None else None
     corr = info.get("correlation") or {}
     cal_block = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
+    adap_block = info.get("adaptive") if isinstance(info.get("adaptive"), dict) else None
     rec_name = synced_dir.parent.name
 
     has_cal = cal_block is not None
-    fig_h = 8 if has_cal else 4
-    fig, axes = plt.subplots(2 if has_cal else 1, 2,
-                             figsize=(14, fig_h), squeeze=False)
+    has_adap = adap_block is not None
+    n_rows = 1 + int(has_cal) + int(has_adap)
+    fig_h = 4 * n_rows
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, fig_h), squeeze=False)
     fig.suptitle(f"{rec_name} — sync detail  ({method})", fontsize=12)
 
     # --- Row 0, left: key metrics as horizontal bar (gauge-style) ---
@@ -450,13 +454,14 @@ def plot_sync_detail(
                 f"{v:.4f}", va="center", fontsize=9)
 
     # --- Row 1: calibration anchors (only if calibration method) ---
+    cal_row = 1
     if has_cal:
         opening = cal_block.get("opening") or {}
         closing = cal_block.get("closing") or {}
         span_s = cal_block.get("calibration_span_s")
 
         # Left: anchor scores
-        ax = axes[1][0]
+        ax = axes[cal_row][0]
         anchor_names = ["Opening", "Closing"]
         anchor_scores = [opening.get("score"), closing.get("score")]
         anchor_colors = [
@@ -479,7 +484,7 @@ def plot_sync_detail(
                         f"{v:.4f}", ha="center", va="bottom", fontsize=9)
 
         # Right: anchor timeline
-        ax = axes[1][1]
+        ax = axes[cal_row][1]
         ax.axis("off")
         o_t = opening.get("t_tgt_s")
         c_t = closing.get("t_tgt_s")
@@ -508,6 +513,63 @@ def plot_sync_detail(
                 fontsize=10, va="top", ha="left", family="monospace",
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
         ax.set_title("Calibration anchor details")
+
+    # --- Row n: adaptive online details ---
+    if has_adap:
+        adap_row = cal_row + int(has_cal)
+        anchor = adap_block.get("opening_anchor") or {}
+        n_wins = adap_block.get("n_windows_used")
+        fit_r2 = adap_block.get("fit_r2")
+        init_off = adap_block.get("initial_offset_s")
+        init_meth = adap_block.get("initial_method", "N/A")
+
+        # Left: window count and R² as a small bar
+        ax = axes[adap_row][0]
+        bar_vals = [fit_r2 if fit_r2 is not None else 0.0]
+        bar_color = "#2ca02c" if (fit_r2 or 0.0) >= 0.1 else "#d62728"
+        ax.bar([0], bar_vals, color=bar_color, width=0.4, alpha=0.85)
+        ax.axhline(0.1, color="orange", lw=1.0, ls="--", label="min R² (0.1)")
+        ax.set_xlim(-0.5, 0.5)
+        ax.set_ylim(0, max(1.1, (fit_r2 or 0.0) * 1.2))
+        ax.set_xticks([0])
+        ax.set_xticklabels(["Drift fit R²"])
+        ax.set_ylabel("R²")
+        ax.set_title(
+            f"Adaptive online — {n_wins} windows used  (init: {init_meth})"
+            if n_wins is not None else "Adaptive online"
+        )
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+        if fit_r2 is not None:
+            ax.text(0, fit_r2 + 0.02, f"{fit_r2:.4f}", ha="center", va="bottom", fontsize=9)
+
+        # Right: opening anchor details
+        ax = axes[adap_row][1]
+        ax.axis("off")
+        a_t = anchor.get("t_tgt_s")
+        a_w = anchor.get("window_duration_s", 0)
+        a_off = anchor.get("offset_s")
+        a_score = anchor.get("score")
+        adap_lines = [
+            "Adaptive bootstrap:",
+            "",
+            f"  Initial method:  {init_meth}",
+            f"  Initial offset:  {init_off:.6f} s" if init_off is not None else "  Initial offset:  N/A",
+            "",
+            "  Opening anchor:",
+            f"    t_target = {a_t:.3f} s" if a_t is not None else "    t_target = N/A",
+            f"    window   = {a_w:.2f} s",
+            f"    offset   = {a_off:.6f} s" if a_off is not None else "    offset   = N/A",
+            f"    score    = {a_score:.4f}" if a_score is not None else "    score    = N/A",
+            "",
+            f"  Windows used:    {n_wins}" if n_wins is not None else "  Windows used:    N/A",
+            f"  Drift fit R²:    {fit_r2:.4f}" if fit_r2 is not None else "  Drift fit R²:    N/A",
+            f"  Drift source:    {info.get('drift_source', 'N/A')}",
+        ]
+        ax.text(0.05, 0.95, "\n".join(adap_lines), transform=ax.transAxes,
+                fontsize=10, va="top", ha="left", family="monospace",
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
+        ax.set_title("Adaptive online details")
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=120, bbox_inches="tight")

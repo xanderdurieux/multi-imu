@@ -22,6 +22,7 @@ from .methods import (
     method_label,
     method_stage,
     synchronize_recording,
+    synchronize_recording_adaptive,
     synchronize_recording_from_calibration,
     synchronize_recording_online,
     synchronize_recording_sda,
@@ -30,8 +31,8 @@ from .methods import (
 log = logging.getLogger(__name__)
 
 _STAGE_IN = "parsed"
-ALL_METHODS: list[str] = ["calibration", "lida", "sda", "online"]
-SyncMethodName = Literal["sda", "lida", "calibration", "online"]
+ALL_METHODS: list[str] = ["calibration", "lida", "sda", "online", "adaptive"]
+SyncMethodName = Literal["sda", "lida", "calibration", "online", "adaptive"]
 
 
 @dataclass
@@ -112,6 +113,7 @@ _METHOD_RUNNERS = {
     "lida": lambda rec, stage: synchronize_recording(rec, stage),
     "calibration": lambda rec, stage: synchronize_recording_from_calibration(rec, stage),
     "online": lambda rec, stage: synchronize_recording_online(rec, stage),
+    "adaptive": lambda rec, stage: synchronize_recording_adaptive(rec, stage),
 }
 
 CHOSEN_SYNC_METHODS: tuple[str, ...] = SYNC_METHODS
