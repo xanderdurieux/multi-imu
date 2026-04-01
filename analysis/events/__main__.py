@@ -15,7 +15,7 @@ import logging
 import sys
 from pathlib import Path
 
-from common.paths import parse_section_folder_name, section_dir
+from common.paths import parse_section_folder_name, project_relative_path, section_dir
 from events.config import EventConfig
 from events.pipeline import process_section_events, process_recording_events
 
@@ -64,10 +64,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.config:
         config_path = Path(args.config)
         if not config_path.exists():
-            print(f"Config file not found: {config_path}", file=sys.stderr)
+            print(f"Config file not found: {project_relative_path(config_path)}", file=sys.stderr)
             sys.exit(1)
         shared_config = EventConfig.load(config_path)
-        logging.getLogger(__name__).info("Loaded custom config from %s", config_path)
+        logging.getLogger(__name__).info(
+            "Loaded custom config from %s",
+            project_relative_path(config_path),
+        )
 
     if args.recording:
         results = process_recording_events(
@@ -94,7 +97,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Invalid section name: {args.section_name}", file=sys.stderr)
             sys.exit(1)
         if not section_path.exists():
-            print(f"Section not found: {section_path}", file=sys.stderr)
+            print(f"Section not found: {project_relative_path(section_path)}", file=sys.stderr)
             sys.exit(1)
         events = process_section_events(section_path, config=shared_config, force=args.force)
         _print_summary(args.section_name, events)

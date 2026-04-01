@@ -5,7 +5,6 @@ Usage::
     python -m workflow configs/workflow.thesis.json
     python -m workflow configs/workflow.thesis.json --force
     python -m workflow configs/workflow.thesis.json --stage calibration orientation
-    python -m workflow configs/workflow.thesis.json --from-stage calibration
     python -m workflow configs/workflow.thesis.json --list-stages
 """
 
@@ -15,20 +14,41 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from .config import load_workflow_config, WorkflowConfig
-from .runner import ALL_STAGES, run_pipeline
+from common.paths import data_root, default_workflow_config_path, project_relative_path
+from .config import (
+    WorkflowConfig,
+    known_stages,
+    load_workflow_config,
+)
+from .runner import run_pipeline
 
 
-def main(argv: list[str] | None = None) -> None:
+def _configure_logging() -> Path:
+    """Log to both the terminal and a per-run workflow log file."""
+    logs_dir = data_root() / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_path, encoding="utf-8"),    
+        ],
     )
+    return log_path
+
+
+def main(argv: list[str] | None = None) -> None:
+    log_path = _configure_logging()
     argv = list(argv if argv is not None else sys.argv[1:])
 
+    stage_names = known_stages()
     parser = argparse.ArgumentParser(
         prog="python -m workflow",
         description="Run the dual-IMU cycling pipeline end-to-end from a config file.",
@@ -36,22 +56,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "config",
         nargs="?",
-        help="Path to workflow config JSON (e.g. configs/workflow.thesis.json).",
+        help=(
+            "Path to workflow config JSON override "
+            f"(merged over default: {project_relative_path(default_workflow_config_path())})."
+        ),
     )
     parser.add_argument(
         "--stage",
         nargs="+",
         metavar="STAGE",
-        help=f"Run only these stages. Available: {', '.join(ALL_STAGES)}",
-    )
-    parser.add_argument(
-        "--from-stage",
-        choices=ALL_STAGES,
-        metavar="STAGE",
-        help=(
-            "Run from this stage onward using default stage order "
-            f"({', '.join(ALL_STAGES)})."
-        ),
+        help=f"Run only these stages. Available: {', '.join(stage_names)}",
     )
     parser.add_argument(
         "--force",
@@ -77,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.list_stages:
         print("Available pipeline stages:")
-        for s in ALL_STAGES:
+        for s in stage_names:
             print(f"  {s}")
         return
 
@@ -86,12 +100,8 @@ def main(argv: list[str] | None = None) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         cfg = WorkflowConfig()
         out.write_text(json.dumps(cfg.to_dict(), indent=2), encoding="utf-8")
-        print(f"Config template written → {out}")
+        print(f"Config template written → {project_relative_path(out)}")
         return
-
-    if not args.config:
-        parser.print_help()
-        sys.exit(1)
 
     try:
         cfg = load_workflow_config(args.config)
@@ -104,23 +114,19 @@ def main(argv: list[str] | None = None) -> None:
         cfg.force = True
     if args.no_plots:
         cfg.no_plots = True
-    if args.stage and args.from_stage:
-        parser.error("Use either --stage or --from-stage, not both.")
     if args.stage:
         cfg.stages = list(args.stage)
-        cfg.from_stage = ""
-    elif args.from_stage:
-        start_idx = ALL_STAGES.index(args.from_stage)
-        cfg.stages = ALL_STAGES[start_idx:]
-        cfg.from_stage = ""
-    elif cfg.from_stage and not cfg.stages:
-        start_idx = ALL_STAGES.index(cfg.from_stage)
-        cfg.stages = ALL_STAGES[start_idx:]
 
     print(f"\n{'━' * 60}")
     print(f"  Dual-IMU Cycling Pipeline")
-    print(f"  Config: {args.config}")
-    print(f"  Stages: {cfg.stages or ALL_STAGES}")
+    cfg_display = (
+        project_relative_path(args.config)
+        if args.config
+        else project_relative_path(default_workflow_config_path())
+    )
+    print(f"  Config: {cfg_display}")
+    print(f"  Stages: {cfg.stages}")
+    print(f"  Log file: {project_relative_path(log_path)}")
     print(f"{'━' * 60}\n")
 
     summary = run_pipeline(cfg)

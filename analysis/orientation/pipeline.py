@@ -1,8 +1,7 @@
 """Orientation estimation pipeline for calibrated IMU sections.
 
-Runs all configured orientation methods, scores them, flattens the selected
-result into ``orientation/``, and keeps per-method outputs under
-``orientation/<method>/`` for comparison.
+Runs the configured orientation method(s), scores them, selects the best
+result, and flattens it into ``orientation/``.
 """
 
 from __future__ import annotations
@@ -100,8 +99,19 @@ def run_orientation_filters(
         filt.initialize_from_acc(first_acc)
 
         rows: list[dict[str, float]] = []
+        pending_dt = 0.0
         for i in range(n_samples):
-            q = filt.update(acc_arr[i], gyro_rad_arr[i], dt=float(dt_arr[i]))
+            gyro_i = gyro_rad_arr[i]
+            acc_i = acc_arr[i]
+            pending_dt += float(dt_arr[i])
+
+            if not np.all(np.isfinite(gyro_i)):
+                # No gyro this step — repeat last quaternion, carry dt forward so
+                # the next real gyro sample integrates over the full elapsed time.
+                q = filt._q.copy()
+            else:
+                q = filt.update(acc_i, gyro_i, dt=pending_dt)
+                pending_dt = 0.0
             yaw_r, pitch_r, roll_r = euler_from_quat(q)
             rows.append(
                 {
@@ -220,7 +230,7 @@ def process_section_orientation(
     canonical_variant: str = _DEFAULT_METHOD,
     variants: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run all orientation methods for one section and flatten the selected result."""
+    """Run orientation method(s) for one section and flatten the selected result."""
     methods = list(variants) if variants is not None else list(_ALL_METHODS)
     orient_dir = section_dir / "orientation"
     all_methods_json = orient_dir / "all_methods.json"
@@ -298,6 +308,12 @@ def process_section_orientation(
         selected_csv = orient_dir / selected_method / f"{sensor}.csv"
         if selected_csv.exists():
             shutil.copy2(selected_csv, orient_dir / f"{sensor}.csv")
+
+    # Keep only flattened outputs in orientation/ to match other auto stages.
+    for method in methods:
+        method_dir = orient_dir / method
+        if method_dir.is_dir():
+            shutil.rmtree(method_dir)
 
     selected_summary = method_summaries[selected_method]
     flat_stats = {

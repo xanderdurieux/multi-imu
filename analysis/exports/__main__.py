@@ -12,6 +12,7 @@ import logging
 import sys
 from pathlib import Path
 
+from common.paths import project_relative_path
 from exports.pipeline import run_exports
 
 
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     if paths:
         print(f"Export complete. Files written:")
         for name, path in paths.items():
-            print(f"  {name}: {path}")
+            print(f"  {name}: {project_relative_path(path)}")
     else:
         print("No data exported.", file=sys.stderr)
         return 1

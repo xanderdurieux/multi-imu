@@ -12,6 +12,8 @@ from typing import Any
 from common.paths import (
     analysis_root,
     data_root,
+    evaluation_root,
+    exports_root,
     iter_sections_for_recording,
     project_relative_path,
     recording_stage_dir,
@@ -22,21 +24,6 @@ from .config import WorkflowConfig
 _ALL_ORIENTATION_FILTERS = ["madgwick", "complementary"]
 
 log = logging.getLogger(__name__)
-
-ALL_STAGES = [
-    "parse",
-    "sync",
-    "split",
-    "calibration",
-    "orientation",
-    "derived",
-    "events",
-    "features",
-    "exports",
-    "evaluation",
-    "reporting",
-]
-
 
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
     """Resolve the list of recording names to process."""
@@ -88,6 +75,9 @@ def _run_section_stage_plots(section_dir: Path, stage: str) -> None:
     elif stage == "orientation":
         from visualization.plot_orientation import plot_orientation_stage
         plot_orientation_stage(section_dir)
+    elif stage == "derived":
+        from visualization.plot_derived import plot_derived_stage
+        plot_derived_stage(section_dir)
     elif stage == "features":
         from visualization.plot_features import plot_features_stage
         from visualization.plot_labels import plot_labels
@@ -132,6 +122,15 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
     elif stage == "split":
         from parser.split_sections import split_recording
         for rec in recordings:
+            split_input_dir = recording_stage_dir(rec, cfg.split_stage)
+            if not split_input_dir.is_dir():
+                log.warning(
+                    "split skipped for %s: missing input stage directory %s",
+                    rec,
+                    project_relative_path(split_input_dir),
+                )
+                result["skipped"] += 1
+                continue
             try:
                 split_recording(
                     rec,
@@ -144,7 +143,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 result["failed"] += 1
 
     elif stage == "calibration":
-        if cfg.frame_alignment == "all":
+        if cfg.frame_alignment == "auto":
             from calibration.pipeline import calibrate_recording_sections_all_methods
             for rec in recordings:
                 try:
@@ -186,8 +185,8 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "orientation":
         from orientation.pipeline import process_recording_orientation
-        canonical = _ALL_ORIENTATION_FILTERS[0] if cfg.orientation_filter == "all" else cfg.orientation_filter
-        variants = _ALL_ORIENTATION_FILTERS if cfg.orientation_filter == "all" else None
+        canonical = _ALL_ORIENTATION_FILTERS[0] if cfg.orientation_filter == "auto" else cfg.orientation_filter
+        variants = _ALL_ORIENTATION_FILTERS if cfg.orientation_filter == "auto" else [cfg.orientation_filter]
         for rec in recordings:
             try:
                 results = process_recording_orientation(
@@ -219,6 +218,12 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 )
                 result["ok"] += sum(ok_list)
                 result["failed"] += sum(not x for x in ok_list)
+                if not cfg.no_plots:
+                    for section_dir in iter_sections_for_recording(rec):
+                        try:
+                            _run_section_stage_plots(section_dir, "derived")
+                        except Exception as exc:
+                            log.warning("derived plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
                 log.error("derived failed for %s: %s", rec, exc)
                 result["failed"] += 1
@@ -267,6 +272,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 recordings,
                 min_quality_label=cfg.min_quality_label,
                 force=cfg.force,
+                no_plots=cfg.no_plots,
             )
             result["ok"] += 1
         except Exception as exc:
@@ -275,8 +281,8 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "evaluation":
         from evaluation.experiments import run_evaluation
-        fused = data_root() / "exports" / "features_fused.csv"
-        out = analysis_root() / "outputs" / "evaluation"
+        fused = exports_root() / "features_fused.csv"
+        out = evaluation_root()
         if fused.exists():
             try:
                 run_evaluation(
@@ -284,6 +290,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     output_dir=out,
                     seed=cfg.evaluation_seed,
                     min_quality=cfg.min_quality_label,
+                    no_plots=cfg.no_plots,
                 )
                 result["ok"] += 1
             except Exception as exc:
@@ -295,7 +302,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "reporting":
         from reporting.bundle import generate_report_bundle
-        out = analysis_root() / "outputs" / "thesis_report_bundle"
+        out = data_root() / "thesis_report_bundle"
         try:
             generate_report_bundle(out, force=cfg.force)
             result["ok"] += 1
@@ -311,11 +318,7 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
 
     Returns a summary dict with per-stage results.
     """
-    if cfg.from_stage:
-        start_idx = ALL_STAGES.index(cfg.from_stage)
-        stages = ALL_STAGES[start_idx:]
-    else:
-        stages = cfg.stages if cfg.stages else ALL_STAGES
+    stages = list(cfg.stages)
     recordings = _collect_recordings(cfg)
     log.info("Pipeline: %d recording(s), stages=%s", len(recordings), stages)
 
@@ -327,10 +330,7 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
     }
 
     for stage in stages:
-        if stage not in ALL_STAGES:
-            log.warning("Unknown stage %r — skipping", stage)
-            continue
-        log.info("--- Stage: %s ---", stage)
+        log.info("-------------------------------- Stage: %s --------------------------------", stage)
         try:
             r = _run_stage(stage, cfg, recordings)
         except Exception as exc:

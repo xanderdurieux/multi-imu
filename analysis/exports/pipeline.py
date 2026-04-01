@@ -9,7 +9,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from common.paths import analysis_root, data_root, read_csv, recordings_root, sections_root, write_csv
+from common.paths import (
+    analysis_root,
+    data_root,
+    project_relative_path,
+    read_csv,
+    recordings_root,
+    sections_root,
+    write_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +60,7 @@ def aggregate_features(
 
     root = sections_root()
     if not root.exists():
-        logger.warning("sections_root does not exist: %s", root)
+        logger.warning("sections_root does not exist: %s", project_relative_path(root))
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
@@ -76,7 +84,7 @@ def aggregate_features(
         try:
             df = read_csv(features_csv)
         except Exception as exc:
-            logger.warning("Failed to read %s: %s", features_csv, exc)
+            logger.warning("Failed to read %s: %s", project_relative_path(features_csv), exc)
             continue
 
         # Inject section_id if not present
@@ -84,10 +92,10 @@ def aggregate_features(
             df.insert(0, "section_id", section_dir.name)
 
         frames.append(df)
-        logger.debug("Loaded %d rows from %s", len(df), features_csv)
+        logger.debug("Loaded %d rows from %s", len(df), project_relative_path(features_csv))
 
     if not frames:
-        logger.warning("No feature files found under %s", root)
+        logger.warning("No feature files found under %s", project_relative_path(root))
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
@@ -159,7 +167,12 @@ def export_feature_tables(
         out_path = output_dir / f"{name}.csv"
         write_csv(frame, out_path)
         paths[name] = out_path
-        logger.info("Wrote %s (%d rows, %d cols)", out_path, len(frame), len(frame.columns))
+        logger.info(
+            "Wrote %s (%d rows, %d cols)",
+            project_relative_path(out_path),
+            len(frame),
+            len(frame.columns),
+        )
 
     # Build manifest
     label_dist: dict[str, int] = {}
@@ -183,7 +196,7 @@ def export_feature_tables(
     manifest_path = output_dir / "export_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
     paths["export_manifest"] = manifest_path
-    logger.info("Wrote manifest to %s", manifest_path)
+    logger.info("Wrote manifest to %s", project_relative_path(manifest_path))
 
     return paths
 
@@ -194,8 +207,9 @@ def run_exports(
     output_dir: Path | None = None,
     min_quality_label: str = "marginal",
     force: bool = False,
+    no_plots: bool = False,
 ) -> dict[str, Path]:
-    """Full export pipeline: aggregate → split → write.
+    """Full export pipeline: aggregate → split → write → EDA figures.
 
     Parameters
     ----------
@@ -207,6 +221,8 @@ def run_exports(
         Minimum quality threshold passed to :func:`aggregate_features`.
     force:
         If ``False`` and outputs already exist, skip and return existing paths.
+    no_plots:
+        If ``True``, skip EDA figure generation.
     """
     if output_dir is None:
         output_dir = data_root() / "exports"
@@ -214,7 +230,10 @@ def run_exports(
 
     manifest_path = output_dir / "export_manifest.json"
     if not force and manifest_path.exists():
-        logger.info("Export already exists at %s (use force=True to re-run)", output_dir)
+        logger.info(
+            "Export already exists at %s (use force=True to re-run)",
+            project_relative_path(output_dir),
+        )
         existing: dict[str, Path] = {}
         try:
             data = json.loads(manifest_path.read_text())
@@ -223,6 +242,8 @@ def run_exports(
         except Exception:
             pass
         existing["export_manifest"] = manifest_path
+        if not no_plots:
+            _run_eda_safe(existing.get("features_fused"), output_dir)
         return existing
 
     logger.info(
@@ -236,4 +257,26 @@ def run_exports(
         logger.warning("No data after aggregation; nothing to export.")
         return {}
 
-    return export_feature_tables(df, output_dir)
+    paths = export_feature_tables(df, output_dir)
+
+    if not no_plots:
+        try:
+            from exports.analysis import run_eda
+            run_eda(df, output_dir)
+        except Exception as exc:
+            logger.warning("EDA figure generation failed: %s", exc)
+
+    return paths
+
+
+def _run_eda_safe(fused_path: Path | None, output_dir: Path) -> None:
+    """Load fused features and run EDA if the file exists (best-effort)."""
+    if fused_path is None or not fused_path.exists():
+        return
+    try:
+        from exports.analysis import run_eda
+        df = read_csv(fused_path)
+        if not df.empty:
+            run_eda(df, output_dir)
+    except Exception as exc:
+        logger.warning("EDA figure generation failed: %s", exc)

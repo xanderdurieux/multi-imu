@@ -14,7 +14,7 @@ import argparse
 import logging
 import sys
 
-from common.paths import parse_section_folder_name, section_dir
+from common.paths import parse_section_folder_name, project_relative_path, section_dir
 from .pipeline import (
     extract_features_for_section,
     process_recording_features,
@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Invalid section name: {args.section_name}", file=sys.stderr)
             sys.exit(1)
         if not section_path.exists():
-            print(f"Section not found: {section_path}", file=sys.stderr)
+            print(f"Section not found: {project_relative_path(section_path)}", file=sys.stderr)
             sys.exit(1)
         df = extract_features_for_section(section_path, **kwargs)
         if df.empty:

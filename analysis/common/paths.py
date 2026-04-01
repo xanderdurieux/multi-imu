@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -103,6 +104,21 @@ def sections_root() -> Path:
 def labels_root() -> Path:
     """Return the directory that holds repo-level recording label CSVs."""
     return data_root() / "labels"
+
+
+def exports_root() -> Path:
+    """Return the directory containing exported dataset artifacts."""
+    return data_root() / "exports"
+    
+
+def evaluation_root() -> Path:
+    """Return the directory containing evaluation artifacts."""
+    return data_root() / "evaluation"
+
+
+def configs_root() -> Path:
+    """Return the directory containing configuration files."""
+    return analysis_root() / "configs"
 
 
 def project_relative_path(path: Path | str) -> str:
@@ -281,3 +297,34 @@ def section_labels_csv(section_dir: Path | str) -> Path:
     The file may not exist yet (e.g. before label transfer is run).
     """
     return Path(section_dir) / "labels" / "labels.csv"
+
+
+# ---------------------------------------------------------------------------
+# Config path helpers
+# ---------------------------------------------------------------------------
+
+def default_workflow_config_path() -> Path:
+    """Return the path to the default workflow config file."""
+    return data_root() / "configs" / "workflow.default.json"
+
+
+def read_json_file(path: Path | str) -> dict:
+    """Read a JSON file and return a dictionary payload."""
+    p = Path(path)
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
+    """Load workflow config data with default-as-base merging.
+
+    When ``override_path`` is provided, its keys overwrite keys from the
+    default workflow config.
+    """
+    default_payload = read_json_file(default_workflow_config_path())
+    if override_path is None:
+        return dict(default_payload)
+    override_payload = read_json_file(override_path)
+    merged = dict(default_payload)
+    merged.update(override_payload)
+    return merged
+

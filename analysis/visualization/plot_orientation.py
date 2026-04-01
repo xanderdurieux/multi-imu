@@ -3,7 +3,6 @@
 Generates:
 - ``orientation_overlay.png``            selected method, sensors overlaid
 - ``orientation_methods_comparison.png`` per-method quality comparison
-- ``orientation_detail.png``             selected method parameters + stats
 """
 
 from __future__ import annotations
@@ -203,66 +202,11 @@ def plot_orientation_methods_comparison(orient_dir: Path) -> Path | None:
     return out_path
 
 
-def plot_orientation_detail(orient_dir: Path) -> Path | None:
-    """Plot selected method parameters and quality summary."""
-    selected_stats = _load_json(orient_dir / "orientation_stats.json")
-    if not selected_stats:
-        log.warning("No orientation_stats.json found in %s", orient_dir)
-        return None
-
-    selected = selected_stats.get("selected_method", "?")
-    params = selected_stats.get("parameters", {})
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.axis("off")
-
-    lines = [f"Selected method: {selected}", "", "Parameters:"]
-    if params:
-        for key, value in params.items():
-            lines.append(f"  {key}: {value}")
-    else:
-        lines.append("  (none recorded)")
-
-    lines.append("")
-    lines.append("Per-sensor quality:")
-    for sensor in _SENSORS:
-        block = selected_stats.get(sensor, {})
-        if not block:
-            lines.append(f"  {sensor}: no data")
-            continue
-        lines.append(
-            "  "
-            + f"{sensor}: quality={block.get('quality', '?')}, "
-            + f"score={block.get('score', '?')}, "
-            + f"gravity_alignment={block.get('gravity_alignment', '?')}, "
-            + f"pitch_std={block.get('pitch_std_deg', '?')}, "
-            + f"roll_std={block.get('roll_std_deg', '?')}"
-        )
-
-    ax.text(
-        0.02,
-        0.98,
-        "\n".join(lines),
-        ha="left",
-        va="top",
-        family="monospace",
-        fontsize=10,
-    )
-    fig.suptitle(f"{orient_dir.parent.name} — orientation detail")
-    fig.tight_layout()
-
-    out_path = orient_dir / "orientation_detail.png"
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    log.info("Plot written: %s", project_relative_path(out_path))
-    return out_path
-
-
 def plot_orientation_stage(target: str | Path) -> list[Path]:
     """Generate all orientation plots for a section."""
     orient_dir = _resolve_orientation_dir(target)
     out_paths: list[Path] = []
-    for plot_fn in (plot_orientation_overlay, plot_orientation_methods_comparison, plot_orientation_detail):
+    for plot_fn in (plot_orientation_overlay, plot_orientation_methods_comparison):
         try:
             p = plot_fn(orient_dir)
         except Exception as exc:

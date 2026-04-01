@@ -330,8 +330,22 @@ def _label_feature(
     labels_df: pd.DataFrame | None,
     window_start_ms: float,
     window_end_ms: float,
+    *,
+    containment_threshold: float = 0.5,
 ) -> str:
-    """Return scenario_label for the most-overlapping label, or 'unlabeled'."""
+    """Return scenario_label for the window, or 'unlabeled'.
+
+    Labeling strategy:
+    1. Compute the absolute overlap (ms) and the containment ratio (overlap /
+       label duration) for every label that touches the window.
+    2. Among labels whose containment ratio >= *containment_threshold* (i.e.,
+       at least half the label falls inside the window), prefer the **shortest**
+       label — this ensures a brief but fully-captured event (e.g. 'fall')
+       beats a long background label (e.g. 'riding') even when the absolute
+       overlap is smaller.
+    3. If no label meets the containment threshold, fall back to the label
+       with the greatest absolute overlap (original behaviour).
+    """
     if labels_df is None or labels_df.empty:
         return "unlabeled"
 
@@ -343,16 +357,26 @@ def _label_feature(
         (labels_df["start_ms"] < window_end_ms)
         & (labels_df["end_ms"] > window_start_ms)
     )
-    overlapping = labels_df[mask]
+    overlapping = labels_df[mask].copy()
     if overlapping.empty:
         return "unlabeled"
 
-    # Choose the label with the most overlap with this window.
     overlap_ms = (
         overlapping["end_ms"].clip(upper=window_end_ms)
         - overlapping["start_ms"].clip(lower=window_start_ms)
     )
-    best_idx = overlap_ms.idxmax()
+    label_dur_ms = (overlapping["end_ms"] - overlapping["start_ms"]).clip(lower=1.0)
+    containment = overlap_ms / label_dur_ms
+
+    well_contained = overlapping[containment >= containment_threshold]
+    if not well_contained.empty:
+        # Shortest (most specific) well-contained label wins
+        durations = label_dur_ms.loc[well_contained.index]
+        best_idx = durations.idxmin()
+    else:
+        # Fallback: largest absolute overlap
+        best_idx = overlap_ms.idxmax()
+
     row = overlapping.loc[best_idx]
 
     if "scenario_label" in row.index and pd.notna(row["scenario_label"]) and str(row["scenario_label"]).strip():

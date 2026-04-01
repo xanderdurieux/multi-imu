@@ -15,7 +15,7 @@ import json
 import logging
 import sys
 
-from common.paths import parse_section_folder_name, section_dir
+from common.paths import parse_section_folder_name, project_relative_path, section_dir
 from .pipeline import process_section_orientation, process_recording_orientation
 
 
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Invalid section name: {args.section_name}", file=sys.stderr)
             sys.exit(1)
         if not section_path.exists():
-            print(f"Section not found: {section_path}", file=sys.stderr)
+            print(f"Section not found: {project_relative_path(section_path)}", file=sys.stderr)
             sys.exit(1)
         stats = process_section_orientation(
             section_path,

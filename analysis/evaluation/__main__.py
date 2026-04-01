@@ -17,7 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
-from common.paths import analysis_root, data_root
+from common.paths import evaluation_root, fused_features_csv
 from evaluation.experiments import run_evaluation
 
 
@@ -29,14 +29,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--features",
         metavar="PATH",
-        default=str(data_root() / "exports" / "features_fused.csv"),
+        default=str(fused_features_csv()),
         help="Path to feature CSV (default: data/exports/features_fused.csv).",
     )
     parser.add_argument(
         "--output",
         metavar="DIR",
-        default=str(analysis_root() / "outputs" / "evaluation"),
-        help="Output directory (default: outputs/evaluation/).",
+        default=str(evaluation_root()),
+        help="Output directory (default: data/evaluation/).",
     )
     parser.add_argument(
         "--seed",

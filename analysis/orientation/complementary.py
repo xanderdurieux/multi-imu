@@ -85,8 +85,8 @@ class ComplementaryFilter:
 
         # -- Accelerometer-derived tilt ----------------------------------------
         acc_norm = np.linalg.norm(acc)
-        if acc_norm < 1e-6:
-            # No valid acc measurement — trust gyro entirely.
+        if not (np.isfinite(acc_norm) and acc_norm > 1e-6):
+            # No valid acc measurement (NaN or near-zero) — trust gyro entirely.
             self._q = q_gyro
             return self._q.copy()
 

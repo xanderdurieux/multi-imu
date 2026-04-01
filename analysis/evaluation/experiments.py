@@ -17,7 +17,7 @@ from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-from common.paths import read_csv, write_csv
+from common.paths import project_relative_path, read_csv, write_csv
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +139,7 @@ def run_evaluation(
     seed: int = 42,
     min_quality: str = "marginal",
     feature_sets: dict[str, list[str]] | None = None,
+    no_plots: bool = False,
 ) -> dict:
     """Train and evaluate models on feature table.
 
@@ -158,6 +159,8 @@ def run_evaluation(
         Minimum quality label. Rows below this are dropped.
     feature_sets:
         Mapping of set name → list of column prefixes. ``None`` = auto-detect.
+    no_plots:
+        If ``True``, skip thesis figure generation.
 
     Returns
     -------
@@ -171,7 +174,7 @@ def run_evaluation(
     # ------------------------------------------------------------------
     # 1. Load data
     # ------------------------------------------------------------------
-    logger.info("Loading features from %s", features_path)
+    logger.info("Loading features from %s", project_relative_path(features_path))
     if not features_path.exists():
         raise FileNotFoundError(f"Features file not found: {features_path}")
 
@@ -280,15 +283,15 @@ def run_evaluation(
                 }
             )
 
-            # Write confusion matrix
+            # Write confusion matrix — use to_csv directly to preserve class-label index
             cm_path = output_dir / f"confusion_matrix_{fs_name}_{model_name}.csv"
             cm_df = pd.DataFrame(
                 result["confusion_matrix"],
                 index=le.classes_,
                 columns=le.classes_,
             )
-            write_csv(cm_df, cm_path)
-            logger.debug("Wrote confusion matrix to %s", cm_path)
+            cm_df.to_csv(cm_path, index=True)
+            logger.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
 
             # Write feature importances
             if result["feature_importances"] is not None:
@@ -300,7 +303,7 @@ def run_evaluation(
                     }
                 ).sort_values("importance", ascending=False)
                 write_csv(fi_df, fi_path)
-                logger.debug("Wrote feature importances to %s", fi_path)
+                logger.debug("Wrote feature importances to %s", project_relative_path(fi_path))
 
     # ------------------------------------------------------------------
     # 5. Write metrics table
@@ -309,7 +312,7 @@ def run_evaluation(
         metrics_df = pd.DataFrame(metrics_rows)
         metrics_path = output_dir / "metrics_table.csv"
         write_csv(metrics_df, metrics_path)
-        logger.info("Wrote metrics table to %s", metrics_path)
+        logger.info("Wrote metrics table to %s", project_relative_path(metrics_path))
 
     # ------------------------------------------------------------------
     # 6. Build evaluation summary
@@ -337,7 +340,7 @@ def run_evaluation(
 
     summary_path = output_dir / "evaluation_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
-    logger.info("Wrote evaluation summary to %s", summary_path)
+    logger.info("Wrote evaluation summary to %s", project_relative_path(summary_path))
 
     # ------------------------------------------------------------------
     # 7. Write THESIS_SUMMARY.md
@@ -350,6 +353,27 @@ def run_evaluation(
         all_results=all_results,
         label_display=_MODEL_DISPLAY,
     )
+
+    # ------------------------------------------------------------------
+    # 8. Generate thesis figures
+    # ------------------------------------------------------------------
+    if not no_plots:
+        try:
+            from evaluation.plots import generate_evaluation_figures, plot_per_class_f1
+            generate_evaluation_figures(output_dir)
+
+            # Per-class F1 for each feature set that has results
+            for fs_name in active_sets:
+                out = output_dir / "figures" / f"per_class_f1_{fs_name}.png"
+                plot_per_class_f1(
+                    pd.DataFrame(metrics_rows),
+                    all_results,
+                    classes,
+                    out,
+                    feature_set=fs_name,
+                )
+        except Exception as exc:
+            logger.warning("Evaluation figure generation failed: %s", exc)
 
     return summary
 
@@ -403,4 +427,4 @@ def _write_thesis_summary(
 
     md_path = output_dir / "THESIS_SUMMARY.md"
     md_path.write_text("\n".join(lines))
-    logger.info("Wrote thesis summary to %s", md_path)
+    logger.info("Wrote thesis summary to %s", project_relative_path(md_path))

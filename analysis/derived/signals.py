@@ -18,23 +18,42 @@ log = logging.getLogger(__name__)
 
 _GRAVITY = 9.81
 _MIN_SAMPLES_BUTTER = 3 * (4 + 1)  # 3 * (order + 1) for 4th-order filter
+_QUAT_COLS = ("qw", "qx", "qy", "qz")
 
 
 def _butter_lowpass(data: np.ndarray, cutoff_hz: float, sample_rate_hz: float, order: int = 4) -> np.ndarray:
-    """Apply a zero-phase Butterworth lowpass filter. Falls back to identity if too few samples."""
-    if len(data) < _MIN_SAMPLES_BUTTER:
+    """Apply a zero-phase Butterworth lowpass filter while preserving NaN gaps."""
+    if len(data) <= _MIN_SAMPLES_BUTTER:
         log.debug(
-            "Too few samples (%d) for Butterworth filter (need >= %d); returning original signal.",
+            "Too few samples (%d) for Butterworth filter (need > %d); returning original signal.",
             len(data),
             _MIN_SAMPLES_BUTTER,
         )
+        return data.copy()
+    finite = np.isfinite(data)
+    if not finite.any():
         return data.copy()
     nyq = 0.5 * sample_rate_hz
     normal_cutoff = cutoff_hz / nyq
     # Clamp to avoid ValueError from scipy when cutoff >= nyquist.
     normal_cutoff = min(normal_cutoff, 0.9999)
     b, a = butter(order, normal_cutoff, btype="low", analog=False)
-    return filtfilt(b, a, data)
+
+    out = data.copy()
+
+    # Filter each contiguous finite segment independently. This keeps missing
+    # spans as NaN without allowing them to contaminate the entire trace.
+    finite_i = finite.astype(np.int8)
+    starts = np.flatnonzero(np.diff(np.r_[0, finite_i]) == 1)
+    stops = np.flatnonzero(np.diff(np.r_[finite_i, 0]) == -1) + 1
+
+    for start, stop in zip(starts, stops, strict=False):
+        segment = data[start:stop]
+        if len(segment) <= _MIN_SAMPLES_BUTTER:
+            continue
+        out[start:stop] = filtfilt(b, a, segment)
+
+    return out
 
 
 def _rolling_rms(series: pd.Series, window: int) -> pd.Series:
@@ -42,7 +61,80 @@ def _rolling_rms(series: pd.Series, window: int) -> pd.Series:
     return series.pow(2).rolling(window=window, min_periods=1).mean().pow(0.5)
 
 
-def compute_sensor_signals(df: pd.DataFrame, *, sample_rate_hz: float = 100.0) -> pd.DataFrame:
+def _compute_linear_acc(
+    df_cal: pd.DataFrame,
+    df_orient: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return (ax_lin, ay_lin, az_lin, norm) arrays aligned to df_cal rows.
+
+    Uses the time-varying orientation quaternion to rotate calibrated
+    accelerometer readings into the world frame, then removes gravity.
+    The input acceleration is taken from ax_world/ay_world/az_world when
+    available (matching the input used by the orientation filter), otherwise
+    falls back to ax/ay/az.
+
+    Parameters
+    ----------
+    df_cal:
+        Calibrated sensor DataFrame (must contain timestamp + acc columns).
+    df_orient:
+        Orientation DataFrame with timestamp, qw, qx, qy, qz columns.
+
+    Returns
+    -------
+    Tuple of four arrays (all aligned to df_cal rows), or None if orientation
+    data is unavailable or missing required quaternion columns.
+    """
+    if df_orient is None or df_orient.empty:
+        return None
+    if not all(c in df_orient.columns for c in _QUAT_COLS):
+        log.debug("Orientation DataFrame missing quaternion columns — skipping linear acc.")
+        return None
+
+    has_world = all(c in df_cal.columns for c in ("ax_world", "ay_world", "az_world"))
+    ax = df_cal["ax_world" if has_world else "ax"].to_numpy(dtype=float)
+    ay = df_cal["ay_world" if has_world else "ay"].to_numpy(dtype=float)
+    az = df_cal["az_world" if has_world else "az"].to_numpy(dtype=float)
+
+    cal_ts = df_cal["timestamp"].to_numpy(dtype=float)
+    orient_ts = df_orient["timestamp"].to_numpy(dtype=float)
+
+    # Map each calibrated timestamp to its nearest orientation row.
+    sort_idx = np.argsort(orient_ts)
+    orient_ts_s = orient_ts[sort_idx]
+    ins = np.searchsorted(orient_ts_s, cal_ts).clip(0, len(orient_ts_s) - 1)
+    left = (ins - 1).clip(0, len(orient_ts_s) - 1)
+    nearest_sorted = np.where(
+        np.abs(cal_ts - orient_ts_s[left]) <= np.abs(cal_ts - orient_ts_s[ins]),
+        left,
+        ins,
+    )
+    near = sort_idx[nearest_sorted]
+
+    qw = df_orient["qw"].to_numpy(dtype=float)[near]
+    qx = df_orient["qx"].to_numpy(dtype=float)[near]
+    qy = df_orient["qy"].to_numpy(dtype=float)[near]
+    qz = df_orient["qz"].to_numpy(dtype=float)[near]
+
+    # Vectorised body→world rotation: v_world = R(q) @ v_body.
+    # R(q) elements for a unit quaternion [w, x, y, z]:
+    ax_w = (1 - 2*(qy**2 + qz**2))*ax + 2*(qx*qy - qw*qz)*ay + 2*(qx*qz + qw*qy)*az
+    ay_w = 2*(qx*qy + qw*qz)*ax + (1 - 2*(qx**2 + qz**2))*ay + 2*(qy*qz - qw*qx)*az
+    az_w = 2*(qx*qz - qw*qy)*ax + 2*(qy*qz + qw*qx)*ay + (1 - 2*(qx**2 + qy**2))*az
+
+    # Remove gravity (world +Z = 9.81 m/s²).
+    az_w -= _GRAVITY
+
+    norm = np.sqrt(ax_w**2 + ay_w**2 + az_w**2)
+    return ax_w, ay_w, az_w, norm
+
+
+def compute_sensor_signals(
+    df: pd.DataFrame,
+    *,
+    sample_rate_hz: float = 100.0,
+    df_orient: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Compute derived signals for one sensor.
 
     Parameters
@@ -52,6 +144,10 @@ def compute_sensor_signals(df: pd.DataFrame, *, sample_rate_hz: float = 100.0) -
         Optionally: ax_world, ay_world, az_world.
     sample_rate_hz:
         Nominal sampling rate used for filter design and jerk scaling.
+    df_orient:
+        Optional orientation DataFrame (timestamp, qw, qx, qy, qz) produced
+        by the orientation stage.  When provided, orientation-aware linear
+        acceleration columns are appended (see below).
 
     Returns
     -------
@@ -69,6 +165,12 @@ def compute_sensor_signals(df: pd.DataFrame, *, sample_rate_hz: float = 100.0) -
     gyro_hf           - gyro_norm - gyro_lf
     energy_acc        - rolling RMS of acc_deviation over 1s window
     energy_gyro       - rolling RMS of gyro_norm over 1s window
+
+    When df_orient is provided:
+    acc_linear_x      - dynamic (gravity-removed) world-frame acceleration, X
+    acc_linear_y      - dynamic (gravity-removed) world-frame acceleration, Y
+    acc_linear_z      - dynamic (gravity-removed) world-frame acceleration, Z
+    acc_linear_norm   - sqrt(acc_linear_x²+acc_linear_y²+acc_linear_z²)
     """
     out = pd.DataFrame()
     out["timestamp"] = df["timestamp"].values
@@ -123,6 +225,18 @@ def compute_sensor_signals(df: pd.DataFrame, *, sample_rate_hz: float = 100.0) -
     window = max(window, 1)
     out["energy_acc"] = _rolling_rms(pd.Series(acc_deviation), window).values
     out["energy_gyro"] = _rolling_rms(pd.Series(gyro_norm), window).values
+
+    # Orientation-aware linear acceleration (gravity removed via quaternion).
+    if df_orient is not None:
+        lin = _compute_linear_acc(df, df_orient)
+        if lin is not None:
+            out["acc_linear_x"] = lin[0]
+            out["acc_linear_y"] = lin[1]
+            out["acc_linear_z"] = lin[2]
+            out["acc_linear_norm"] = lin[3]
+            log.debug("Linear acceleration computed (%d samples).", len(df))
+        else:
+            log.debug("Linear acceleration skipped (insufficient orientation data).")
 
     return out
 

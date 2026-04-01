@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from common.paths import load_workflow_config_data
 
 _KNOWN_STAGES = [
     "parse",
@@ -34,8 +35,8 @@ class WorkflowConfig:
     # Stage options
     sync_method: str = "auto"                        # "sda"|"lida"|"calibration"|"online"|"auto"
     split_stage: str = "synced"                      # "parsed"|"synced"
-    frame_alignment: str = "gravity_only"            # "gravity_only"|"gravity_plus_forward"|"all"
-    orientation_filter: str = "madgwick"             # "madgwick"|"complementary"|"all"
+    frame_alignment: str = "auto"                    # "gravity_only"|"gravity_plus_forward"|"auto"
+    orientation_filter: str = "auto"                 # "madgwick"|"complementary"|"auto"
     sample_rate_hz: float = 100.0
 
     # Feature / event options
@@ -55,9 +56,8 @@ class WorkflowConfig:
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
 
-    # Stages to run (empty = all)
+    # Stages to run
     stages: list[str] = field(default_factory=list)
-    from_stage: str = ""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "WorkflowConfig":
@@ -77,19 +77,14 @@ class WorkflowConfig:
         valid_split = {"parsed", "synced"}
         if self.split_stage not in valid_split:
             errors.append(f"split_stage must be one of {valid_split}, got {self.split_stage!r}")
-        valid_frame = {"gravity_only", "gravity_plus_forward", "all"}
+        valid_frame = {"gravity_only", "gravity_plus_forward", "auto"}
         if self.frame_alignment not in valid_frame:
             errors.append(f"frame_alignment must be one of {valid_frame}")
-        valid_orient = {"madgwick", "complementary", "all"}
+        valid_orient = {"madgwick", "complementary", "auto"}
         if self.orientation_filter not in valid_orient:
             errors.append(f"orientation_filter must be one of {valid_orient}")
-        if self.from_stage:
-            if self.from_stage not in _KNOWN_STAGES:
-                errors.append(
-                    f"from_stage must be one of {_KNOWN_STAGES}, got {self.from_stage!r}"
-                )
-            if self.stages:
-                errors.append("Specify either 'stages' or 'from_stage' in config, not both.")
+        if not self.stages:
+            errors.append("stages must contain at least one pipeline stage.")
         for stage in self.stages:
             if stage not in _KNOWN_STAGES:
                 errors.append(f"Unknown stage in stages: {stage!r}. Valid: {_KNOWN_STAGES}")
@@ -99,14 +94,23 @@ class WorkflowConfig:
             errors.append("hop_s must be > 0")
         return errors
 
+    
+def known_stages() -> list[str]:
+    """Return the known stage names in canonical order."""
+    return list(_KNOWN_STAGES)
+
 
 def load_workflow_config(path: Path | str) -> WorkflowConfig:
-    """Load and validate a workflow config JSON file."""
+    """Load and validate a workflow config JSON file.
+
+    The default workflow config is always used as a base. Values from the
+    provided config overwrite matching keys, allowing partial override files.
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Workflow config not found: {p}")
-    data = json.loads(p.read_text(encoding="utf-8"))
-    cfg = WorkflowConfig.from_dict(data)
+    merged_data = load_workflow_config_data(p)
+    cfg = WorkflowConfig.from_dict(merged_data)
     errors = cfg.validate()
     if errors:
         raise ValueError("Invalid workflow config:\n" + "\n".join(f"  - {e}" for e in errors))

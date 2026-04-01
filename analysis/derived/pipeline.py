@@ -73,11 +73,26 @@ def process_section_derived(
 
     derived_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load orientation CSVs (optional — produced by the orientation stage).
+    orient_dir = section_dir / "orientation"
+    orient_dfs: dict[str, object] = {}
+    for sensor in _SENSORS:
+        orient_csv = orient_dir / f"{sensor}.csv"
+        if orient_csv.exists():
+            try:
+                orient_dfs[sensor] = read_csv(orient_csv)
+            except Exception as exc:
+                log.warning("Could not load orientation CSV for %s/%s: %s", section_dir.name, sensor, exc)
+
     # Compute and write per-sensor signals.
     sensor_signal_dfs: dict[str, object] = {}
     for sensor in _SENSORS:
         try:
-            sig_df = compute_sensor_signals(sensor_dfs[sensor], sample_rate_hz=sample_rate_hz)
+            sig_df = compute_sensor_signals(
+                sensor_dfs[sensor],
+                sample_rate_hz=sample_rate_hz,
+                df_orient=orient_dfs.get(sensor),
+            )
         except Exception as exc:
             log.error("Failed to compute derived signals for %s/%s: %s", section_dir.name, sensor, exc)
             return False
