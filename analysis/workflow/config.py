@@ -50,6 +50,7 @@ class WorkflowConfig:
 
     # Orchestration toggles
     no_plots: bool = False
+    log_to_file: bool = True
     force: bool = False
     skip_exports: bool = False
     evaluation_seed: int = 42

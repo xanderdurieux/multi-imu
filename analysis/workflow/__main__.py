@@ -26,26 +26,26 @@ from .config import (
 from .runner import run_pipeline
 
 
-def _configure_logging() -> Path:
-    """Log to both the terminal and a per-run workflow log file."""
-    logs_dir = data_root() / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+def _configure_logging(log_to_file: bool) -> Path | None:
+    """Log to terminal, and optionally to a per-run workflow log file."""
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    log_path: Path | None = None
+    if log_to_file:
+        logs_dir = data_root() / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = logs_dir / f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_path, encoding="utf-8"),    
-        ],
+        handlers=handlers,
     )
     return log_path
 
 
 def main(argv: list[str] | None = None) -> None:
-    log_path = _configure_logging()
     argv = list(argv if argv is not None else sys.argv[1:])
 
     stage_names = known_stages()
@@ -117,6 +117,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.stage:
         cfg.stages = list(args.stage)
 
+    log_path = _configure_logging(cfg.log_to_file)
+
     print(f"\n{'━' * 60}")
     print(f"  Dual-IMU Cycling Pipeline")
     cfg_display = (
@@ -126,7 +128,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"  Config: {cfg_display}")
     print(f"  Stages: {cfg.stages}")
-    print(f"  Log file: {project_relative_path(log_path)}")
+    if log_path is not None:
+        print(f"  Log file: {project_relative_path(log_path)}")
+    else:
+        print("  Log file: disabled")
     print(f"{'━' * 60}\n")
 
     summary = run_pipeline(cfg)

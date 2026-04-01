@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 import matplotlib
@@ -165,14 +166,30 @@ def _violin_by_label(
         pass
     color_map = _label_colors(labels)
 
-    n_features = len(feature_cols)
-    n_cols = min(2, n_features)
-    n_rows = (n_features + n_cols - 1) // n_cols
+    # Keep only columns that have at least one numeric labeled value.
+    # This avoids allocating subplot slots that are guaranteed to be empty.
+    plot_cols = [
+        col
+        for col in feature_cols
+        if pd.to_numeric(labeled[col], errors="coerce").notna().any()
+    ]
+    if not plot_cols:
+        return None
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 3.2 * n_rows), squeeze=False)
+    n_features = len(plot_cols)
+    # Simple compact layout: near-square grid, capped to 3 columns.
+    n_cols = min(3, max(1, int(math.ceil(math.sqrt(n_features)))))
+    n_rows = int(math.ceil(n_features / n_cols))
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(5.4 * n_cols, 2.8 * n_rows),
+        squeeze=False,
+    )
     flat_axes: list[plt.Axes] = [axes[r][c] for r in range(n_rows) for c in range(n_cols)]
 
-    for idx, col in enumerate(feature_cols):
+    for idx, col in enumerate(plot_cols):
         ax = flat_axes[idx]
         data_by_label = [
             pd.to_numeric(labeled.loc[labeled["scenario_label"] == lbl, col], errors="coerce")
@@ -211,12 +228,14 @@ def _violin_by_label(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    for idx in range(len(feature_cols), len(flat_axes)):
+    for idx in range(len(plot_cols), len(flat_axes)):
         flat_axes[idx].set_visible(False)
 
-    fig.suptitle(title, fontsize=11, y=1.01)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    fig.suptitle(title, fontsize=11, y=0.99)
+    # Reserve a little room for the title and tighten panel spacing to reduce
+    # unused white margins in the exported PNG.
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97), pad=0.45, w_pad=0.35, h_pad=0.45)
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight", pad_inches=0.03)
     plt.close(fig)
     logger.info("Wrote %s", project_relative_path(output_path))
     return output_path
