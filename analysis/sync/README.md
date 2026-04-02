@@ -161,13 +161,14 @@ drift because it uses known, sharp events as timing anchors.
    segments (opening + closing).
 2. Coarse offset: match the opening calibration cluster in the target by
    peak-cluster timing. Falls back to low-rate SDA if no cluster is found.
-3. Fine offset at each calibration window: narrow-window SDA cross-correlation
-   centred on each calibration's peak burst. Produces two independent offset
-   measurements at two known target-clock times.
-4. Drift = `(offset_close − offset_open) / (t_close − t_open)`. If the
-   computed drift exceeds 1 % (physically implausible), fall back to the
-   recording-duration ratio.
-5. Back-propagate the opening offset to the target time origin.
+3. Fine offset at each in-range calibration window: narrow-window SDA
+   cross-correlation centred on each calibration's peak burst.
+4. If 3+ windows are successfully refined, fit a weighted linear model
+   `offset(t) = offset_0 + drift * (t - t_origin)` across all windows
+   (weights from per-window correlation scores). If fit quality is poor,
+   fall back to the previous first/last-anchor estimate.
+5. If the resulting drift exceeds 1 % (physically implausible), fall back to
+   the recording-duration ratio.
 
 **Output (intermediate):** `synced/cal/`
 

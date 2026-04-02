@@ -1,6 +1,5 @@
 ### TODO
 
-- Add comparison metrics across recordings in exports stage, maybe move plotting of exports to visualization (sync params, calibration params)
 - Fix faulty calibration sequence extraction in r5
 
 #### Necessary pipeline features

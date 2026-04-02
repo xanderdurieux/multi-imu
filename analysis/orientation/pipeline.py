@@ -27,10 +27,11 @@ log = logging.getLogger(__name__)
 _SENSORS = ("sporsa", "arduino")
 _DEG_PER_RAD = 180.0 / np.pi
 _RAD_PER_DEG = np.pi / 180.0
-_ALL_METHODS = ["madgwick", "complementary"]
+_ALL_METHODS = ["madgwick", "madgwick_marg", "complementary"]
 _DEFAULT_METHOD = "madgwick"
 _METHOD_PARAMS: dict[str, dict[str, float]] = {
     "madgwick": {"beta": 0.1},
+    "madgwick_marg": {"beta": 0.1},
     "complementary": {"alpha": 0.98},
 }
 
@@ -49,7 +50,7 @@ class OrientationStats:
 
 
 def _build_filter(method: str, *, sample_rate_hz: float) -> MadgwickFilter | ComplementaryFilter:
-    if method == "madgwick":
+    if method in ("madgwick", "madgwick_marg"):
         return MadgwickFilter(beta=_METHOD_PARAMS["madgwick"]["beta"], sample_rate_hz=sample_rate_hz)
     if method == "complementary":
         return ComplementaryFilter(
@@ -81,6 +82,11 @@ def run_orientation_filters(
     gyro_arr = df[list(gyro_cols)].to_numpy(dtype=float)
     gyro_rad_arr = gyro_arr * _RAD_PER_DEG
 
+    # Magnetometer array — only loaded once; used only by MARG methods.
+    _mag_cols = [c for c in ("mx", "my", "mz") if c in df.columns]
+    has_mag = len(_mag_cols) == 3
+    mag_arr: np.ndarray | None = df[_mag_cols].to_numpy(dtype=float) if has_mag else None
+
     n_samples = len(timestamps)
     if n_samples == 0:
         empty = pd.DataFrame(
@@ -95,6 +101,7 @@ def run_orientation_filters(
 
     results: dict[str, pd.DataFrame] = {}
     for method in methods:
+        use_mag = method.endswith("_marg") and mag_arr is not None
         filt = _build_filter(method, sample_rate_hz=sample_rate_hz)
         filt.initialize_from_acc(first_acc)
 
@@ -105,12 +112,21 @@ def run_orientation_filters(
             acc_i = acc_arr[i]
             pending_dt += float(dt_arr[i])
 
+            mag_i: np.ndarray | None = None
+            if use_mag:
+                raw_mag = mag_arr[i]  # type: ignore[index]
+                if np.all(np.isfinite(raw_mag)):
+                    mag_i = raw_mag
+
             if not np.all(np.isfinite(gyro_i)):
                 # No gyro this step — repeat last quaternion, carry dt forward so
                 # the next real gyro sample integrates over the full elapsed time.
                 q = filt._q.copy()
             else:
-                q = filt.update(acc_i, gyro_i, dt=pending_dt)
+                if use_mag:
+                    q = filt.update(acc_i, gyro_i, mag=mag_i, dt=pending_dt)
+                else:
+                    q = filt.update(acc_i, gyro_i, dt=pending_dt)
                 pending_dt = 0.0
             yaw_r, pitch_r, roll_r = euler_from_quat(q)
             rows.append(

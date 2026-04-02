@@ -25,7 +25,9 @@ log = logging.getLogger(__name__)
 def _ts_seconds(df: pd.DataFrame) -> np.ndarray:
     ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
     if ts.size > 0:
-        ts = (ts - ts[0]) / 1000.0  # relative seconds
+        finite = ts[np.isfinite(ts)]
+        t0 = finite[0] if finite.size > 0 else 0.0
+        ts = (ts - t0) / 1000.0  # relative seconds
     return ts
 
 
@@ -46,7 +48,7 @@ def plot_sensor_data(
     Returns the path of the saved figure.
     """
     df = read_csv(csv_path)
-    for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz"]:
+    for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df = _prepare_sensor_df(df)
@@ -63,6 +65,8 @@ def plot_sensor_data(
 
     acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
     gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
+    mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
+    has_mag = len(mag_cols) == 3
 
     if norm_only:
         fig, ax = plt.subplots(figsize=(12, 3))
@@ -74,31 +78,53 @@ def plot_sensor_data(
             gyro_norm = strict_vector_norm(df, gyro_cols)
             x, y = filter_valid_plot_xy(ts, gyro_norm)
             ax.plot(x, y, lw=0.8, label="|gyro|")
+        if not acc_only and has_mag:
+            mag_norm = strict_vector_norm(df, mag_cols)
+            x, y = filter_valid_plot_xy(ts, mag_norm)
+            ax.plot(x, y, lw=0.8, label="|mag|")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Norm")
         ax.set_title(f"{csv_path.parent.name}/{csv_path.name} — norms")
         ax.legend(loc="upper right", fontsize=7)
     else:
-        rows = (1 if acc_only else 2) if (acc_cols or gyro_cols) else 1
-        fig, axes = plt.subplots(rows, 1, figsize=(12, 3 * rows), sharex=True)
-        if rows == 1:
+        n_rows = 1
+        if not acc_only:
+            if gyro_cols:
+                n_rows += 1
+            if has_mag:
+                n_rows += 1
+        fig, axes = plt.subplots(n_rows, 1, figsize=(12, 3 * n_rows), sharex=True)
+        if n_rows == 1:
             axes = [axes]
 
+        row = 0
         if acc_cols:
             for col in acc_cols:
                 y = df[col].to_numpy(dtype=float)
                 x_plot, y_plot = filter_valid_plot_xy(ts, y)
-                axes[0].plot(x_plot, y_plot, lw=0.7, label=col)
-            axes[0].set_ylabel("Acc (m/s²)")
-            axes[0].legend(loc="upper right", fontsize=7)
+                axes[row].plot(x_plot, y_plot, lw=0.7, label=col)
+            axes[row].set_ylabel("Acc (m/s²)")
+            axes[row].legend(loc="upper right", fontsize=7)
+            row += 1
 
-        if not acc_only and gyro_cols and rows > 1:
+        if not acc_only and gyro_cols and row < n_rows:
             for col in gyro_cols:
                 y = df[col].to_numpy(dtype=float)
                 x_plot, y_plot = filter_valid_plot_xy(ts, y)
-                axes[1].plot(x_plot, y_plot, lw=0.7, label=col)
-            axes[1].set_ylabel("Gyro (°/s or rad/s)")
-            axes[1].legend(loc="upper right", fontsize=7)
+                axes[row].plot(x_plot, y_plot, lw=0.7, label=col)
+            axes[row].set_ylabel("Gyro (°/s or rad/s)")
+            axes[row].legend(loc="upper right", fontsize=7)
+            row += 1
+
+        if not acc_only and has_mag and row < n_rows:
+            mag_colors = {"mx": "#d62728", "my": "#2ca02c", "mz": "#1f77b4"}
+            for col in mag_cols:
+                y = df[col].to_numpy(dtype=float)
+                x_plot, y_plot = filter_valid_plot_xy(ts, y)
+                axes[row].plot(x_plot, y_plot, lw=0.7, label=col, color=mag_colors.get(col))
+            axes[row].set_ylabel("Mag (µT)")
+            axes[row].legend(loc="upper right", fontsize=7)
+            axes[row].grid(alpha=0.2, lw=0.4)
 
         axes[-1].set_xlabel("Time (s)")
         fig.suptitle(f"{csv_path.parent.name}/{csv_path.name}")

@@ -49,6 +49,7 @@ class CalibrationParams:
     )
     gravity_residual_ms2: float = 0.0
     forward_confidence: float = 0.0
+    mag_vector_body: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     quality: str = "good"
     fallback_used: bool = False
     quality_tags: list[str] = field(default_factory=list)
@@ -65,6 +66,7 @@ class CalibrationParams:
             rotation_matrix=list(d.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])),
             gravity_residual_ms2=float(d.get("gravity_residual_ms2", 0.0)),
             forward_confidence=float(d.get("forward_confidence", 0.0)),
+            mag_vector_body=list(d.get("mag_vector_body", [0.0, 0.0, 0.0])),
             quality=str(d.get("quality", "good")),
             fallback_used=bool(d.get("fallback_used", False)),
             quality_tags=list(d.get("quality_tags", [])),
@@ -328,6 +330,119 @@ def _build_full_rotation(
 
 
 # ---------------------------------------------------------------------------
+# Magnetometer helpers
+# ---------------------------------------------------------------------------
+
+
+def _mag_from_static(
+    df: pd.DataFrame,
+    static_ranges: list[tuple[int, int]],
+) -> np.ndarray:
+    """Average magnetometer reading in static regions → body-frame vector."""
+    mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
+    if not mag_cols or not static_ranges:
+        return np.zeros(3)
+
+    all_mag: list[np.ndarray] = []
+    for s, e in static_ranges:
+        chunk = df.iloc[s:e][mag_cols].to_numpy(dtype=float)
+        finite = np.all(np.isfinite(chunk), axis=1)
+        if finite.any():
+            all_mag.append(chunk[finite])
+
+    if not all_mag:
+        return np.zeros(3)
+    return np.nanmean(np.vstack(all_mag), axis=0)
+
+
+def _assess_mag_reliability(
+    df: pd.DataFrame,
+    static_ranges: list[tuple[int, int]],
+    *,
+    field_min: float = 1.0,
+    field_max: float = 200.0,
+    max_cv: float = 0.15,
+) -> tuple[bool, list[str]]:
+    """Check whether the magnetometer data is reliable enough for yaw estimation.
+
+    Uses:
+    - Field magnitude within a plausible range (``field_min``–``field_max``; units
+      match the CSV — µT for Sporsa, native float for Arduino).
+    - Coefficient of variation of the magnitude during static segments below
+      ``max_cv`` (15 % default): a stable field in static → low interference.
+
+    Returns
+    -------
+    (is_reliable, tags)
+        ``tags`` is a list of quality tag strings (empty when reliable).
+    """
+    mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
+    if len(mag_cols) < 3:
+        return False, ["mag_columns_missing"]
+
+    # Collect static-segment magnitude samples.
+    mags: list[np.ndarray] = []
+    for s, e in static_ranges:
+        chunk = df.iloc[s:e][mag_cols].to_numpy(dtype=float)
+        finite = np.all(np.isfinite(chunk), axis=1)
+        if finite.any():
+            norms = np.linalg.norm(chunk[finite], axis=1)
+            mags.append(norms)
+
+    if not mags:
+        # Fall back to the whole stream if no static segments found.
+        arr = df[mag_cols].to_numpy(dtype=float)
+        finite = np.all(np.isfinite(arr), axis=1)
+        if not finite.any():
+            return False, ["mag_all_nan"]
+        norms = np.linalg.norm(arr[finite], axis=1)
+        mags = [norms]
+
+    all_norms = np.concatenate(mags)
+    if all_norms.size == 0:
+        return False, ["mag_all_nan"]
+
+    mean_norm = float(np.mean(all_norms))
+    tags: list[str] = []
+
+    if not (field_min <= mean_norm <= field_max):
+        tags.append(f"mag_field_out_of_range_{mean_norm:.1f}")
+        return False, tags
+
+    if all_norms.size > 1:
+        cv = float(np.std(all_norms) / (mean_norm + 1e-9))
+        if cv > max_cv:
+            tags.append(f"mag_unstable_cv_{cv:.2f}")
+            return False, tags
+
+    return True, []
+
+
+def _estimate_yaw_from_mag(
+    mag_body: np.ndarray,
+    R_gravity: np.ndarray,
+) -> tuple[float, float]:
+    """Yaw angle and confidence to align horizontal mag projection to +X.
+
+    Projects the magnetometer body-frame vector into the gravity-aligned world
+    frame, then extracts the horizontal (XY) component to find the heading
+    direction.  This aligns magnetic north with the world +X axis.
+
+    Returns
+    -------
+    (yaw_angle_rad, confidence)
+        ``confidence`` is the normalised horizontal component magnitude [0–1].
+    """
+    mag_world = R_gravity @ mag_body
+    hx, hy = float(mag_world[0]), float(mag_world[1])
+    horiz_norm = float(np.sqrt(hx ** 2 + hy ** 2))
+    total_norm = float(np.linalg.norm(mag_world))
+    confidence = horiz_norm / (total_norm + 1e-9)
+    yaw = float(np.arctan2(hy, hx))
+    return yaw, confidence
+
+
+# ---------------------------------------------------------------------------
 # Main estimation function
 # ---------------------------------------------------------------------------
 
@@ -395,6 +510,7 @@ def estimate_calibration(
     R_gravity = _gravity_alignment_rotation(g_body)
 
     forward_confidence = 0.0
+    mag_body = np.zeros(3)
     R_final = R_gravity
 
     if frame_alignment == "gravity_plus_forward":
@@ -402,6 +518,24 @@ def estimate_calibration(
             df, R_gravity, sample_rate_hz=sample_rate_hz
         )
         R_final = _build_full_rotation(R_gravity, forward_world, forward_confidence)
+
+    elif frame_alignment == "gravity_plus_mag":
+        mag_body = _mag_from_static(df, static_ranges)
+        is_reliable, mag_tags = _assess_mag_reliability(df, static_ranges)
+        quality_tags.extend(mag_tags)
+        if is_reliable:
+            yaw_angle, forward_confidence = _estimate_yaw_from_mag(mag_body, R_gravity)
+            c, s = np.cos(-yaw_angle), np.sin(-yaw_angle)
+            R_yaw = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+            R_final = R_yaw @ R_gravity
+            quality_tags.append("mag_yaw_used")
+        else:
+            # Mag unreliable — fall back to PCA forward direction.
+            forward_world, forward_confidence = _estimate_forward_direction(
+                df, R_gravity, sample_rate_hz=sample_rate_hz
+            )
+            R_final = _build_full_rotation(R_gravity, forward_world, forward_confidence)
+            quality_tags.append("mag_fallback_to_pca")
 
     # Assess quality.
     if np.isnan(gravity_residual) or gravity_residual > 1.0:
@@ -417,6 +551,7 @@ def estimate_calibration(
         rotation_matrix=[list(row) for row in np.round(R_final, 8).tolist()],
         gravity_residual_ms2=round(float(gravity_residual) if not np.isnan(gravity_residual) else 99.0, 4),
         forward_confidence=round(float(forward_confidence), 4),
+        mag_vector_body=list(np.round(mag_body, 4).tolist()),
         quality=quality,
         fallback_used=fallback_used,
         quality_tags=quality_tags,

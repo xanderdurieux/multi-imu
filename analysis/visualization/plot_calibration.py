@@ -5,7 +5,7 @@ Functions
 plot_calibration_raw_vs_calibrated
     Individual-axis and norm comparison (raw → calibrated) per sensor.
 plot_calibration_parameters
-    Acc/gyro bias bar charts and rotation matrix heatmap for both sensors.
+    Gyro bias, rotation matrix, gravity vector, and quality summary per sensor.
 plot_calibration_world_frame
     World-frame acceleration and gyroscope signals with reference lines.
 plot_calibration_methods
@@ -67,6 +67,14 @@ def _load_all_methods_json(section_dir: Path) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _static_calibration_reference(section_dir: Path) -> dict | None:
+    data = _load_all_methods_json(section_dir)
+    if not data:
+        return None
+    ref = data.get("static_calibration_reference")
+    return ref if isinstance(ref, dict) else None
 
 
 def _ts_s(df: pd.DataFrame) -> np.ndarray:
@@ -197,7 +205,10 @@ def plot_calibration_parameters(
     *,
     sensors: list[str] | None = None,
 ) -> Path | None:
-    """Bar charts for acc/gyro biases and rotation matrix heatmaps for both sensors.
+    """Gyro bias bars, rotation matri, and gravity bars per sensor.
+
+    For Arduino, if ``all_methods.json`` includes a static calibration reference, the gyro row
+    shows dynamic vs static gyro bias (grouped bars). Accelerometer static reference is not shown.
 
     Output
     ------
@@ -213,96 +224,99 @@ def plot_calibration_parameters(
     if not sensors_present:
         return None
 
+    static_ref = _static_calibration_reference(section_dir)
+
     n = len(sensors_present)
-    fig = plt.figure(figsize=(6 * n + 2, 10))
+    # Plain grid: rows = gyro, rotation matrix, gravity; columns = sensors
+    fig, axes_grid = plt.subplots(3, n, figsize=(4 * n + 1, 8), squeeze=False)
     fig.suptitle(f"{section_dir.name} — calibration parameters", fontsize=12)
 
     axes_labels = ["x", "y", "z"]
     bar_x = np.arange(3)
     bar_w = 0.35
+    _STATIC_REF_COLOR = "#d62728"
 
     for s_idx, sensor in enumerate(sensors_present):
         params = cal_data[sensor]
-        acc_bias = params.get("acc_bias", [0, 0, 0])
         gyro_bias = params.get("gyro_bias", [0, 0, 0])
         rot_mat = params.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
         grav_vec = params.get("gravity_vector_body", [0, 0, _G])
-        grav_residual = params.get("gravity_residual_ms2", float("nan"))
-        fwd_conf = params.get("forward_confidence", 0.0)
-        quality = params.get("quality", "?")
-        fallback = params.get("fallback_used", False)
         color = _SENSOR_COLORS.get(sensor, "steelblue")
 
-        col_offset = s_idx * 3  # 3 subplots per sensor
+        ax_gyro = axes_grid[0, s_idx]
+        if sensor == "arduino" and static_ref:
+            static_gyro = static_ref.get("gyroscope_bias_deg_s", {})
+            static_gyro_vals = [static_gyro.get(a, float("nan")) for a in axes_labels]
+            ax_gyro.bar(
+                bar_x - bar_w / 2,
+                gyro_bias,
+                bar_w,
+                label="dynamic",
+                color=color,
+                alpha=0.8,
+            )
+            ax_gyro.bar(
+                bar_x + bar_w / 2,
+                static_gyro_vals,
+                bar_w,
+                label="static ref",
+                color=_STATIC_REF_COLOR,
+                alpha=0.8,
+                hatch="//",
+            )
+            ax_gyro.legend(fontsize=8, loc="upper right", framealpha=0.92)
+            static_warnings = static_ref.get("warnings", [])
+            if static_warnings:
+                ax_gyro.text(
+                    0.02,
+                    0.98,
+                    "⚠ " + "; ".join(static_warnings),
+                    transform=ax_gyro.transAxes,
+                    fontsize=7,
+                    va="top",
+                    ha="left",
+                    color="#8c564b",
+                )
+        else:
+            ax_gyro.bar(bar_x, gyro_bias, color=color, alpha=0.8)
+        ax_gyro.axhline(0, color="gray", lw=0.7, ls="--")
+        ax_gyro.set_xticks(bar_x)
+        ax_gyro.set_xticklabels(axes_labels)
+        ax_gyro.set_ylabel("Bias (deg/s)")
+        ax_gyro.set_title(f"{sensor} — gyro bias")
+        ax_gyro.grid(axis="y", alpha=0.3)
 
-        # Acc bias
-        ax1 = fig.add_subplot(3, n * 3, col_offset + 1)
-        bars = ax1.bar(bar_x, acc_bias, color=color, alpha=0.8)
-        ax1.axhline(0, color="gray", lw=0.7, ls="--")
-        ax1.set_xticks(bar_x)
-        ax1.set_xticklabels(axes_labels)
-        ax1.set_ylabel("Bias (m/s²)")
-        ax1.set_title(f"{sensor}\nAcc bias")
-        ax1.grid(axis="y", alpha=0.3)
-        for bar, v in zip(bars, acc_bias):
-            ax1.text(bar.get_x() + bar.get_width() / 2, v, f"{v:.4f}",
-                     ha="center", va="bottom" if v >= 0 else "top", fontsize=7)
-
-        # Gyro bias
-        ax2 = fig.add_subplot(3, n * 3, col_offset + 2)
-        bars = ax2.bar(bar_x, gyro_bias, color=color, alpha=0.8)
-        ax2.axhline(0, color="gray", lw=0.7, ls="--")
-        ax2.set_xticks(bar_x)
-        ax2.set_xticklabels(axes_labels)
-        ax2.set_ylabel("Bias (deg/s)")
-        ax2.set_title(f"{sensor}\nGyro bias")
-        ax2.grid(axis="y", alpha=0.3)
-        for bar, v in zip(bars, gyro_bias):
-            ax2.text(bar.get_x() + bar.get_width() / 2, v, f"{v:.4f}",
-                     ha="center", va="bottom" if v >= 0 else "top", fontsize=7)
-
-        # Rotation matrix heatmap
-        ax3 = fig.add_subplot(3, n * 3, col_offset + 3)
+        ax_rot = axes_grid[1, s_idx]
         R = np.array(rot_mat, dtype=float)
-        im = ax3.imshow(R, cmap="RdBu", vmin=-1.5, vmax=1.5, aspect="auto")
-        ax3.set_xticks([0, 1, 2])
-        ax3.set_yticks([0, 1, 2])
-        ax3.set_xticklabels(["→X", "→Y", "→Z"])
-        ax3.set_yticklabels(["X→", "Y→", "Z→"])
-        ax3.set_title(f"{sensor}\nRotation matrix")
+        im = ax_rot.imshow(R, cmap="RdBu", vmin=-1.5, vmax=1.5, aspect="equal")
+        ax_rot.set_xticks([0, 1, 2])
+        ax_rot.set_yticks([0, 1, 2])
+        ax_rot.set_xticklabels([])
+        ax_rot.set_yticklabels([])
         for i in range(3):
             for j in range(3):
-                ax3.text(j, i, f"{R[i, j]:.3f}", ha="center", va="center",
-                         fontsize=8, color="black" if abs(R[i, j]) < 0.7 else "white")
-        plt.colorbar(im, ax=ax3, fraction=0.046, pad=0.04)
+                ax_rot.text(
+                    j,
+                    i,
+                    f"{R[i, j]:.3f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="black" if abs(R[i, j]) < 0.7 else "white",
+                )
+        fig.colorbar(im, ax=ax_rot)
+        ax_rot.set_title(f"{sensor} — rotation matrix")
 
-        # Gravity vector — subplot in row 2
-        ax4 = fig.add_subplot(3, n * 3, n * 3 + col_offset + 1)
+        ax_grav = axes_grid[2, s_idx]
         g = np.array(grav_vec, dtype=float)
-        ax4.bar(bar_x, g, color=["#d62728", "#2ca02c", "#1f77b4"], alpha=0.8)
-        ax4.axhline(_G, color="gray", lw=0.8, ls="--", label=f"expected {_G}")
-        ax4.axhline(-_G, color="gray", lw=0.8, ls="--")
-        ax4.set_xticks(bar_x)
-        ax4.set_xticklabels(axes_labels)
-        ax4.set_ylabel("m/s²")
-        ax4.set_title(f"{sensor}\nGravity vector (body frame)")
-        ax4.legend(fontsize=7)
-        ax4.grid(axis="y", alpha=0.3)
-
-        # Quality summary — subplot in row 3
-        ax5 = fig.add_subplot(3, n * 3, 2 * n * 3 + col_offset + 1)
-        ax5.axis("off")
-        quality_color = {"good": "#2ca02c", "marginal": "#ff7f0e", "poor": "#d62728"}.get(quality, "gray")
-        summary_text = (
-            f"Quality: {quality}\n"
-            f"Gravity residual: {grav_residual:.4f} m/s²\n"
-            f"Forward confidence: {fwd_conf:.3f}\n"
-            f"Fallback used: {fallback}\n"
-            f"Frame: {cal_data.get('frame_alignment', '?')}"
-        )
-        ax5.text(0.1, 0.5, summary_text, transform=ax5.transAxes,
-                 fontsize=9, va="center", ha="left",
-                 bbox=dict(boxstyle="round,pad=0.4", facecolor=quality_color, alpha=0.2))
+        ax_grav.bar(bar_x, g, color=["#d62728", "#2ca02c", "#1f77b4"], alpha=0.8)
+        ax_grav.axhline(_G, color="gray", lw=0.8, ls="--")
+        ax_grav.axhline(-_G, color="gray", lw=0.8, ls="--")
+        ax_grav.set_xticks(bar_x)
+        ax_grav.set_xticklabels(axes_labels)
+        ax_grav.set_ylabel("m/s²")
+        ax_grav.set_title(f"{sensor} — gravity (body frame)")
+        ax_grav.grid(axis="y", alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     out_path = section_dir / "calibrated" / "calibration_parameters.png"
@@ -406,8 +420,6 @@ def plot_calibration_methods(
     """Bar chart comparison of all calibration methods from ``all_methods.json``.
 
     Shows gravity residuals and forward confidence per method/sensor.
-    If a static calibration reference is present, overlays its bias values
-    against the dynamically estimated biases for comparison.
 
     Output
     ------
@@ -419,7 +431,6 @@ def plot_calibration_methods(
 
     methods_data: dict = data.get("methods", {})
     selected_method: str = data.get("selected_method", "")
-    static_ref: dict | None = data.get("static_calibration_reference")
     method_names = list(methods_data.keys())
     if not method_names:
         return None
@@ -429,11 +440,16 @@ def plot_calibration_methods(
     bar_x = np.arange(n_methods)
     bar_w = 0.35
 
-    n_rows = 3 if static_ref else 2
+    n_rows = 2
     fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4 * n_rows))
     fig.suptitle(f"{section_dir.name} — calibration method comparison", fontsize=12)
 
-    method_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+    method_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+    _METHOD_DISPLAY = {
+        "gravity_only": "gravity only",
+        "gravity_plus_forward": "gravity + forward",
+        "gravity_plus_mag": "gravity + mag",
+    }
 
     # Row 0: Gravity residuals per sensor
     for s_idx, sensor in enumerate(sensors):
@@ -449,7 +465,9 @@ def plot_calibration_methods(
         ax.axhline(1.0, color="orange", lw=1.0, ls="--", label="marginal threshold (1.0)")
         ax.axhline(2.0, color="red", lw=1.0, ls="--", label="poor threshold (2.0)")
         ax.set_xticks(bar_x)
-        ax.set_xticklabels(method_names, rotation=15, ha="right", fontsize=9)
+        ax.set_xticklabels(
+            [_METHOD_DISPLAY.get(m, m) for m in method_names], rotation=15, ha="right", fontsize=9
+        )
         ax.set_ylabel("Gravity residual (m/s²)")
         ax.set_title(f"{sensor} — gravity residual (lower = better)")
         ax.legend(fontsize=7)
@@ -463,7 +481,7 @@ def plot_calibration_methods(
                         ha="center", va="bottom", fontsize=8,
                         fontweight="bold" if m == selected_method else "normal")
 
-    # Row 1: Forward confidence + quality
+    # Row 1: Alignment confidence (forward / mag) + mag field norm secondary axis
     ax_fwd = axes[1][0]
     for i, method in enumerate(method_names):
         fwd_confs = [
@@ -475,11 +493,24 @@ def plot_calibration_methods(
             ax_fwd.bar(x_pos[j], fc, width=bar_w * 0.9,
                        color=_SENSOR_COLORS.get(sensor, "gray"), alpha=0.8,
                        label=sensor if i == 0 else "_nolegend_")
+        # Overlay mag field norm for gravity_plus_mag method.
+        if method == "gravity_plus_mag":
+            for sensor in sensors:
+                mag_norm = methods_data[method].get(sensor, {}).get("mag_field_norm")
+                if mag_norm is not None:
+                    ax_fwd.annotate(
+                        f"|B|={mag_norm:.1f}",
+                        xy=(bar_x[i], 0.02), fontsize=6, ha="center", va="bottom",
+                        color="#7f7f7f",
+                    )
+                    break
     ax_fwd.axhline(0.3, color="orange", lw=1.0, ls="--", label="min threshold (0.3)")
     ax_fwd.set_xticks(bar_x)
-    ax_fwd.set_xticklabels(method_names, rotation=15, ha="right", fontsize=9)
-    ax_fwd.set_ylabel("Forward confidence [0–1]")
-    ax_fwd.set_title("Forward direction confidence")
+    ax_fwd.set_xticklabels(
+        [_METHOD_DISPLAY.get(m, m) for m in method_names], rotation=15, ha="right", fontsize=9
+    )
+    ax_fwd.set_ylabel("Alignment confidence [0–1]")
+    ax_fwd.set_title("Alignment confidence (forward / mag)")
     ax_fwd.legend(fontsize=8)
     ax_fwd.set_ylim(0, 1.05)
     ax_fwd.grid(axis="y", alpha=0.3)
@@ -490,21 +521,20 @@ def plot_calibration_methods(
     col_headers = ["Method", "Selected"] + sensors
     cell_data = []
     for method in method_names:
-        row_data = [method, "★" if method == selected_method else ""]
+        row_data = [_METHOD_DISPLAY.get(method, method), "★" if method == selected_method else ""]
         for sensor in sensors:
             q = methods_data[method].get(sensor, {}).get("quality", "?")
             fb = methods_data[method].get(sensor, {}).get("fallback_used", False)
-            cell_data.append(row_data + [f"{q}{'  (fallback)' if fb else ''}" for sensor in sensors])
-            break
-        else:
-            continue
-        # rebuild row
-        row_data = [method, "★" if method == selected_method else ""]
-        for sensor in sensors:
-            q = methods_data[method].get(sensor, {}).get("quality", "?")
-            fb = methods_data[method].get(sensor, {}).get("fallback_used", False)
-            row_data.append(f"{q}{' ⚠' if fb else ''}")
-        cell_data[-1] = row_data
+            mag_tags = methods_data[method].get(sensor, {}).get("quality_tags", [])
+            extra = ""
+            if fb:
+                extra = " ⚠"
+            elif "mag_yaw_used" in mag_tags:
+                extra = " [mag]"
+            elif "mag_fallback_to_pca" in mag_tags:
+                extra = " (pca)"
+            row_data.append(f"{q}{extra}")
+        cell_data.append(row_data)
 
     table = ax_q.table(
         cellText=cell_data,
@@ -526,52 +556,6 @@ def plot_calibration_methods(
                     cell.set_facecolor(bg)
                     break
     ax_q.set_title("Quality summary")
-
-    # Row 2 (optional): Static calibration reference vs dynamic biases for arduino
-    if static_ref and n_rows == 3:
-        static_bias = static_ref.get("accelerometer_bias", {})
-        static_scale = static_ref.get("accelerometer_scale", {})
-        static_gyro = static_ref.get("gyroscope_bias_deg_s", {})
-        cal_data = _load_calibration_json(section_dir)
-
-        ax_ab = axes[2][0]
-        ax_gb = axes[2][1]
-        axes_labels = ["x", "y", "z"]
-        bx = np.arange(3)
-
-        dyn_acc_bias = [
-            cal_data.get("arduino", {}).get("acc_bias", [0, 0, 0])
-        ][0]
-        dyn_gyro_bias = [
-            cal_data.get("arduino", {}).get("gyro_bias", [0, 0, 0])
-        ][0]
-        static_acc_vals = [static_bias.get(a, float("nan")) for a in axes_labels]
-        static_gyro_vals = [static_gyro.get(a, float("nan")) for a in axes_labels]
-
-        ax_ab.bar(bx - bar_w / 2, dyn_acc_bias, bar_w, label="dynamic", color="#1f77b4", alpha=0.8)
-        ax_ab.bar(bx + bar_w / 2, static_acc_vals, bar_w, label="static ref", color="#d62728", alpha=0.8, hatch="//")
-        ax_ab.axhline(0, color="gray", lw=0.6, ls="--")
-        ax_ab.set_xticks(bx)
-        ax_ab.set_xticklabels(axes_labels)
-        ax_ab.set_ylabel("Bias (m/s²)")
-        ax_ab.set_title("Arduino acc bias: dynamic vs static reference")
-        ax_ab.legend(fontsize=8)
-        ax_ab.grid(axis="y", alpha=0.3)
-
-        ax_gb.bar(bx - bar_w / 2, dyn_gyro_bias, bar_w, label="dynamic", color="#1f77b4", alpha=0.8)
-        ax_gb.bar(bx + bar_w / 2, static_gyro_vals, bar_w, label="static ref", color="#d62728", alpha=0.8, hatch="//")
-        ax_gb.axhline(0, color="gray", lw=0.6, ls="--")
-        ax_gb.set_xticks(bx)
-        ax_gb.set_xticklabels(axes_labels)
-        ax_gb.set_ylabel("Bias (deg/s)")
-        ax_gb.set_title("Arduino gyro bias: dynamic vs static reference")
-        ax_gb.legend(fontsize=8)
-        ax_gb.grid(axis="y", alpha=0.3)
-
-        static_warnings = static_ref.get("warnings", [])
-        if static_warnings:
-            ax_ab.text(0.01, 0.99, "⚠ " + "; ".join(static_warnings),
-                       transform=ax_ab.transAxes, fontsize=7, va="top", color="#8c564b")
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     out_path = section_dir / "calibrated" / "methods_comparison.png"

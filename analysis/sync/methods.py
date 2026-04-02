@@ -5,7 +5,7 @@ Multi-IMU analysis:
 
 - ``sda``: coarse offset only
 - ``lida``: SDA + linear drift fit
-- ``calibration``: opening/closing calibration anchors
+- ``calibration``: calibration-sequence anchors (all available windows)
 - ``online``: opening anchor + pre-characterised drift
 """
 
@@ -529,7 +529,7 @@ def estimate_sync_from_calibration(
     cal_search_s: float = 5.0,
     peak_buffer_s: float = 1.0,
     lowpass_cutoff_hz: float | None = None,
-) -> tuple[SyncModel, CalibrationWindowResult, CalibrationWindowResult, str]:
+) -> tuple[SyncModel, CalibrationWindowResult, CalibrationWindowResult, str, list[CalibrationWindowResult], float | None]:
     detect_kwargs = dict(
         sample_rate_hz=sample_rate_hz,
         static_min_s=static_min_s,
@@ -586,26 +586,32 @@ def estimate_sync_from_calibration(
             f"Only {len(in_range_cals)} calibration segment(s) from the reference fall within the target range."
         )
 
-    cal_open = _refine_offset_at_calibration(
-        ref_df,
-        tgt_df,
-        in_range_cals[0],
-        coarse_offset_s=coarse_offset_s,
-        sample_rate_hz=sample_rate_hz,
-        peak_buffer_s=peak_buffer_s,
-        search_s=cal_search_s,
-        lowpass_cutoff_hz=lowpass_cutoff_hz,
-    )
-    cal_close = _refine_offset_at_calibration(
-        ref_df,
-        tgt_df,
-        in_range_cals[-1],
-        coarse_offset_s=coarse_offset_s,
-        sample_rate_hz=sample_rate_hz,
-        peak_buffer_s=peak_buffer_s,
-        search_s=cal_search_s,
-        lowpass_cutoff_hz=lowpass_cutoff_hz,
-    )
+    cal_windows: list[CalibrationWindowResult] = []
+    for seg in in_range_cals:
+        try:
+            cal_windows.append(
+                _refine_offset_at_calibration(
+                    ref_df,
+                    tgt_df,
+                    seg,
+                    coarse_offset_s=coarse_offset_s,
+                    sample_rate_hz=sample_rate_hz,
+                    peak_buffer_s=peak_buffer_s,
+                    search_s=cal_search_s,
+                    lowpass_cutoff_hz=lowpass_cutoff_hz,
+                )
+            )
+        except Exception as exc:
+            log.warning("Skipping one calibration window during refinement: %s", exc)
+
+    if len(cal_windows) < 2:
+        raise ValueError(
+            f"Only {len(cal_windows)} calibration segment(s) could be refined successfully."
+        )
+
+    cal_windows = sorted(cal_windows, key=lambda w: w.t_tgt_seconds)
+    cal_open = cal_windows[0]
+    cal_close = cal_windows[-1]
 
     dt_tgt_s = cal_close.t_tgt_seconds - cal_open.t_tgt_seconds
     if abs(dt_tgt_s) < 1.0:
@@ -615,15 +621,55 @@ def estimate_sync_from_calibration(
 
     drift_raw = (cal_close.offset_seconds - cal_open.offset_seconds) / dt_tgt_s
     max_plausible_drift = 0.01
-    if abs(drift_raw) > max_plausible_drift:
-        drift = _estimate_drift_from_duration(ref_df, tgt_df)
-        drift_source = "duration_ratio"
-    else:
-        drift = drift_raw
-        drift_source = "calibration_windows"
-
     tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
-    offset_at_origin_s = cal_open.offset_seconds - drift * (cal_open.t_tgt_seconds - tgt_origin_s)
+    fit_r2: float | None = None
+
+    # Prefer a weighted all-anchor linear fit when 3+ windows are available.
+    # Fall back to the previous first/last estimate if fit quality is poor.
+    if len(cal_windows) >= 3:
+        x = np.asarray([w.t_tgt_seconds - tgt_origin_s for w in cal_windows], dtype=float)
+        y = np.asarray([w.offset_seconds for w in cal_windows], dtype=float)
+        w = np.clip(np.asarray([w.correlation_score for w in cal_windows], dtype=float), 0.0, None)
+        try:
+            if np.any(w > 0):
+                slope, intercept = np.polyfit(x, y, 1, w=np.sqrt(w))
+            else:
+                slope, intercept = np.polyfit(x, y, 1)
+            y_hat = intercept + slope * x
+            ss_res = float(np.sum((y - y_hat) ** 2))
+            ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+            fit_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+            if abs(float(slope)) <= max_plausible_drift and fit_r2 >= 0.2:
+                drift = float(slope)
+                offset_at_origin_s = float(intercept)
+                drift_source = "calibration_windows"
+            elif abs(drift_raw) <= max_plausible_drift:
+                drift = drift_raw
+                offset_at_origin_s = cal_open.offset_seconds - drift * (cal_open.t_tgt_seconds - tgt_origin_s)
+                drift_source = "calibration_windows"
+            else:
+                drift = _estimate_drift_from_duration(ref_df, tgt_df)
+                offset_at_origin_s = cal_open.offset_seconds - drift * (cal_open.t_tgt_seconds - tgt_origin_s)
+                drift_source = "duration_ratio"
+        except Exception as exc:
+            log.warning("All-anchor calibration fit failed (%s); falling back to first/last.", exc)
+            if abs(drift_raw) <= max_plausible_drift:
+                drift = drift_raw
+                offset_at_origin_s = cal_open.offset_seconds - drift * (cal_open.t_tgt_seconds - tgt_origin_s)
+                drift_source = "calibration_windows"
+            else:
+                drift = _estimate_drift_from_duration(ref_df, tgt_df)
+                offset_at_origin_s = cal_open.offset_seconds - drift * (cal_open.t_tgt_seconds - tgt_origin_s)
+                drift_source = "duration_ratio"
+    else:
+        if abs(drift_raw) > max_plausible_drift:
+            drift = _estimate_drift_from_duration(ref_df, tgt_df)
+            drift_source = "duration_ratio"
+        else:
+            drift = drift_raw
+            drift_source = "calibration_windows"
+        offset_at_origin_s = cal_open.offset_seconds - drift * (cal_open.t_tgt_seconds - tgt_origin_s)
 
     model = SyncModel(
         reference_csv=reference_name,
@@ -635,7 +681,7 @@ def estimate_sync_from_calibration(
         max_lag_seconds=float(coarse_max_lag_s),
         created_at_utc=datetime.now(UTC).isoformat(),
     )
-    return model, cal_open, cal_close, drift_source
+    return model, cal_open, cal_close, drift_source, cal_windows, fit_r2
 
 
 def synchronize_from_calibration(
@@ -667,7 +713,7 @@ def synchronize_from_calibration(
     if ref_df.empty or tgt_df.empty:
         raise ValueError("Reference and target streams must both be non-empty.")
 
-    model, cal_open, cal_close, drift_source = estimate_sync_from_calibration(
+    model, cal_open, cal_close, drift_source, cal_windows, fit_r2 = estimate_sync_from_calibration(
         ref_df,
         tgt_df,
         reference_name=str(ref_path),
@@ -705,6 +751,17 @@ def synchronize_from_calibration(
             "window_duration_s": round(cal_close.window_duration_s, 2),
         },
         "calibration_span_s": round(cal_close.t_tgt_seconds - cal_open.t_tgt_seconds, 1),
+        "n_windows_used": len(cal_windows),
+        "fit_r2": round(float(fit_r2), 4) if fit_r2 is not None else None,
+        "anchors": [
+            {
+                "offset_s": round(w.offset_seconds, 6),
+                "t_tgt_s": round(w.t_tgt_seconds, 3),
+                "score": round(w.correlation_score, 4),
+                "window_duration_s": round(w.window_duration_s, 2),
+            }
+            for w in cal_windows
+        ],
     }
     sync_data["correlation"] = compute_sync_correlations(ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz)
     sync_json_path.write_text(json.dumps(sync_data, indent=2), encoding="utf-8")
@@ -742,7 +799,7 @@ def synchronize_recording_from_calibration(
     lowpass_cutoff_hz: float | None = None,
     resample_rate_hz: float | None = None,
 ) -> tuple[Path, Path, Path]:
-    """Synchronize a recording using opening and closing calibration anchors."""
+    """Synchronize a recording using calibration anchors with robust fallbacks."""
     ref_csv, tgt_csv, out_dir = _prepare_recording_io(
         recording_name, stage_in, "calibration", reference_sensor, target_sensor
     )

@@ -936,6 +936,48 @@ def plot_sync_drift_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
     return _save(fig, out_path)
 
 
+def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    out_path = output_dir / "sync_calibration_anchors_overview.png"
+    if df.empty or "recording_name" not in df.columns:
+        return None
+    if "calibration_cal_n_windows" not in df.columns and "calibration_cal_fit_r2" not in df.columns:
+        return None
+
+    recordings = df["recording_name"].tolist()
+    n = len(recordings)
+    if n == 0:
+        return None
+
+    n_windows = pd.to_numeric(df.get("calibration_cal_n_windows"), errors="coerce")
+    fit_r2 = pd.to_numeric(df.get("calibration_cal_fit_r2"), errors="coerce")
+    if (n_windows is None or n_windows.isna().all()) and (fit_r2 is None or fit_r2.isna().all()):
+        return None
+
+    x = np.arange(n)
+    fig, axes = plt.subplots(2, 1, figsize=(max(8, n * 0.7 + 2), 6), sharex=True)
+
+    ax = axes[0]
+    vals = n_windows.fillna(0.0).tolist() if n_windows is not None else [0.0] * n
+    ax.bar(x, vals, color="#2ca02c", edgecolor="white", linewidth=0.5, alpha=0.85)
+    ax.set_ylabel("Count")
+    ax.set_title("Calibration anchors used per recording")
+    ax.grid(axis="y", alpha=0.3, lw=0.5)
+
+    ax = axes[1]
+    vals = fit_r2.fillna(0.0).tolist() if fit_r2 is not None else [0.0] * n
+    colors = ["#2ca02c" if v >= 0.2 else "#d62728" for v in vals]
+    ax.bar(x, vals, color=colors, edgecolor="white", linewidth=0.5, alpha=0.85)
+    ax.axhline(0.2, color="orange", linestyle="--", linewidth=0.9)
+    ax.set_ylabel("R²")
+    ax.set_title("Calibration all-anchor fit quality (R²)")
+    ax.grid(axis="y", alpha=0.3, lw=0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels([_short_recording(r) for r in recordings], rotation=45, ha="right", fontsize=8)
+
+    fig.tight_layout()
+    return _save(fig, out_path)
+
+
 def plot_sync_offset_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
     out_path = output_dir / "sync_offset_overview.png"
     if df.empty or "recording_name" not in df.columns or "offset_seconds" not in df.columns:
@@ -1002,6 +1044,7 @@ def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
         plot_sync_method_availability(df, figures_dir),
         plot_sync_correlation_overview(df, figures_dir),
         plot_sync_drift_overview(df, figures_dir),
+        plot_sync_calibration_anchor_overview(df, figures_dir),
     ):
         if result is not None:
             generated.append(result)

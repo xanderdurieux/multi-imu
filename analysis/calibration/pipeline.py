@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from common.paths import iter_sections_for_recording, read_csv, sections_root, write_csv
@@ -23,7 +24,7 @@ log = logging.getLogger(__name__)
 
 _SENSORS = ("sporsa", "arduino")
 _FRAME_ALIGNMENT_DEFAULT = "gravity_only"
-_ALL_METHODS: list[str] = ["gravity_only", "gravity_plus_forward"]
+_ALL_METHODS: list[str] = ["gravity_only", "gravity_plus_forward", "gravity_plus_mag"]
 
 
 def calibrate_section(
@@ -146,10 +147,16 @@ def _score_calibration(cal: SectionCalibration) -> float:
     if cal.sporsa.fallback_used or cal.arduino.fallback_used:
         score += 2.0
 
-    # Small bonus for well-estimated forward direction (gravity_plus_forward).
+    # Small bonus for well-estimated forward/mag direction.
     forward_conf = max(cal.sporsa.forward_confidence, cal.arduino.forward_confidence)
-    if cal.frame_alignment == "gravity_plus_forward" and forward_conf >= 0.3:
+    if cal.frame_alignment in ("gravity_plus_forward", "gravity_plus_mag") and forward_conf >= 0.3:
         score -= forward_conf * 0.5  # up to -0.5 bonus
+
+    # Extra bonus for mag when it was actually used (not fallen back to PCA).
+    if cal.frame_alignment == "gravity_plus_mag":
+        tags = cal.sporsa.quality_tags + cal.arduino.quality_tags
+        if "mag_yaw_used" in tags:
+            score -= 0.2
 
     return score
 
@@ -169,9 +176,18 @@ def _select_best_calibration_method(
 
     scores = {m: _score_calibration(cal) for m, cal in method_results.items()}
 
-    go = method_results.get("gravity_only")
+    gm = method_results.get("gravity_plus_mag")
     gp = method_results.get("gravity_plus_forward")
+    go = method_results.get("gravity_only")
 
+    # Prefer gravity_plus_mag when mag was actually used reliably.
+    if gm is not None:
+        mag_tags = gm.sporsa.quality_tags + gm.arduino.quality_tags
+        mag_used = "mag_yaw_used" in mag_tags
+        if mag_used and scores["gravity_plus_mag"] <= scores.get("gravity_only", 99.0) + 0.5:
+            return "gravity_plus_mag"
+
+    # Fall back to gravity_plus_forward when forward confidence is sufficient.
     if go is not None and gp is not None:
         forward_conf = max(gp.sporsa.forward_confidence, gp.arduino.forward_confidence)
         if forward_conf >= 0.3 and scores["gravity_plus_forward"] <= scores["gravity_only"] + 0.5:
@@ -183,22 +199,26 @@ def _select_best_calibration_method(
 
 def _method_summary(cal: SectionCalibration) -> dict[str, Any]:
     """Compact per-method metrics for all_methods.json."""
+    def _sensor_summary(params: "CalibrationParams") -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "gravity_residual_ms2": params.gravity_residual_ms2,
+            "forward_confidence": params.forward_confidence,
+            "quality": params.quality,
+            "fallback_used": params.fallback_used,
+            "quality_tags": params.quality_tags,
+        }
+        mag_norm = float(np.linalg.norm(params.mag_vector_body))
+        if mag_norm > 0.0:
+            d["mag_vector_body"] = params.mag_vector_body
+            d["mag_field_norm"] = round(mag_norm, 3)
+        return d
+
     return {
         "frame_alignment": cal.frame_alignment,
         "calibration_quality": cal.calibration_quality,
         "quality_tags": cal.quality_tags,
-        "sporsa": {
-            "gravity_residual_ms2": cal.sporsa.gravity_residual_ms2,
-            "forward_confidence": cal.sporsa.forward_confidence,
-            "quality": cal.sporsa.quality,
-            "fallback_used": cal.sporsa.fallback_used,
-        },
-        "arduino": {
-            "gravity_residual_ms2": cal.arduino.gravity_residual_ms2,
-            "forward_confidence": cal.arduino.forward_confidence,
-            "quality": cal.arduino.quality,
-            "fallback_used": cal.arduino.fallback_used,
-        },
+        "sporsa": _sensor_summary(cal.sporsa),
+        "arduino": _sensor_summary(cal.arduino),
     }
 
 

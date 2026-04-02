@@ -255,6 +255,10 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
             row[f"{method}_drift_ppm"] = m.get("drift_ppm")
             row[f"{method}_drift_source"] = m.get("drift_source", "")
             row[f"{method}_cal_span_s"] = m.get("calibration_span_s")
+            row[f"{method}_cal_n_windows"] = m.get("calibration_n_windows")
+            row[f"{method}_cal_fit_r2"] = m.get("calibration_fit_r2")
+            anchors = m.get("calibration_anchors")
+            row[f"{method}_cal_has_anchors"] = bool(isinstance(anchors, list) and len(anchors) > 0)
 
     # Also pull the selected method's offset / correlation from sync_info.json.
     if sync_info_path.exists():

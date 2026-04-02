@@ -308,28 +308,70 @@ def plot_sync_methods_comparison(
     _annotate_selected(ax, bar_x, drift_vals, top=drift_top, selected_offset_frac=0.08)
     _annotate_bar_values(ax, bar_x, drift_vals, top=drift_top, value_offset_frac=0.025, fmt=".1f")
 
-    # --- Calibration scores ---
+    # --- Calibration anchors (all refined windows when available) ---
     ax = axes[1][0]
     cal = data.get("calibration") or {}
     if cal.get("available"):
-        open_score = cal.get("calibration_open_score") or float("nan")
-        close_score = cal.get("calibration_close_score") or float("nan")
-        span_s = cal.get("calibration_span_s") or float("nan")
-        bx = np.array([0, 1])
-        scores = [open_score, close_score]
-        score_colors = [
-            "#2ca02c" if (s or 0) >= 0.5 else "#d62728" for s in scores
-        ]
-        ax.bar(bx, scores, color=score_colors, width=0.4, alpha=0.85)
-        _, score_top = _set_bar_headroom(ax, scores, base_min_top=1.15)
-        ax.axhline(0.5, color="orange", lw=1.0, ls="--", label="min threshold (0.5)")
-        ax.set_xticks(bx)
-        ax.set_xticklabels(["Opening anchor", "Closing anchor"])
-        ax.set_ylabel("Calibration anchor score")
-        ax.set_title(f"Calibration method — anchor scores  (span: {span_s:.1f} s)", pad=12)
+        span_s = cal.get("calibration_span_s")
+        n_windows = cal.get("calibration_n_windows")
+        fit_r2 = cal.get("calibration_fit_r2")
+        anchors = cal.get("calibration_anchors")
+        anchors = anchors if isinstance(anchors, list) and anchors else []
+
+        if anchors:
+            t_vals = [a.get("t_tgt_s") for a in anchors]
+            s_vals = [a.get("score") for a in anchors]
+            o_vals = [a.get("offset_s") for a in anchors]
+            x = np.arange(len(anchors))
+            score_colors = ["#2ca02c" if (s or 0) >= 0.5 else "#d62728" for s in s_vals]
+            bars = ax.bar(x, [s if s is not None else 0.0 for s in s_vals], color=score_colors, width=0.55, alpha=0.85)
+            ax.axhline(0.5, color="orange", lw=1.0, ls="--", label="min threshold (0.5)")
+            ax.set_xticks(x)
+            ax.set_xticklabels([f"A{i+1}" for i in x], fontsize=8)
+            ax.set_ylabel("Anchor score")
+            ax.grid(axis="y", alpha=0.3)
+            for bar, sv in zip(bars, s_vals):
+                if sv is not None:
+                    ax.text(bar.get_x() + bar.get_width() / 2, sv + 0.02, f"{sv:.3f}", ha="center", va="bottom", fontsize=8)
+
+            ax2 = ax.twinx()
+            x_finite = [i for i, tv in enumerate(t_vals) if tv is not None]
+            t_finite = [tv for tv in t_vals if tv is not None]
+            if x_finite and t_finite:
+                ax2.plot(x_finite, t_finite, color="#1f77b4", marker="o", lw=1.2, ms=4, label="t_target (s)")
+            ax2.set_ylabel("t_target (s)", color="#1f77b4")
+            ax2.tick_params(axis="y", labelcolor="#1f77b4")
+
+            title = "Calibration method — refined anchors"
+        else:
+            open_score = cal.get("calibration_open_score") or float("nan")
+            close_score = cal.get("calibration_close_score") or float("nan")
+            bx = np.array([0, 1])
+            scores = [open_score, close_score]
+            score_colors = [
+                "#2ca02c" if (s or 0) >= 0.5 else "#d62728" for s in scores
+            ]
+            ax.bar(bx, scores, color=score_colors, width=0.4, alpha=0.85)
+            _, score_top = _set_bar_headroom(ax, scores, base_min_top=1.15)
+            ax.axhline(0.5, color="orange", lw=1.0, ls="--", label="min threshold (0.5)")
+            ax.set_xticks(bx)
+            ax.set_xticklabels(["Opening anchor", "Closing anchor"])
+            ax.set_ylabel("Calibration anchor score")
+            ax.grid(axis="y", alpha=0.3)
+            _annotate_bar_values(ax, bx, scores, top=score_top, value_offset_frac=0.035, fmt=".4f")
+            title = "Calibration method — opening/closing anchors"
+
+        extras: list[str] = []
+        if span_s is not None:
+            extras.append(f"span={span_s:.1f}s")
+        if n_windows is not None:
+            extras.append(f"n={n_windows}")
+        if fit_r2 is not None:
+            extras.append(f"fit R²={fit_r2:.3f}")
+        if extras:
+            title += f" ({', '.join(extras)})"
+        ax.set_title(title, pad=12)
         ax.legend(fontsize=8)
-        ax.grid(axis="y", alpha=0.3)
-        _annotate_bar_values(ax, bx, scores, top=score_top, value_offset_frac=0.035, fmt=".4f")
     else:
         ax.axis("off")
         ax.text(0.5, 0.5, "Calibration method\nnot available",
@@ -460,22 +502,39 @@ def plot_sync_detail(
         closing = cal_block.get("closing") or {}
         span_s = cal_block.get("calibration_span_s")
 
-        # Left: anchor scores
+        anchors = cal_block.get("anchors")
+        anchors = anchors if isinstance(anchors, list) and anchors else []
+
+        # Left: anchor scores (all anchors if available, otherwise opening+closing)
         ax = axes[cal_row][0]
-        anchor_names = ["Opening", "Closing"]
-        anchor_scores = [opening.get("score"), closing.get("score")]
+        if anchors:
+            anchor_names = [f"A{i+1}" for i in range(len(anchors))]
+            anchor_scores = [a.get("score") for a in anchors]
+        else:
+            anchor_names = ["Opening", "Closing"]
+            anchor_scores = [opening.get("score"), closing.get("score")]
         anchor_colors = [
             "#2ca02c" if (s or 0) >= 0.5 else "#d62728"
             for s in anchor_scores
         ]
-        bx2 = np.arange(2)
+        bx2 = np.arange(len(anchor_scores))
         bars2 = ax.bar(bx2, [s or 0 for s in anchor_scores],
                        color=anchor_colors, width=0.4, alpha=0.85)
         ax.axhline(0.5, color="orange", lw=1.0, ls="--", label="min threshold (0.5)")
         ax.set_xticks(bx2)
         ax.set_xticklabels(anchor_names)
         ax.set_ylabel("Anchor score")
-        ax.set_title(f"Calibration anchors  (span: {span_s:.1f} s)" if span_s else "Calibration anchors")
+        n_windows = cal_block.get("n_windows_used")
+        fit_r2 = cal_block.get("fit_r2")
+        title = f"Calibration anchors  (span: {span_s:.1f} s)" if span_s else "Calibration anchors"
+        extras: list[str] = []
+        if n_windows is not None:
+            extras.append(f"n={n_windows}")
+        if fit_r2 is not None:
+            extras.append(f"fit R²={fit_r2:.3f}")
+        if extras:
+            title += "\n" + ", ".join(extras)
+        ax.set_title(title)
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
         for bar, v in zip(bars2, anchor_scores):
@@ -492,23 +551,47 @@ def plot_sync_detail(
         c_w = closing.get("window_duration_s", 0)
         o_off = opening.get("offset_s")
         c_off = closing.get("offset_s")
-        anchor_lines = [
-            "Anchor details:",
-            "",
-            f"  Opening:",
-            f"    t_target = {o_t:.3f} s" if o_t is not None else "    t_target = N/A",
-            f"    window   = {o_w:.2f} s",
-            f"    offset   = {o_off:.6f} s" if o_off is not None else "    offset   = N/A",
-            f"    score    = {opening.get('score'):.4f}" if opening.get("score") is not None else "    score    = N/A",
-            "",
-            f"  Closing:",
-            f"    t_target = {c_t:.3f} s" if c_t is not None else "    t_target = N/A",
-            f"    window   = {c_w:.2f} s",
-            f"    offset   = {c_off:.6f} s" if c_off is not None else "    offset   = N/A",
-            f"    score    = {closing.get('score'):.4f}" if closing.get("score") is not None else "    score    = N/A",
-            "",
-            f"  Span: {span_s:.1f} s" if span_s is not None else "  Span: N/A",
-        ]
+        if anchors:
+            max_show = 8
+            anchor_lines = ["Anchor details (all refined anchors):", ""]
+            for idx, a in enumerate(anchors[:max_show], start=1):
+                t_val = a.get("t_tgt_s")
+                w_val = a.get("window_duration_s")
+                off_val = a.get("offset_s")
+                sc_val = a.get("score")
+                anchor_lines += [
+                    f"  A{idx}:",
+                    f"    t_target = {t_val:.3f} s" if t_val is not None else "    t_target = N/A",
+                    f"    window   = {w_val:.2f} s" if w_val is not None else "    window   = N/A",
+                    f"    offset   = {off_val:.6f} s" if off_val is not None else "    offset   = N/A",
+                    f"    score    = {sc_val:.4f}" if sc_val is not None else "    score    = N/A",
+                ]
+            if len(anchors) > max_show:
+                anchor_lines += ["", f"  ... {len(anchors) - max_show} more anchor(s) not shown ..."]
+            anchor_lines += [
+                "",
+                f"  Span: {span_s:.1f} s" if span_s is not None else "  Span: N/A",
+                f"  n_windows_used: {n_windows}" if n_windows is not None else "  n_windows_used: N/A",
+                f"  fit_r2: {fit_r2:.4f}" if fit_r2 is not None else "  fit_r2: N/A",
+            ]
+        else:
+            anchor_lines = [
+                "Anchor details:",
+                "",
+                "  Opening:",
+                f"    t_target = {o_t:.3f} s" if o_t is not None else "    t_target = N/A",
+                f"    window   = {o_w:.2f} s",
+                f"    offset   = {o_off:.6f} s" if o_off is not None else "    offset   = N/A",
+                f"    score    = {opening.get('score'):.4f}" if opening.get("score") is not None else "    score    = N/A",
+                "",
+                "  Closing:",
+                f"    t_target = {c_t:.3f} s" if c_t is not None else "    t_target = N/A",
+                f"    window   = {c_w:.2f} s",
+                f"    offset   = {c_off:.6f} s" if c_off is not None else "    offset   = N/A",
+                f"    score    = {closing.get('score'):.4f}" if closing.get("score") is not None else "    score    = N/A",
+                "",
+                f"  Span: {span_s:.1f} s" if span_s is not None else "  Span: N/A",
+            ]
         ax.text(0.05, 0.95, "\n".join(anchor_lines), transform=ax.transAxes,
                 fontsize=10, va="top", ha="left", family="monospace",
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
@@ -590,7 +673,6 @@ def plot_sync_stage(
     Produces:
     - ``overlay_before_after.png``   — before/after sync signal comparison
     - ``methods_comparison.png``     — method metrics bar charts
-    - ``sync_detail.png``            — selected method parameters
     - ``comparison.png``             — sensor overlay (via plot_comparison)
     - ``sporsa.png`` / ``arduino.png`` — individual sensor signals
     """
@@ -608,13 +690,6 @@ def plot_sync_stage(
             out_paths.append(p)
     except Exception as exc:
         log.warning("sync methods comparison plot failed for %s: %s", synced_dir.name, exc)
-
-    try:
-        p = plot_sync_detail(synced_dir)
-        if p:
-            out_paths.append(p)
-    except Exception as exc:
-        log.warning("sync detail plot failed for %s: %s", synced_dir.name, exc)
 
     # Existing per-sensor + overlay comparison.
     try:

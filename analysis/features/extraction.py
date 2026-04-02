@@ -333,18 +333,17 @@ def _label_feature(
     *,
     containment_threshold: float = 0.5,
 ) -> str:
-    """Return scenario_label for the window, or 'unlabeled'.
+    """Return all scenario_labels for the window as a pipe-separated string, or 'unlabeled'.
 
     Labeling strategy:
-    1. Compute the absolute overlap (ms) and the containment ratio (overlap /
-       label duration) for every label that touches the window.
-    2. Among labels whose containment ratio >= *containment_threshold* (i.e.,
-       at least half the label falls inside the window), prefer the **shortest**
-       label — this ensures a brief but fully-captured event (e.g. 'fall')
-       beats a long background label (e.g. 'riding') even when the absolute
-       overlap is smaller.
-    3. If no label meets the containment threshold, fall back to the label
-       with the greatest absolute overlap (original behaviour).
+    1. Compute the containment ratio (overlap / label duration) for every label
+       that touches the window.
+    2. Include every label whose containment ratio >= *containment_threshold*
+       (i.e., at least half the label falls inside the window). Multiple labels
+       can apply simultaneously (e.g. 'riding_standing' and 'head_movement').
+    3. If no label meets the containment threshold, fall back to the label with
+       the greatest absolute overlap.
+    4. Labels are sorted and joined with '|' so the result is deterministic.
     """
     if labels_df is None or labels_df.empty:
         return "unlabeled"
@@ -369,21 +368,20 @@ def _label_feature(
     containment = overlap_ms / label_dur_ms
 
     well_contained = overlapping[containment >= containment_threshold]
-    if not well_contained.empty:
-        # Shortest (most specific) well-contained label wins
-        durations = label_dur_ms.loc[well_contained.index]
-        best_idx = durations.idxmin()
-    else:
-        # Fallback: largest absolute overlap
+    if well_contained.empty:
+        # Fallback: largest absolute overlap only
         best_idx = overlap_ms.idxmax()
+        well_contained = overlapping.loc[[best_idx]]
 
-    row = overlapping.loc[best_idx]
+    def _row_label(row: pd.Series) -> str:
+        if "scenario_label" in row.index and pd.notna(row["scenario_label"]) and str(row["scenario_label"]).strip():
+            return str(row["scenario_label"])
+        if "label" in row.index and pd.notna(row["label"]) and str(row["label"]).strip():
+            return str(row["label"])
+        return ""
 
-    if "scenario_label" in row.index and pd.notna(row["scenario_label"]) and str(row["scenario_label"]).strip():
-        return str(row["scenario_label"])
-    if "label" in row.index and pd.notna(row["label"]) and str(row["label"]).strip():
-        return str(row["label"])
-    return "unlabeled"
+    labels = sorted({_row_label(row) for _, row in well_contained.iterrows()} - {""})
+    return "|".join(labels) if labels else "unlabeled"
 
 
 # ---------------------------------------------------------------------------

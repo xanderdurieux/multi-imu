@@ -75,6 +75,9 @@ class SyncMethodQuality:
     calibration_span_s: Optional[float]
     calibration_open_score: Optional[float]
     calibration_close_score: Optional[float]
+    calibration_n_windows: Optional[int]
+    calibration_fit_r2: Optional[float]
+    calibration_anchors: Optional[list[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,9 @@ class SyncSelectionResult:
                 "calibration_span_s": q.calibration_span_s,
                 "calibration_open_score": q.calibration_open_score,
                 "calibration_close_score": q.calibration_close_score,
+                "calibration_n_windows": q.calibration_n_windows,
+                "calibration_fit_r2": q.calibration_fit_r2,
+                "calibration_anchors": q.calibration_anchors,
             }
 
         return {
@@ -203,6 +209,9 @@ def _extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
             calibration_span_s=None,
             calibration_open_score=None,
             calibration_close_score=None,
+            calibration_n_windows=None,
+            calibration_fit_r2=None,
+            calibration_anchors=None,
         )
 
     corr = (info.get("correlation") or {}).get("offset_and_drift")
@@ -218,6 +227,9 @@ def _extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
         calibration_span_s=cal_block.get("calibration_span_s") if cal_block else None,
         calibration_open_score=cal_block.get("opening", {}).get("score") if cal_block else None,
         calibration_close_score=cal_block.get("closing", {}).get("score") if cal_block else None,
+        calibration_n_windows=cal_block.get("n_windows_used") if cal_block else None,
+        calibration_fit_r2=cal_block.get("fit_r2") if cal_block else None,
+        calibration_anchors=cal_block.get("anchors") if cal_block else None,
     )
 
 
