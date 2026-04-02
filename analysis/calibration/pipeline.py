@@ -20,7 +20,6 @@ from .core import (
     estimate_sensor_intrinsics,
     estimate_sensor_alignment,
     _find_first_stable_window,
-    _find_motion_onset,
     _ms_from_idx,
     apply_calibration,
 )
@@ -287,36 +286,28 @@ def _cal_sensor(
 
     # Alignment window
     if sensor == _ARDUINO_SENSOR and opening_seg is not None:
-        # Arduino: find first stable post-mount window, bounded to before
-        # the onset of sustained motion (i.e. before the ride starts).
+        # Arduino: find first stable post-mount window
         after_idx = opening_seg.end_idx
-        motion_onset_idx = _find_motion_onset(
-            df,
-            after_idx=after_idx,
-            sample_rate_hz=sample_rate_hz,
-        )
         post_mount_window = _find_first_stable_window(
             df,
             after_idx=after_idx,
-            before_idx=motion_onset_idx,
             sample_rate_hz=sample_rate_hz,
             min_duration_s=3.0,
             threshold_ms2=1.5,
         )
         if post_mount_window is not None:
-            log.debug(
-                "%s/%s: using post-mount window [%d, %d] for alignment (motion onset at %d)",
-                section_name, sensor, *post_mount_window, motion_onset_idx,
-            )
             alignment_window = post_mount_window
+            log.debug(
+                "%s/%s: using post-mount window [%d, %d] for alignment",
+                section_name, sensor, *alignment_window,
+            )
         else:
             # Fallback: use opening static ranges for alignment
             alignment_window = static_ranges[0]
             all_quality_tags.append(f"no_post_mount_window_{sensor}")
             log.warning(
-                "%s/%s: no post-mount stable window found before motion onset (idx=%d)"
-                " — using opening static for alignment",
-                section_name, sensor, motion_onset_idx,
+                "%s/%s: no post-mount stable window found — using opening static for alignment",
+                section_name, sensor,
             )
     else:
         # Sporsa (no mount change): use opening static windows for alignment

@@ -413,13 +413,12 @@ def _find_first_stable_window(
     df: pd.DataFrame,
     after_idx: int,
     *,
-    before_idx: int | None = None,
     sample_rate_hz: float = 100.0,
     min_duration_s: float = 3.0,
     threshold_ms2: float = 1.5,
 ) -> tuple[int, int] | None:
     """Find the first stable (low-motion) window of at least ``min_duration_s`` seconds
-    that starts at or after ``after_idx`` and ends before ``before_idx``.
+    that starts at or after ``after_idx``.
 
     A sample is stable if ``||acc_norm| - g| < threshold_ms2``.
     Returns (start_idx, end_idx) or None.
@@ -428,10 +427,7 @@ def _find_first_stable_window(
     if not acc_cols or after_idx >= len(df):
         return None
 
-    search_end = before_idx if before_idx is not None else len(df)
-    search_end = min(search_end, len(df))
-
-    acc = df.iloc[after_idx:search_end][acc_cols].to_numpy(dtype=float)
+    acc = df.iloc[after_idx:][acc_cols].to_numpy(dtype=float)
     norm = np.sqrt(np.nansum(acc ** 2, axis=1))
     is_stable = np.abs(norm - _G) < threshold_ms2
 
@@ -453,41 +449,6 @@ def _find_first_stable_window(
             return after_idx + run_start, after_idx + len(is_stable) - 1
 
     return None
-
-
-def _find_motion_onset(
-    df: pd.DataFrame,
-    after_idx: int,
-    *,
-    sample_rate_hz: float = 100.0,
-    window_s: float = 5.0,
-    motion_fraction: float = 0.5,
-    threshold_ms2: float = 1.5,
-) -> int:
-    """Find the index where sustained motion begins after ``after_idx``.
-
-    A window of ``window_s`` seconds is considered "in motion" when more than
-    ``motion_fraction`` of its samples are dynamic (``||acc_norm| - g| >=
-    threshold_ms2``).  Returns the index of the first such window's start, or
-    ``len(df)`` if no sustained motion is found.
-    """
-    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
-    if not acc_cols or after_idx >= len(df):
-        return len(df)
-
-    acc = df.iloc[after_idx:][acc_cols].to_numpy(dtype=float)
-    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
-    is_dynamic = np.abs(norm - _G) >= threshold_ms2
-
-    window_samples = int(sample_rate_hz * window_s)
-    if len(is_dynamic) < window_samples:
-        return after_idx + len(is_dynamic)
-
-    for i in range(len(is_dynamic) - window_samples + 1):
-        if np.mean(is_dynamic[i : i + window_samples]) >= motion_fraction:
-            return after_idx + i
-
-    return after_idx + len(is_dynamic)
 
 
 def detect_protocol_landmarks(
