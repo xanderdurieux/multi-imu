@@ -1,4 +1,4 @@
-"""Calibration estimation and application for a single IMU stream.
+"""Protocol-aware calibration estimation and application for a single IMU stream.
 
 Conventions
 -----------
@@ -6,6 +6,25 @@ Conventions
 - Gravity in world frame: [0, 0, -g] (pointing down in the real world, so
   accelerometer at rest measures [0, 0, +g] in world frame).
 - All timestamps in milliseconds.
+
+Recording protocol
+------------------
+Each recording section begins with an opening routine:
+
+  1. ~5 s static  (pre-tap static)  → gyro bias estimation
+  2. ~5 acceleration taps           → sync anchors
+  3. ~5 s static  (post-tap static) → additional gyro bias source
+  4. Mount transition (Arduino only): sensor is strapped to the bike
+  5. First sufficiently stable post-mount window → alignment anchor (Arduino)
+
+Sporsa does not undergo a mount change; its opening static windows are used
+for both intrinsic estimation and alignment.
+
+Calibration is split into two independent outputs per sensor:
+- ``intrinsics``: gyro bias (always); accelerometer bias/scale only when a
+  static hardware calibration reference is provided.
+- ``alignment``: body-to-world rotation derived from the first appropriate
+  stable window after mount, plus yaw resolved by priority (mag → PCA → none).
 """
 
 from __future__ import annotations
@@ -18,14 +37,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.calibration_segments import CalibrationSegment, find_calibration_segments
-from common.quaternion import (
-    quat_from_rotation_matrix,
-    quat_normalize,
-    quat_rotate,
-    tilt_quat_from_acc,
-    euler_from_quat,
-)
+from parser.calibration_segments import CalibrationSegment, find_calibration_segments
 
 log = logging.getLogger(__name__)
 
@@ -38,556 +50,693 @@ _G = 9.81  # m/s²
 
 
 @dataclass
-class CalibrationParams:
-    """Per-sensor calibration parameters."""
+class OpeningSequence:
+    """Protocol-detected opening routine in a section."""
 
-    acc_bias: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    gyro_bias: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    gravity_vector_body: list[float] = field(default_factory=lambda: [0.0, 0.0, 9.81])
-    rotation_matrix: list[list[float]] = field(
-        default_factory=lambda: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-    )
-    gravity_residual_ms2: float = 0.0
-    forward_confidence: float = 0.0
-    mag_vector_body: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    quality: str = "good"
-    fallback_used: bool = False
-    quality_tags: list[str] = field(default_factory=list)
+    pre_static_range: list[int]    # [start_idx, end_idx]
+    tap_cluster: list[int]         # peak indices
+    tap_times_ms: list[float]      # tap timestamps for cross-sensor plotting
+    post_static_range: list[int]   # [start_idx, end_idx]
+    pre_static_start_ms: float
+    pre_static_end_ms: float
+    post_static_start_ms: float
+    post_static_end_ms: float
+    n_taps: int
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "CalibrationParams":
+    def from_dict(cls, d: dict[str, Any]) -> "OpeningSequence":
         return cls(
-            acc_bias=list(d.get("acc_bias", [0.0, 0.0, 0.0])),
+            pre_static_range=list(d.get("pre_static_range", [0, 0])),
+            tap_cluster=list(d.get("tap_cluster", [])),
+            tap_times_ms=[float(v) for v in d.get("tap_times_ms", [])],
+            post_static_range=list(d.get("post_static_range", [0, 0])),
+            pre_static_start_ms=float(d.get("pre_static_start_ms", 0.0)),
+            pre_static_end_ms=float(d.get("pre_static_end_ms", 0.0)),
+            post_static_start_ms=float(d.get("post_static_start_ms", 0.0)),
+            post_static_end_ms=float(d.get("post_static_end_ms", 0.0)),
+            n_taps=int(d.get("n_taps", 0)),
+        )
+
+
+@dataclass
+class SensorIntrinsics:
+    """Per-sensor intrinsic calibration parameters.
+
+    ``gyro_bias`` is always estimated from opening static windows.
+    ``acc_bias`` and ``acc_scale`` are populated only when a static hardware
+    calibration reference is provided; otherwise they are ``None`` and no
+    accelerometer correction is applied.
+    """
+
+    gyro_bias: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    acc_bias: list[float] | None = None
+    acc_scale: list[float] | None = None
+    static_residual_ms2: float = 0.0
+    quality: str = "good"
+    quality_tags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "gyro_bias": self.gyro_bias,
+            "acc_bias": self.acc_bias,
+            "acc_scale": self.acc_scale,
+            "static_residual_ms2": self.static_residual_ms2,
+            "quality": self.quality,
+            "quality_tags": self.quality_tags,
+        }
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SensorIntrinsics":
+        return cls(
             gyro_bias=list(d.get("gyro_bias", [0.0, 0.0, 0.0])),
-            gravity_vector_body=list(d.get("gravity_vector_body", [0.0, 0.0, 9.81])),
-            rotation_matrix=list(d.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])),
-            gravity_residual_ms2=float(d.get("gravity_residual_ms2", 0.0)),
-            forward_confidence=float(d.get("forward_confidence", 0.0)),
-            mag_vector_body=list(d.get("mag_vector_body", [0.0, 0.0, 0.0])),
+            acc_bias=list(d["acc_bias"]) if d.get("acc_bias") is not None else None,
+            acc_scale=list(d["acc_scale"]) if d.get("acc_scale") is not None else None,
+            static_residual_ms2=float(d.get("static_residual_ms2", 0.0)),
             quality=str(d.get("quality", "good")),
-            fallback_used=bool(d.get("fallback_used", False)),
             quality_tags=list(d.get("quality_tags", [])),
         )
 
 
 @dataclass
-class SectionCalibration:
-    """Combined calibration for a section (both sensors)."""
+class SensorAlignment:
+    """Per-sensor alignment: body-to-world rotation and yaw resolution.
 
-    sporsa: CalibrationParams
-    arduino: CalibrationParams
-    frame_alignment: str = "gravity_only"
-    calibration_quality: str = "good"
-    quality_tags: list[str] = field(default_factory=list)
-    created_at_utc: str = ""
+    ``yaw_source`` records which method resolved the yaw degree of freedom:
+    - ``"mag"``: magnetometer-based heading
+    - ``"pca_forward"``: dominant motion direction via PCA
+    - ``"gravity_only"``: only roll/pitch resolved; yaw is undefined
+    """
+
+    rotation_matrix: list[list[float]] = field(
+        default_factory=lambda: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    )
+    gravity_estimate: list[float] = field(default_factory=lambda: [0.0, 0.0, _G])
+    yaw_source: str = "gravity_only"
+    yaw_confidence: float = 0.0
+    alignment_window_start_ms: float = 0.0
+    alignment_window_end_ms: float = 0.0
+    gravity_residual_ms2: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
-        d = {
-            "sporsa": self.sporsa.to_dict(),
-            "arduino": self.arduino.to_dict(),
-            "frame_alignment": self.frame_alignment,
-            "calibration_quality": self.calibration_quality,
-            "quality_tags": self.quality_tags,
-            "created_at_utc": self.created_at_utc,
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SensorAlignment":
+        return cls(
+            rotation_matrix=list(d.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])),
+            gravity_estimate=list(d.get("gravity_estimate", [0.0, 0.0, _G])),
+            yaw_source=str(d.get("yaw_source", "gravity_only")),
+            yaw_confidence=float(d.get("yaw_confidence", 0.0)),
+            alignment_window_start_ms=float(d.get("alignment_window_start_ms", 0.0)),
+            alignment_window_end_ms=float(d.get("alignment_window_end_ms", 0.0)),
+            gravity_residual_ms2=float(d.get("gravity_residual_ms2", 0.0)),
+        )
+
+
+@dataclass
+class SectionCalibration:
+    """Combined protocol-aware calibration for a section (both sensors)."""
+
+    protocol_detected: bool = False
+    opening_sequence: OpeningSequence | None = None
+    intrinsics: dict[str, SensorIntrinsics] = field(default_factory=dict)
+    alignment: dict[str, SensorAlignment] = field(default_factory=dict)
+    quality: dict[str, Any] = field(
+        default_factory=lambda: {"overall": "good", "tags": []}
+    )
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "protocol_detected": self.protocol_detected,
+            "opening_sequence": self.opening_sequence.to_dict() if self.opening_sequence else None,
+            "intrinsics": {k: v.to_dict() for k, v in self.intrinsics.items()},
+            "alignment": {k: v.to_dict() for k, v in self.alignment.items()},
+            "quality": self.quality,
+            "provenance": self.provenance,
         }
-        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "SectionCalibration":
+        raw_opening = d.get("opening_sequence")
+        opening = OpeningSequence.from_dict(raw_opening) if raw_opening else None
         return cls(
-            sporsa=CalibrationParams.from_dict(d.get("sporsa", {})),
-            arduino=CalibrationParams.from_dict(d.get("arduino", {})),
-            frame_alignment=str(d.get("frame_alignment", "gravity_only")),
-            calibration_quality=str(d.get("calibration_quality", "good")),
-            quality_tags=list(d.get("quality_tags", [])),
-            created_at_utc=str(d.get("created_at_utc", "")),
+            protocol_detected=bool(d.get("protocol_detected", False)),
+            opening_sequence=opening,
+            intrinsics={k: SensorIntrinsics.from_dict(v) for k, v in d.get("intrinsics", {}).items()},
+            alignment={k: SensorAlignment.from_dict(v) for k, v in d.get("alignment", {}).items()},
+            quality=dict(d.get("quality", {"overall": "good", "tags": []})),
+            provenance=dict(d.get("provenance", {})),
         )
 
 
 # ---------------------------------------------------------------------------
-# Estimation helpers
+# Gravity / rotation helpers (internal)
 # ---------------------------------------------------------------------------
 
 
-def _static_mask(df: pd.DataFrame, *, sample_rate_hz: float = 100.0) -> np.ndarray:
-    """Return a boolean mask of rows in static (low-motion) segments."""
-    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
-    if not acc_cols:
-        return np.zeros(len(df), dtype=bool)
-    acc = df[acc_cols].to_numpy(dtype=float)
-    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
-    deviation = np.abs(norm - _G)
-    return deviation < 0.5  # within 0.5 m/s² of g
-
-
-def _estimate_static_segments_from_calibration(
+def _gravity_from_ranges(
     df: pd.DataFrame,
-    *,
-    sample_rate_hz: float = 100.0,
-    static_min_s: float = 2.0,
-    static_threshold: float = 1.5,
-    peak_min_height: float = 3.0,
-    peak_min_count: int = 3,
-) -> list[tuple[int, int]]:
-    """Return list of (start_idx, end_idx) for detected static regions."""
-    cals = find_calibration_segments(
-        df,
-        sample_rate_hz=sample_rate_hz,
-        static_min_s=static_min_s,
-        static_threshold=static_threshold,
-        peak_min_height=peak_min_height,
-        peak_min_count=peak_min_count,
-    )
-    if not cals:
-        return []
-    ranges: list[tuple[int, int]] = []
-    for cal in cals:
-        # Take the flat static flank at the start of each calibration.
-        s = cal.start_idx
-        if cal.peak_indices:
-            e = cal.peak_indices[0]
-        else:
-            e = cal.end_idx
-        ranges.append((s, e))
-    return ranges
-
-
-def _gravity_from_static(
-    df: pd.DataFrame,
-    static_ranges: list[tuple[int, int]],
+    ranges: list[tuple[int, int]],
 ) -> tuple[np.ndarray, float]:
-    """Estimate gravity vector in body frame from static regions.
+    """Estimate body-frame gravity vector from static sample ranges.
 
-    Returns (gravity_vector, residual_ms2).
+    Returns (gravity_vector_body, residual_ms2).
     """
-    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
-    if not acc_cols or not static_ranges:
-        g_body = np.array([0.0, 0.0, _G])
-        return g_body, float("nan")
+    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+    if not acc_cols or not ranges:
+        return np.array([0.0, 0.0, _G]), float("nan")
 
-    all_acc: list[np.ndarray] = []
-    for s, e in static_ranges:
+    chunks: list[np.ndarray] = []
+    for s, e in ranges:
         chunk = df.iloc[s:e][acc_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
-            all_acc.append(chunk[finite])
+            chunks.append(chunk[finite])
 
-    if not all_acc:
+    if not chunks:
         return np.array([0.0, 0.0, _G]), float("nan")
 
-    combined = np.vstack(all_acc)
+    combined = np.vstack(chunks)
     g_body = np.nanmean(combined, axis=0)
     g_norm = np.linalg.norm(g_body)
     residual = abs(g_norm - _G)
 
-    # Normalize to expected gravity magnitude.
     if g_norm > 0.1:
         g_body = g_body * (_G / g_norm)
 
     return g_body, float(residual)
 
 
-def _gyro_bias_from_static(
+def _gyro_bias_from_ranges(
     df: pd.DataFrame,
-    static_ranges: list[tuple[int, int]],
+    ranges: list[tuple[int, int]],
 ) -> np.ndarray:
-    """Estimate gyroscope bias from static regions."""
-    gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
-    if not gyro_cols or not static_ranges:
+    gyro_cols = [c for c in ("gx", "gy", "gz") if c in df.columns]
+    if not gyro_cols or not ranges:
         return np.zeros(3)
 
-    all_gyro: list[np.ndarray] = []
-    for s, e in static_ranges:
+    chunks: list[np.ndarray] = []
+    for s, e in ranges:
         chunk = df.iloc[s:e][gyro_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
-            all_gyro.append(chunk[finite])
+            chunks.append(chunk[finite])
 
-    if not all_gyro:
+    if not chunks:
         return np.zeros(3)
-    combined = np.vstack(all_gyro)
-    return np.nanmean(combined, axis=0)
+    return np.nanmean(np.vstack(chunks), axis=0)
 
 
 def _gravity_alignment_rotation(g_body: np.ndarray) -> np.ndarray:
-    """Compute rotation matrix R such that R @ g_body ≈ [0, 0, g].
-
-    The resulting rotation maps the sensor body frame to a gravity-aligned
-    world frame where Z points up.
-    """
+    """R such that R @ g_body ≈ [0, 0, g] (Z-up world frame)."""
     g_norm = np.linalg.norm(g_body)
     if g_norm < 1e-6:
         return np.eye(3)
 
-    g_hat = g_body / g_norm  # measured gravity direction in body
-
-    # Target: gravity points along +Z in world frame.
+    g_hat = g_body / g_norm
     target = np.array([0.0, 0.0, 1.0])
-
-    # Axis = g_hat × target (rotation axis).
     axis = np.cross(g_hat, target)
     sin_angle = np.linalg.norm(axis)
     cos_angle = float(np.dot(g_hat, target))
 
     if sin_angle < 1e-8:
-        # Already aligned or exactly anti-aligned.
-        if cos_angle > 0:
-            return np.eye(3)
-        # 180° flip around X.
-        return np.diag([1.0, -1.0, -1.0])
+        return np.eye(3) if cos_angle > 0 else np.diag([1.0, -1.0, -1.0])
 
     axis = axis / sin_angle
-    # Rodrigues' rotation formula.
     K = np.array([
         [0.0, -axis[2], axis[1]],
         [axis[2], 0.0, -axis[0]],
         [-axis[1], axis[0], 0.0],
     ])
-    R = (
+    return (
         np.eye(3) * cos_angle
         + sin_angle * K
         + (1.0 - cos_angle) * np.outer(axis, axis)
     )
-    return R
 
 
-def _estimate_forward_direction(
+def _mag_from_ranges(
     df: pd.DataFrame,
-    R_gravity: np.ndarray,
-    *,
-    min_speed_ms2: float = 2.0,
-    sample_rate_hz: float = 100.0,
-) -> tuple[np.ndarray, float]:
-    """Estimate forward direction from motion segments.
-
-    Returns (forward_unit_vec_in_gravity_aligned_frame, confidence_in_0_1).
-    """
-    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
-    if not acc_cols:
-        return np.array([1.0, 0.0, 0.0]), 0.0
-
-    acc = df[acc_cols].to_numpy(dtype=float)
-    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
-
-    # Motion = deviation from gravity level.
-    deviation = np.abs(norm - _G)
-    motion_mask = deviation > min_speed_ms2
-
-    if motion_mask.sum() < 20:
-        return np.array([1.0, 0.0, 0.0]), 0.0
-
-    motion_acc = acc[motion_mask]
-    # Rotate into gravity-aligned frame.
-    motion_world = (R_gravity @ motion_acc.T).T
-
-    # Horizontal components (X, Y in world frame) capture forward direction.
-    horizontal = motion_world[:, :2]
-    finite = np.all(np.isfinite(horizontal), axis=1)
-    if finite.sum() < 10:
-        return np.array([1.0, 0.0, 0.0]), 0.0
-
-    # Use PCA on horizontal motion to find dominant forward direction.
-    H = horizontal[finite]
-    cov = np.cov(H.T)
-    vals, vecs = np.linalg.eigh(cov)
-    # Largest eigenvector = dominant horizontal direction.
-    forward_2d = vecs[:, -1]
-    # Explained variance ratio as confidence proxy.
-    confidence = float(vals[-1] / (vals.sum() + 1e-9))
-    forward_3d = np.array([forward_2d[0], forward_2d[1], 0.0])
-    norm_fwd = np.linalg.norm(forward_3d)
-    if norm_fwd > 1e-8:
-        forward_3d /= norm_fwd
-    return forward_3d, min(confidence, 1.0)
-
-
-def _build_full_rotation(
-    R_gravity: np.ndarray,
-    forward_world: np.ndarray,
-    confidence: float,
-    *,
-    min_confidence: float = 0.3,
+    ranges: list[tuple[int, int]],
 ) -> np.ndarray:
-    """Extend gravity rotation with forward direction alignment."""
-    if confidence < min_confidence:
-        return R_gravity
-
-    fwd = np.asarray(forward_world, dtype=float)
-    fwd[2] = 0.0  # ensure it's horizontal
-    norm = np.linalg.norm(fwd)
-    if norm < 1e-8:
-        return R_gravity
-
-    fwd /= norm
-    # Target forward is +X.
-    angle = np.arctan2(fwd[1], fwd[0])
-    c, s = np.cos(-angle), np.sin(-angle)
-    R_yaw = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=float)
-    return R_yaw @ R_gravity
-
-
-# ---------------------------------------------------------------------------
-# Magnetometer helpers
-# ---------------------------------------------------------------------------
-
-
-def _mag_from_static(
-    df: pd.DataFrame,
-    static_ranges: list[tuple[int, int]],
-) -> np.ndarray:
-    """Average magnetometer reading in static regions → body-frame vector."""
-    mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
-    if not mag_cols or not static_ranges:
+    mag_cols = [c for c in ("mx", "my", "mz") if c in df.columns]
+    if not mag_cols or not ranges:
         return np.zeros(3)
 
-    all_mag: list[np.ndarray] = []
-    for s, e in static_ranges:
+    chunks: list[np.ndarray] = []
+    for s, e in ranges:
         chunk = df.iloc[s:e][mag_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
-            all_mag.append(chunk[finite])
+            chunks.append(chunk[finite])
 
-    if not all_mag:
+    if not chunks:
         return np.zeros(3)
-    return np.nanmean(np.vstack(all_mag), axis=0)
+    return np.nanmean(np.vstack(chunks), axis=0)
 
 
 def _assess_mag_reliability(
     df: pd.DataFrame,
-    static_ranges: list[tuple[int, int]],
+    ranges: list[tuple[int, int]],
     *,
     field_min: float = 1.0,
     field_max: float = 200.0,
     max_cv: float = 0.15,
 ) -> tuple[bool, list[str]]:
-    """Check whether the magnetometer data is reliable enough for yaw estimation.
-
-    Uses:
-    - Field magnitude within a plausible range (``field_min``–``field_max``; units
-      match the CSV — µT for Sporsa, native float for Arduino).
-    - Coefficient of variation of the magnitude during static segments below
-      ``max_cv`` (15 % default): a stable field in static → low interference.
-
-    Returns
-    -------
-    (is_reliable, tags)
-        ``tags`` is a list of quality tag strings (empty when reliable).
-    """
-    mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
+    mag_cols = [c for c in ("mx", "my", "mz") if c in df.columns]
     if len(mag_cols) < 3:
         return False, ["mag_columns_missing"]
 
-    # Collect static-segment magnitude samples.
     mags: list[np.ndarray] = []
-    for s, e in static_ranges:
+    for s, e in ranges:
         chunk = df.iloc[s:e][mag_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
-            norms = np.linalg.norm(chunk[finite], axis=1)
-            mags.append(norms)
+            mags.append(np.linalg.norm(chunk[finite], axis=1))
 
     if not mags:
-        # Fall back to the whole stream if no static segments found.
         arr = df[mag_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(arr), axis=1)
         if not finite.any():
             return False, ["mag_all_nan"]
-        norms = np.linalg.norm(arr[finite], axis=1)
-        mags = [norms]
+        mags = [np.linalg.norm(arr[finite], axis=1)]
 
     all_norms = np.concatenate(mags)
     if all_norms.size == 0:
         return False, ["mag_all_nan"]
 
     mean_norm = float(np.mean(all_norms))
-    tags: list[str] = []
-
     if not (field_min <= mean_norm <= field_max):
-        tags.append(f"mag_field_out_of_range_{mean_norm:.1f}")
-        return False, tags
+        return False, [f"mag_field_out_of_range_{mean_norm:.1f}"]
 
     if all_norms.size > 1:
         cv = float(np.std(all_norms) / (mean_norm + 1e-9))
         if cv > max_cv:
-            tags.append(f"mag_unstable_cv_{cv:.2f}")
-            return False, tags
+            return False, [f"mag_unstable_cv_{cv:.2f}"]
 
     return True, []
 
 
-def _estimate_yaw_from_mag(
+def _yaw_from_mag(
     mag_body: np.ndarray,
     R_gravity: np.ndarray,
 ) -> tuple[float, float]:
-    """Yaw angle and confidence to align horizontal mag projection to +X.
-
-    Projects the magnetometer body-frame vector into the gravity-aligned world
-    frame, then extracts the horizontal (XY) component to find the heading
-    direction.  This aligns magnetic north with the world +X axis.
-
-    Returns
-    -------
-    (yaw_angle_rad, confidence)
-        ``confidence`` is the normalised horizontal component magnitude [0–1].
-    """
+    """Return (yaw_angle_rad, confidence) for mag-based heading."""
     mag_world = R_gravity @ mag_body
     hx, hy = float(mag_world[0]), float(mag_world[1])
-    horiz_norm = float(np.sqrt(hx ** 2 + hy ** 2))
-    total_norm = float(np.linalg.norm(mag_world))
-    confidence = horiz_norm / (total_norm + 1e-9)
+    horiz = float(np.sqrt(hx ** 2 + hy ** 2))
+    total = float(np.linalg.norm(mag_world))
+    confidence = horiz / (total + 1e-9)
     yaw = float(np.arctan2(hy, hx))
     return yaw, confidence
 
 
+def _forward_from_pca(
+    df: pd.DataFrame,
+    R_gravity: np.ndarray,
+    *,
+    min_speed_ms2: float = 2.0,
+) -> tuple[np.ndarray, float]:
+    """Estimate dominant horizontal motion direction via PCA."""
+    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+    if not acc_cols:
+        return np.array([1.0, 0.0, 0.0]), 0.0
+
+    acc = df[acc_cols].to_numpy(dtype=float)
+    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
+    motion_mask = np.abs(norm - _G) > min_speed_ms2
+
+    if motion_mask.sum() < 20:
+        return np.array([1.0, 0.0, 0.0]), 0.0
+
+    motion_world = (R_gravity @ acc[motion_mask].T).T
+    horizontal = motion_world[:, :2]
+    finite = np.all(np.isfinite(horizontal), axis=1)
+    if finite.sum() < 10:
+        return np.array([1.0, 0.0, 0.0]), 0.0
+
+    H = horizontal[finite]
+    cov = np.cov(H.T)
+    vals, vecs = np.linalg.eigh(cov)
+    forward_2d = vecs[:, -1]
+    confidence = float(vals[-1] / (vals.sum() + 1e-9))
+    forward_3d = np.array([forward_2d[0], forward_2d[1], 0.0])
+    n = np.linalg.norm(forward_3d)
+    if n > 1e-8:
+        forward_3d /= n
+    return forward_3d, min(confidence, 1.0)
+
+
+def _apply_yaw(R_gravity: np.ndarray, yaw_angle_rad: float) -> np.ndarray:
+    c, s = np.cos(-yaw_angle_rad), np.sin(-yaw_angle_rad)
+    R_yaw = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return R_yaw @ R_gravity
+
+
+def _ms_from_idx(df: pd.DataFrame, idx: int) -> float:
+    ts = df["timestamp"].to_numpy(dtype=float)
+    return float(ts[max(0, min(idx, len(ts) - 1))])
+
+
 # ---------------------------------------------------------------------------
-# Main estimation function
+# Protocol detection
 # ---------------------------------------------------------------------------
 
 
-def estimate_calibration(
+def _find_first_stable_window(
+    df: pd.DataFrame,
+    after_idx: int,
+    *,
+    before_idx: int | None = None,
+    sample_rate_hz: float = 100.0,
+    min_duration_s: float = 3.0,
+    threshold_ms2: float = 1.5,
+) -> tuple[int, int] | None:
+    """Find the first stable (low-motion) window of at least ``min_duration_s`` seconds
+    that starts at or after ``after_idx`` and ends before ``before_idx``.
+
+    A sample is stable if ``||acc_norm| - g| < threshold_ms2``.
+    Returns (start_idx, end_idx) or None.
+    """
+    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+    if not acc_cols or after_idx >= len(df):
+        return None
+
+    search_end = before_idx if before_idx is not None else len(df)
+    search_end = min(search_end, len(df))
+
+    acc = df.iloc[after_idx:search_end][acc_cols].to_numpy(dtype=float)
+    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
+    is_stable = np.abs(norm - _G) < threshold_ms2
+
+    min_samples = int(sample_rate_hz * min_duration_s)
+    run_start: int | None = None
+
+    for i, flag in enumerate(is_stable):
+        if flag and run_start is None:
+            run_start = i
+        elif not flag and run_start is not None:
+            length = i - run_start
+            if length >= min_samples:
+                return after_idx + run_start, after_idx + i - 1
+            run_start = None
+
+    if run_start is not None:
+        length = len(is_stable) - run_start
+        if length >= min_samples:
+            return after_idx + run_start, after_idx + len(is_stable) - 1
+
+    return None
+
+
+def _find_motion_onset(
+    df: pd.DataFrame,
+    after_idx: int,
+    *,
+    sample_rate_hz: float = 100.0,
+    window_s: float = 5.0,
+    motion_fraction: float = 0.5,
+    threshold_ms2: float = 1.5,
+) -> int:
+    """Find the index where sustained motion begins after ``after_idx``.
+
+    A window of ``window_s`` seconds is considered "in motion" when more than
+    ``motion_fraction`` of its samples are dynamic (``||acc_norm| - g| >=
+    threshold_ms2``).  Returns the index of the first such window's start, or
+    ``len(df)`` if no sustained motion is found.
+    """
+    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+    if not acc_cols or after_idx >= len(df):
+        return len(df)
+
+    acc = df.iloc[after_idx:][acc_cols].to_numpy(dtype=float)
+    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
+    is_dynamic = np.abs(norm - _G) >= threshold_ms2
+
+    window_samples = int(sample_rate_hz * window_s)
+    if len(is_dynamic) < window_samples:
+        return after_idx + len(is_dynamic)
+
+    for i in range(len(is_dynamic) - window_samples + 1):
+        if np.mean(is_dynamic[i : i + window_samples]) >= motion_fraction:
+            return after_idx + i
+
+    return after_idx + len(is_dynamic)
+
+
+def detect_protocol_landmarks(
     df: pd.DataFrame,
     *,
     sample_rate_hz: float = 100.0,
-    frame_alignment: str = "gravity_only",
-    static_min_s: float = 2.0,
-    static_threshold: float = 1.5,
-    peak_min_height: float = 3.0,
-    peak_min_count: int = 3,
-) -> CalibrationParams:
-    """Estimate calibration parameters for one IMU sensor stream.
+) -> tuple[CalibrationSegment | None, list[tuple[int, int]]]:
+    """Detect opening-routine protocol landmarks in an IMU DataFrame.
+
+    Returns
+    -------
+    (opening_segment, static_ranges)
+        ``opening_segment``: the detected CalibrationSegment for the opening
+        routine, or None if not found.
+        ``static_ranges``: list of (start_idx, end_idx) for the static flanks
+        of the opening routine (pre-tap and post-tap).  Empty on failure.
+    """
+    segs = find_calibration_segments(df, sample_rate_hz=sample_rate_hz)
+    if not segs:
+        return None, []
+
+    seg = segs[0]  # opening routine = first detected calibration sequence
+    static_ranges: list[tuple[int, int]] = []
+
+    # Pre-tap static
+    pre_end = seg.peak_indices[0] if seg.peak_indices else seg.end_idx
+    if pre_end > seg.start_idx:
+        static_ranges.append((seg.start_idx, pre_end))
+
+    # Post-tap static
+    post_start = seg.peak_indices[-1] if seg.peak_indices else seg.start_idx
+    if seg.end_idx > post_start:
+        static_ranges.append((post_start, seg.end_idx))
+
+    return seg, static_ranges
+
+
+# ---------------------------------------------------------------------------
+# Intrinsics estimation
+# ---------------------------------------------------------------------------
+
+
+def estimate_sensor_intrinsics(
+    df: pd.DataFrame,
+    static_ranges: list[tuple[int, int]],
+    *,
+    static_cal: dict[str, Any] | None = None,
+) -> SensorIntrinsics:
+    """Estimate sensor intrinsics from static windows.
 
     Parameters
     ----------
     df:
-        IMU DataFrame with columns ax/ay/az/gx/gy/gz and timestamp.
-    sample_rate_hz:
-        Approximate sample rate used for calibration-segment detection.
-    frame_alignment:
-        ``"gravity_only"`` or ``"gravity_plus_forward"``.
+        Raw IMU DataFrame.
+    static_ranges:
+        (start_idx, end_idx) pairs of static samples to use.
+    static_cal:
+        Optional static hardware calibration reference dict.  Must contain
+        ``accelerometer.bias`` and/or ``accelerometer.scale`` and
+        ``gyroscope.bias_deg_s`` sub-dicts to be used.  When provided, its
+        gyro bias overrides the dynamically-estimated value.
+
+    Returns
+    -------
+    SensorIntrinsics
     """
-    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     quality_tags: list[str] = []
-    fallback_used = False
 
-    # Detect static segments from calibration sequences.
-    static_ranges = _estimate_static_segments_from_calibration(
-        df,
-        sample_rate_hz=sample_rate_hz,
-        static_min_s=static_min_s,
-        static_threshold=static_threshold,
-        peak_min_height=peak_min_height,
-        peak_min_count=peak_min_count,
-    )
+    # Gyro bias
+    gyro_bias = _gyro_bias_from_ranges(df, static_ranges)
 
-    if not static_ranges:
-        # Fallback: use first 5 s as static if df is long enough.
-        ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
-        if ts.size > 0:
-            t0 = ts[0]
-            mask = ts <= t0 + 5000.0
-            n_static = int(mask.sum())
-            if n_static > 10:
-                static_ranges = [(0, n_static)]
-                fallback_used = True
-                quality_tags.append("fallback_static")
-            else:
-                quality_tags.append("no_static_found")
-        else:
-            quality_tags.append("empty_stream")
+    # Gravity estimate for quality assessment
+    g_body, residual = _gravity_from_ranges(df, static_ranges)
 
-    # Estimate biases.
-    g_body, gravity_residual = _gravity_from_static(df, static_ranges)
-    gyro_bias = _gyro_bias_from_static(df, static_ranges)
-
-    # Accelerometer bias = (measured g) - (expected g_body direction at g magnitude).
-    g_body_expected = g_body / (np.linalg.norm(g_body) + 1e-9) * _G
-    acc_bias = (g_body - g_body_expected).tolist()
-
-    # Build rotation to world frame.
-    R_gravity = _gravity_alignment_rotation(g_body)
-
-    forward_confidence = 0.0
-    mag_body = np.zeros(3)
-    R_final = R_gravity
-
-    if frame_alignment == "gravity_plus_forward":
-        forward_world, forward_confidence = _estimate_forward_direction(
-            df, R_gravity, sample_rate_hz=sample_rate_hz
-        )
-        R_final = _build_full_rotation(R_gravity, forward_world, forward_confidence)
-
-    elif frame_alignment == "gravity_plus_mag":
-        mag_body = _mag_from_static(df, static_ranges)
-        is_reliable, mag_tags = _assess_mag_reliability(df, static_ranges)
-        quality_tags.extend(mag_tags)
-        if is_reliable:
-            yaw_angle, forward_confidence = _estimate_yaw_from_mag(mag_body, R_gravity)
-            c, s = np.cos(-yaw_angle), np.sin(-yaw_angle)
-            R_yaw = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-            R_final = R_yaw @ R_gravity
-            quality_tags.append("mag_yaw_used")
-        else:
-            # Mag unreliable — fall back to PCA forward direction.
-            forward_world, forward_confidence = _estimate_forward_direction(
-                df, R_gravity, sample_rate_hz=sample_rate_hz
-            )
-            R_final = _build_full_rotation(R_gravity, forward_world, forward_confidence)
-            quality_tags.append("mag_fallback_to_pca")
-
-    # Assess quality.
-    if np.isnan(gravity_residual) or gravity_residual > 1.0:
-        quality_tags.append("poor_gravity_alignment")
-        quality = "poor" if gravity_residual > 2.0 else "marginal"
+    # Assess quality
+    if np.isnan(residual) or residual > 2.0:
+        quality = "poor"
+        quality_tags.append("poor_static_gravity")
+    elif residual > 1.0:
+        quality = "marginal"
+        quality_tags.append("marginal_static_gravity")
     else:
         quality = "good"
 
-    return CalibrationParams(
-        acc_bias=list(np.array(acc_bias).round(6).tolist()),
+    if not static_ranges:
+        quality_tags.append("no_static_ranges")
+        quality = "poor"
+
+    # Accelerometer intrinsics: only from hardware static calibration
+    acc_bias: list[float] | None = None
+    acc_scale: list[float] | None = None
+
+    if static_cal is not None:
+        acc_cal = static_cal.get("accelerometer", {})
+        if acc_cal.get("bias"):
+            b = acc_cal["bias"]
+            acc_bias = [float(b.get("x", 0)), float(b.get("y", 0)), float(b.get("z", 0))]
+        if acc_cal.get("scale"):
+            sc = acc_cal["scale"]
+            acc_scale = [float(sc.get("x", 1)), float(sc.get("y", 1)), float(sc.get("z", 1))]
+        # Override gyro bias with static reference if available
+        gyro_cal = static_cal.get("gyroscope", {})
+        if gyro_cal.get("bias_deg_s"):
+            gb = gyro_cal["bias_deg_s"]
+            gyro_bias = np.array([
+                float(gb.get("x", 0)), float(gb.get("y", 0)), float(gb.get("z", 0))
+            ])
+            quality_tags.append("gyro_bias_from_static_cal")
+
+    return SensorIntrinsics(
         gyro_bias=list(np.round(gyro_bias, 6).tolist()),
-        gravity_vector_body=list(np.round(g_body, 6).tolist()),
-        rotation_matrix=[list(row) for row in np.round(R_final, 8).tolist()],
-        gravity_residual_ms2=round(float(gravity_residual) if not np.isnan(gravity_residual) else 99.0, 4),
-        forward_confidence=round(float(forward_confidence), 4),
-        mag_vector_body=list(np.round(mag_body, 4).tolist()),
+        acc_bias=[round(v, 6) for v in acc_bias] if acc_bias is not None else None,
+        acc_scale=[round(v, 6) for v in acc_scale] if acc_scale is not None else None,
+        static_residual_ms2=round(float(residual) if not np.isnan(residual) else 99.0, 4),
         quality=quality,
-        fallback_used=fallback_used,
         quality_tags=quality_tags,
     )
 
 
 # ---------------------------------------------------------------------------
-# Application function
+# Alignment estimation
+# ---------------------------------------------------------------------------
+
+
+def estimate_sensor_alignment(
+    df: pd.DataFrame,
+    window_range: tuple[int, int],
+    *,
+    sample_rate_hz: float = 100.0,
+    full_df: pd.DataFrame | None = None,
+) -> SensorAlignment:
+    """Estimate body-to-world alignment from a stable window.
+
+    Yaw is resolved in priority order:
+    1. Magnetometer (if reliable in the alignment window)
+    2. PCA of dominant horizontal motion (over ``full_df`` if provided,
+       otherwise ``df``)
+    3. Gravity-only (roll + pitch only; yaw undefined)
+
+    Parameters
+    ----------
+    df:
+        Raw IMU DataFrame.
+    window_range:
+        (start_idx, end_idx) of the stable window to use for gravity and
+        magnetometer estimation.
+    sample_rate_hz:
+        Sample rate for temporal calculations.
+    full_df:
+        Full section DataFrame (used for PCA forward-direction estimation).
+        Falls back to ``df`` when not provided.
+    """
+    quality_tags: list[str] = []
+    s, e = window_range
+    window_df = df.iloc[s:e]
+
+    # Gravity estimate from alignment window
+    g_body, residual = _gravity_from_ranges(df, [(s, e)])
+    R_gravity = _gravity_alignment_rotation(g_body)
+
+    # Window timestamps
+    ts = df["timestamp"].to_numpy(dtype=float)
+    win_start_ms = float(ts[max(0, min(s, len(ts) - 1))])
+    win_end_ms = float(ts[max(0, min(e, len(ts) - 1))])
+
+    # --- Yaw resolution ---
+    R_final = R_gravity
+    yaw_source = "gravity_only"
+    yaw_confidence = 0.0
+
+    # Priority 1: magnetometer
+    mag_ranges = [(s, e)]
+    mag_reliable, mag_tags = _assess_mag_reliability(df, mag_ranges)
+    quality_tags.extend(mag_tags)
+
+    if mag_reliable:
+        mag_body = _mag_from_ranges(df, mag_ranges)
+        yaw_angle, yaw_conf = _yaw_from_mag(mag_body, R_gravity)
+        if yaw_conf >= 0.2:
+            R_final = _apply_yaw(R_gravity, yaw_angle)
+            yaw_source = "mag"
+            yaw_confidence = round(float(yaw_conf), 4)
+            quality_tags.append("yaw_from_mag")
+        else:
+            quality_tags.append("mag_low_horizontal_component")
+
+    # Priority 2: PCA forward direction (uses full section for motion samples)
+    if yaw_source == "gravity_only":
+        motion_df = full_df if full_df is not None else df
+        forward_world, fwd_conf = _forward_from_pca(motion_df, R_gravity)
+        if fwd_conf >= 0.3:
+            angle = float(np.arctan2(forward_world[1], forward_world[0]))
+            R_final = _apply_yaw(R_gravity, angle)
+            yaw_source = "pca_forward"
+            yaw_confidence = round(float(fwd_conf), 4)
+            quality_tags.append("yaw_from_pca")
+        else:
+            quality_tags.append("yaw_undetermined")
+
+    if np.isnan(residual) or residual > 1.0:
+        quality_tags.append("poor_alignment_gravity")
+
+    return SensorAlignment(
+        rotation_matrix=[list(row) for row in np.round(R_final, 8).tolist()],
+        gravity_estimate=list(np.round(g_body, 6).tolist()),
+        yaw_source=yaw_source,
+        yaw_confidence=yaw_confidence,
+        alignment_window_start_ms=round(win_start_ms, 1),
+        alignment_window_end_ms=round(win_end_ms, 1),
+        gravity_residual_ms2=round(float(residual) if not np.isnan(residual) else 99.0, 4),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Application
 # ---------------------------------------------------------------------------
 
 
 def apply_calibration(
     df: pd.DataFrame,
-    params: CalibrationParams,
+    intrinsics: SensorIntrinsics,
+    alignment: SensorAlignment,
 ) -> pd.DataFrame:
-    """Apply calibration to an IMU DataFrame.
+    """Apply calibration to a raw IMU DataFrame.
 
     Steps:
-    1. Subtract accelerometer bias.
-    2. Subtract gyroscope bias.
-    3. Rotate acc and gyro into world frame using rotation_matrix.
+    1. Subtract gyroscope bias (always).
+    2. Subtract accelerometer bias and/or apply scale correction if available.
+    3. Rotate acc and gyro into world frame using the alignment rotation matrix.
+       World-frame columns are written with ``_world`` suffix.
+       Original (bias-corrected) columns are updated in-place.
 
-    Returns a new DataFrame with corrected columns and a ``_world`` suffix for
-    rotated vectors.  Original columns are preserved.
+    Returns a new DataFrame with corrected columns.
     """
     out = df.copy()
-    R = np.array(params.rotation_matrix, dtype=float)
-    acc_bias = np.array(params.acc_bias, dtype=float)
-    gyro_bias = np.array(params.gyro_bias, dtype=float)
+    R = np.array(alignment.rotation_matrix, dtype=float)
+    gyro_bias = np.array(intrinsics.gyro_bias, dtype=float)
 
-    acc_cols = [c for c in ["ax", "ay", "az"] if c in out.columns]
-    gyro_cols = [c for c in ["gx", "gy", "gz"] if c in out.columns]
+    acc_cols = [c for c in ("ax", "ay", "az") if c in out.columns]
+    gyro_cols = [c for c in ("gx", "gy", "gz") if c in out.columns]
 
     if len(acc_cols) == 3:
         acc = out[acc_cols].to_numpy(dtype=float)
-        acc_corr = acc - acc_bias
+        acc_corr = acc.copy()
+        if intrinsics.acc_bias is not None:
+            acc_corr -= np.array(intrinsics.acc_bias, dtype=float)
+        if intrinsics.acc_scale is not None:
+            # Scale correction: divide each axis by its scale factor
+            acc_corr /= np.array(intrinsics.acc_scale, dtype=float)
         acc_world = (R @ acc_corr.T).T
         out["ax"] = acc_corr[:, 0]
         out["ay"] = acc_corr[:, 1]

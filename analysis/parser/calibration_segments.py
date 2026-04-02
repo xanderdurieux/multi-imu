@@ -162,6 +162,50 @@ def _find_peaks(
     return np.sort(sorted_cands[keep])
 
 
+def _refine_peaks_to_raw_max(
+    peak_indices: list[int] | np.ndarray,
+    dynamic_raw: np.ndarray,
+    *,
+    search_radius: int,
+    min_spacing: int,
+) -> list[int]:
+    """Move smoothed peak indices onto the nearest strong raw impact maxima.
+
+    The shared detector uses a lightly smoothed acceleration envelope to find
+    tap clusters robustly. For sharp taps, the smoothed local maximum lands a
+    few samples after the true impact. This refinement step keeps the cluster
+    structure but snaps each candidate back to the strongest raw excursion in a
+    local neighbourhood so downstream protocol plots and opening-routine timing
+    align with the visible taps.
+    """
+    if len(peak_indices) == 0:
+        return []
+
+    x = np.asarray(dynamic_raw, dtype=float)
+    refined: list[int] = []
+    for peak_idx in np.asarray(peak_indices, dtype=int):
+        lo = max(0, int(peak_idx) - search_radius)
+        hi = min(len(x), int(peak_idx) + search_radius + 1)
+        if hi <= lo:
+            refined.append(int(peak_idx))
+            continue
+        local_offset = int(np.nanargmax(x[lo:hi]))
+        refined.append(lo + local_offset)
+
+    refined = sorted(refined)
+    deduped: list[int] = []
+    for idx in refined:
+        if not deduped:
+            deduped.append(idx)
+            continue
+        if idx - deduped[-1] < min_spacing:
+            if x[idx] > x[deduped[-1]]:
+                deduped[-1] = idx
+        else:
+            deduped.append(idx)
+    return deduped
+
+
 def _segment_quality(seg: CalibrationSegment) -> tuple:
     """Return a sortable quality tuple for *seg* (higher = better).
 
@@ -338,6 +382,8 @@ def find_calibration_segments(
     static_gap_max_samples = int(sample_rate_hz * static_gap_max_s)
     static_overlap_max_samples = int(sample_rate_hz * static_overlap_max_s)
     static_min_start_samples = max(1, int(static_min_samples * static_min_start_fraction))
+    refine_radius = max(1, smooth_win // 2 + 1)
+    peak_min_spacing = max(1, int(sample_rate_hz * 0.15))
 
     static_runs: list[tuple[int, int, int]] = []
     run_start: int | None = None
@@ -352,8 +398,17 @@ def find_calibration_segments(
 
     segments: list[CalibrationSegment] = []
     for cluster in clusters:
-        c_start = cluster[0]
-        c_end = cluster[-1]
+        refined_cluster = _refine_peaks_to_raw_max(
+            cluster,
+            dynamic_raw,
+            search_radius=refine_radius,
+            min_spacing=peak_min_spacing,
+        )
+        if len(refined_cluster) < peak_min_count:
+            continue
+
+        c_start = refined_cluster[0]
+        c_end = refined_cluster[-1]
 
         pre_run: tuple[int, int] | None = None
         for rs, re, rl in reversed(static_runs):
@@ -395,7 +450,7 @@ def find_calibration_segments(
             CalibrationSegment(
                 start_idx=pre_run[0],
                 end_idx=post_run[1],
-                peak_indices=list(cluster),
+                peak_indices=refined_cluster,
             )
         )
 

@@ -26,22 +26,30 @@ _ALL_SYNC_METHODS = ["sda", "lida", "calibration", "online", "adaptive"]
 def aggregate_calibration_params(
     recording_names: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Collect calibration.json from all sections into a flat DataFrame.
+    """Collect calibration.json (schema v2) from all sections into a flat DataFrame.
 
-    One row per section with columns for both sensors (sporsa / arduino):
-    ``<sensor>_acc_bias_{x,y,z}``, ``<sensor>_gyro_bias_{x,y,z}``,
-    ``<sensor>_gravity_residual_ms2``, ``<sensor>_forward_confidence``,
-    ``<sensor>_quality``, ``<sensor>_fallback_used``.
+    One row per section.  Per-sensor columns (sporsa / arduino):
 
-    Plus section-level columns:
-    ``section_id``, ``recording_name``, ``frame_alignment``,
-    ``calibration_quality``, ``quality_tags``.
+    Intrinsics
+        ``<sensor>_gyro_bias_{x,y,z}``,
+        ``<sensor>_acc_bias_{x,y,z}`` (may be NaN when not estimated),
+        ``<sensor>_acc_scale_{x,y,z}`` (may be NaN when not estimated),
+        ``<sensor>_intrinsics_quality``, ``<sensor>_intrinsics_residual_ms2``.
 
-    If present in ``calibrated/all_methods.json``, static-reference values are
-    also exported:
-    ``static_acc_bias_{x,y,z}``, ``static_acc_scale_{x,y,z}``,
-    ``static_gyro_bias_deg_s_{x,y,z}``, ``static_reference_path``,
-    ``static_reference_warnings``.
+    Alignment
+        ``<sensor>_gravity_estimate_{x,y,z}``,
+        ``<sensor>_gravity_residual_ms2``,
+        ``<sensor>_yaw_source``,
+        ``<sensor>_yaw_confidence``,
+        ``<sensor>_alignment_window_start_ms``,
+        ``<sensor>_alignment_window_end_ms``.
+
+    Section-level
+        ``section_id``, ``recording_name``,
+        ``protocol_detected``,
+        ``calibration_quality`` (alias: ``quality_overall``),
+        ``quality_tags``,
+        ``fallback_used``.
     """
     root = sections_root()
     if not root.exists():
@@ -72,38 +80,54 @@ def aggregate_calibration_params(
         # Derive recording name from section folder name (strip trailing sN).
         rec_name = section_dir.name.rsplit("s", 1)[0] if "s" in section_dir.name else section_dir.name
 
+        quality_block = data.get("quality", {})
+        provenance = data.get("provenance", {})
+
         row: dict = {
             "section_id": section_dir.name,
             "recording_name": rec_name,
-            "frame_alignment": data.get("frame_alignment", ""),
-            "calibration_quality": data.get("calibration_quality", ""),
-            "quality_tags": "|".join(data.get("quality_tags", [])),
-            "selected_method": _read_all_methods_selected(section_dir),
+            "protocol_detected": bool(data.get("protocol_detected", False)),
+            "calibration_quality": quality_block.get("overall", ""),
+            "quality_tags": "|".join(quality_block.get("tags", [])),
+            "fallback_used": bool(provenance.get("fallback_used", False)),
         }
 
-        static_ref = _read_static_calibration_reference(section_dir)
-        if static_ref:
-            row.update(static_ref)
+        intrinsics_block = data.get("intrinsics", {})
+        alignment_block = data.get("alignment", {})
 
         for sensor in ("sporsa", "arduino"):
-            s = data.get(sensor, {})
-            bias_ax, bias_ay, bias_az = _unpack3(s.get("acc_bias"), 0.0)
-            bias_gx, bias_gy, bias_gz = _unpack3(s.get("gyro_bias"), 0.0)
-            grav_x, grav_y, grav_z = _unpack3(s.get("gravity_vector_body"), 0.0)
+            intr = intrinsics_block.get(sensor, {})
+            aln = alignment_block.get(sensor, {})
 
-            row[f"{sensor}_acc_bias_x"] = bias_ax
-            row[f"{sensor}_acc_bias_y"] = bias_ay
-            row[f"{sensor}_acc_bias_z"] = bias_az
+            bias_gx, bias_gy, bias_gz = _unpack3(intr.get("gyro_bias"), 0.0)
             row[f"{sensor}_gyro_bias_x"] = bias_gx
             row[f"{sensor}_gyro_bias_y"] = bias_gy
             row[f"{sensor}_gyro_bias_z"] = bias_gz
-            row[f"{sensor}_gravity_x"] = grav_x
-            row[f"{sensor}_gravity_y"] = grav_y
-            row[f"{sensor}_gravity_z"] = grav_z
-            row[f"{sensor}_gravity_residual_ms2"] = s.get("gravity_residual_ms2")
-            row[f"{sensor}_forward_confidence"] = s.get("forward_confidence")
-            row[f"{sensor}_quality"] = s.get("quality", "")
-            row[f"{sensor}_fallback_used"] = s.get("fallback_used", False)
+
+            acc_bias = intr.get("acc_bias")
+            bias_ax, bias_ay, bias_az = _unpack3(acc_bias, float("nan")) if acc_bias is not None else (float("nan"),) * 3
+            row[f"{sensor}_acc_bias_x"] = bias_ax
+            row[f"{sensor}_acc_bias_y"] = bias_ay
+            row[f"{sensor}_acc_bias_z"] = bias_az
+
+            acc_scale = intr.get("acc_scale")
+            sc_x, sc_y, sc_z = _unpack3(acc_scale, float("nan")) if acc_scale is not None else (float("nan"),) * 3
+            row[f"{sensor}_acc_scale_x"] = sc_x
+            row[f"{sensor}_acc_scale_y"] = sc_y
+            row[f"{sensor}_acc_scale_z"] = sc_z
+
+            row[f"{sensor}_intrinsics_quality"] = intr.get("quality", "")
+            row[f"{sensor}_intrinsics_residual_ms2"] = intr.get("static_residual_ms2")
+
+            grav_x, grav_y, grav_z = _unpack3(aln.get("gravity_estimate"), 0.0)
+            row[f"{sensor}_gravity_estimate_x"] = grav_x
+            row[f"{sensor}_gravity_estimate_y"] = grav_y
+            row[f"{sensor}_gravity_estimate_z"] = grav_z
+            row[f"{sensor}_gravity_residual_ms2"] = aln.get("gravity_residual_ms2")
+            row[f"{sensor}_yaw_source"] = aln.get("yaw_source", "")
+            row[f"{sensor}_yaw_confidence"] = aln.get("yaw_confidence")
+            row[f"{sensor}_alignment_window_start_ms"] = aln.get("alignment_window_start_ms")
+            row[f"{sensor}_alignment_window_end_ms"] = aln.get("alignment_window_end_ms")
 
         rows.append(row)
         logger.debug("Loaded calibration for section %s", section_dir.name)
@@ -115,47 +139,6 @@ def aggregate_calibration_params(
     df = pd.DataFrame(rows)
     logger.info("Aggregated calibration params: %d sections", len(df))
     return df
-
-
-def _read_all_methods_selected(section_dir: Path) -> str:
-    """Read selected_method from calibrated/all_methods.json if present."""
-    path = section_dir / "calibrated" / "all_methods.json"
-    if not path.exists():
-        return ""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return str(data.get("selected_method", ""))
-    except Exception:
-        return ""
-
-
-def _read_static_calibration_reference(section_dir: Path) -> dict:
-    """Read static calibration reference values from calibrated/all_methods.json."""
-    path = section_dir / "calibrated" / "all_methods.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-    ref = data.get("static_calibration_reference")
-    if not isinstance(ref, dict):
-        return {}
-
-    out: dict[str, float | str] = {
-        "static_reference_path": str(ref.get("path", "")),
-        "static_reference_warnings": "|".join(ref.get("warnings", []) or []),
-    }
-
-    acc_bias = ref.get("accelerometer_bias") or {}
-    acc_scale = ref.get("accelerometer_scale") or {}
-    gyro_bias = ref.get("gyroscope_bias_deg_s") or {}
-    for axis in ("x", "y", "z"):
-        out[f"static_acc_bias_{axis}"] = _as_float(acc_bias.get(axis))
-        out[f"static_acc_scale_{axis}"] = _as_float(acc_scale.get(axis))
-        out[f"static_gyro_bias_deg_s_{axis}"] = _as_float(gyro_bias.get(axis))
-    return out
 
 
 def _unpack3(value, default: float) -> tuple[float, float, float]:
@@ -276,6 +259,9 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         row["corr_offset_only"] = corr.get("offset_only")
         row["corr_offset_and_drift"] = corr.get("offset_and_drift")
         row["drift_source"] = info.get("drift_source", "")
+        row["signal_mode"] = info.get("signal_mode")
+        row["calibration_usage_strategy"] = info.get("calibration_usage_strategy")
+        row["segment_aware_used"] = info.get("segment_aware_used")
 
         if "selected_method" not in row:
             row["selected_method"] = ""

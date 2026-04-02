@@ -22,10 +22,11 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, write_csv
-from common.calibration_segments import _acc_norm, _find_peaks, _smooth, find_calibration_segments
+from parser.calibration_segments import _acc_norm, _find_peaks, _smooth, find_calibration_segments
 from common.paths import find_sensor_csv, recording_stage_dir
 
 from .core import (
+    CALIBRATION_USAGE_FULL_STREAM,
     DEFAULT_LOCAL_SEARCH_SECONDS,
     DEFAULT_MIN_FIT_R2,
     DEFAULT_MIN_WINDOW_SCORE,
@@ -46,6 +47,7 @@ from .core import (
     resample_stream,
     save_sync_model,
 )
+from .signals import SIGNAL_MODE_ACC_NORM_DIFF
 
 log = logging.getLogger(__name__)
 
@@ -152,14 +154,44 @@ def _sync_payload(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     sample_rate_hz: float,
+    diagnostics: dict | None = None,
     extra: dict | None = None,
 ) -> dict:
     payload = asdict(model)
     payload["sync_method"] = sync_method
     payload["correlation"] = compute_sync_correlations(ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz)
+    if diagnostics:
+        payload.update(diagnostics)
     if extra:
         payload.update(extra)
     return payload
+
+
+def _shared_sync_diagnostics(
+    diagnostics: dict | None,
+    *,
+    signal_mode: str,
+    calibration_usage_strategy: str,
+    fallback_used: bool = False,
+) -> dict:
+    diag = dict(diagnostics or {})
+    diag.setdefault("signal_mode", signal_mode)
+    diag.setdefault("calibration_usage_strategy", calibration_usage_strategy)
+    diag.setdefault("fallback_used", fallback_used)
+    diag.setdefault("segment_aware_used", False)
+    diag.setdefault("anchor_count", 0)
+    diag.setdefault("accepted_windows", 0)
+    diag.setdefault("rejected_windows", 0)
+    diag.setdefault("kept_windows", diag.get("accepted_windows", 0))
+    diag.setdefault("local_corr_mean", None)
+    diag.setdefault("local_corr_median", None)
+    diag.setdefault("drift_r2", None)
+    diag.setdefault("residual_summary", None)
+    diag.setdefault("segments_detected", {"reference": 0, "target": 0})
+    diag.setdefault("percentage_removed", {"reference": 0.0, "target": 0.0})
+    diag.setdefault("percentage_used", {"reference": 100.0, "target": 100.0})
+    diag.setdefault("usable_duration_seconds", None)
+    return diag
 
 
 def synchronize_recording_sda(
@@ -170,6 +202,9 @@ def synchronize_recording_sda(
     target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     max_lag_seconds: float = DEFAULT_MAX_LAG_SECONDS,
+    signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF,
+    segment_aware: bool = False,
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
     use_acc: bool = True,
     use_gyro: bool = False,
     use_mag: bool = False,
@@ -184,15 +219,20 @@ def synchronize_recording_sda(
     if ref_df.empty or tgt_df.empty:
         raise ValueError("Reference and target streams must both be non-empty.")
 
-    offset = estimate_offset(
+    offset_result = estimate_offset(
         ref_df,
         tgt_df,
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=max_lag_seconds,
+        signal_mode=signal_mode,
+        segment_aware=segment_aware,
+        calibration_usage_strategy=calibration_usage_strategy,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
+        return_diagnostics=True,
     )
+    offset, offset_diag = offset_result
 
     model = SyncModel(
         reference_csv=str(ref_csv),
@@ -211,6 +251,11 @@ def synchronize_recording_sda(
         ref_df=ref_df,
         tgt_df=tgt_df,
         sample_rate_hz=sample_rate_hz,
+        diagnostics=_shared_sync_diagnostics(
+            offset_diag,
+            signal_mode=signal_mode,
+            calibration_usage_strategy=calibration_usage_strategy,
+        ),
         extra={"sda_score": round(float(offset.score), 4)},
     )
     return _write_recording_outputs(
@@ -238,9 +283,13 @@ def synchronize(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+    min_valid_fraction: float = 0.5,
     resample_rate_hz: float | None = None,
+    signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF,
+    segment_aware: bool = False,
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
     use_acc: bool = True,
-    use_gyro: bool = True,
+    use_gyro: bool = False,
     use_mag: bool = False,
     lowpass_cutoff_hz: float | None = None,
 ) -> tuple[Path, Path, Path | None]:
@@ -255,7 +304,7 @@ def synchronize(
     if ref_df.empty or tgt_df.empty:
         raise ValueError("Reference and target streams must both be non-empty.")
 
-    model = estimate_sync_model(
+    model_result = estimate_sync_model(
         ref_df,
         tgt_df,
         reference_name=str(ref_path),
@@ -267,11 +316,17 @@ def synchronize(
         local_search_seconds=local_search_seconds,
         min_window_score=min_window_score,
         min_fit_r2=min_fit_r2,
+        min_valid_fraction=min_valid_fraction,
+        signal_mode=signal_mode,
+        segment_aware=segment_aware,
+        calibration_usage_strategy=calibration_usage_strategy,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         lowpass_cutoff_hz=lowpass_cutoff_hz,
+        return_diagnostics=True,
     )
+    model, diagnostics = model_result
 
     sync_json_path = out_dir / f"{tgt_path.stem}_to_{ref_path.stem}_sync.json"
     save_sync_model(model, sync_json_path)
@@ -279,6 +334,13 @@ def synchronize(
     sync_data = json.loads(sync_json_path.read_text(encoding="utf-8"))
     sync_data["sync_method"] = "sda_lida"
     sync_data["correlation"] = compute_sync_correlations(ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz)
+    sync_data.update(
+        _shared_sync_diagnostics(
+            diagnostics,
+            signal_mode=signal_mode,
+            calibration_usage_strategy=calibration_usage_strategy,
+        )
+    )
     sync_json_path.write_text(json.dumps(sync_data, indent=2), encoding="utf-8")
 
     aligned_df = _drop_alignment_columns(apply_sync_model(tgt_df, model, replace_timestamp=True))
@@ -307,7 +369,11 @@ def synchronize_recording(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+    min_valid_fraction: float = 0.5,
     resample_rate_hz: float | None = None,
+    signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF,
+    segment_aware: bool = False,
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
     use_acc: bool = True,
     use_gyro: bool = False,
     use_mag: bool = False,
@@ -329,7 +395,11 @@ def synchronize_recording(
             local_search_seconds=local_search_seconds,
             min_window_score=min_window_score,
             min_fit_r2=min_fit_r2,
+            min_valid_fraction=min_valid_fraction,
             resample_rate_hz=resample_rate_hz,
+            signal_mode=signal_mode,
+            segment_aware=segment_aware,
+            calibration_usage_strategy=calibration_usage_strategy,
             use_acc=use_acc,
             use_gyro=use_gyro,
             use_mag=use_mag,
@@ -1001,6 +1071,9 @@ def estimate_sync_adaptive(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+    min_valid_fraction: float = 0.5,
+    bootstrap_prefix_seconds: float = 60.0,
+    signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF,
 ) -> tuple[SyncModel, dict]:
     """Estimate sync using the adaptive online algorithm.
 
@@ -1030,6 +1103,7 @@ def estimate_sync_adaptive(
     opening_anchor: CalibrationWindowResult | None = None
     initial_method = "sda_fallback"
     initial_offset_s = 0.0
+    fallback_used = False
 
     if ref_cals:
         tgt_clean = remove_dropouts(tgt_df)
@@ -1058,31 +1132,46 @@ def estimate_sync_adaptive(
             opening_anchor = None
 
     if opening_anchor is None:
-        tgt_clean = remove_dropouts(tgt_df)
+        ref_start = float(ref_df["timestamp"].iloc[0])
+        tgt_start = float(tgt_df["timestamp"].iloc[0])
+        ref_prefix = ref_df.loc[
+            ref_df["timestamp"] <= ref_start + float(bootstrap_prefix_seconds) * 1000.0
+        ].reset_index(drop=True)
+        tgt_prefix = tgt_df.loc[
+            tgt_df["timestamp"] <= tgt_start + float(bootstrap_prefix_seconds) * 1000.0
+        ].reset_index(drop=True)
+        tgt_clean = remove_dropouts(tgt_prefix)
         coarse = estimate_offset(
-            ref_df,
+            ref_prefix,
             tgt_clean,
             sample_rate_hz=5.0,
-            max_lag_seconds=120.0,
-            use_acc=True,
-            use_gyro=False,
-            differentiate=False,
+            max_lag_seconds=min(120.0, float(bootstrap_prefix_seconds)),
+            signal_mode=signal_mode,
         )
         initial_offset_s = float(coarse.offset_seconds)
-        initial_method = "sda_fallback"
-        log.info("Adaptive sync: initial offset from SDA fallback: %.4f s", initial_offset_s)
+        initial_method = "sda_prefix_bootstrap"
+        fallback_used = True
+        log.info("Adaptive sync: initial offset from prefix-only SDA bootstrap: %.4f s", initial_offset_s)
 
     # 2. Build activity signals for the windowed pass.
     ref_series = build_alignment_series(
-        ref_df, sample_rate_hz=sample_rate_hz, use_acc=True, use_gyro=False
+        ref_df,
+        sample_rate_hz=sample_rate_hz,
+        signal_mode=signal_mode,
+        use_acc=True,
+        use_gyro=False,
     )
     tgt_series = build_alignment_series(
-        tgt_df, sample_rate_hz=sample_rate_hz, use_acc=True, use_gyro=False
+        tgt_df,
+        sample_rate_hz=sample_rate_hz,
+        signal_mode=signal_mode,
+        use_acc=True,
+        use_gyro=False,
     )
     tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
 
     # 3. Causal windowed refinement — updates its own running model after each window.
-    target_times, offsets, scores = _adaptive_windowed_refinement(
+    target_times, offsets, scores, window_stats = _adaptive_windowed_refinement(
         ref_series,
         tgt_series,
         initial_offset_seconds=initial_offset_s,
@@ -1092,6 +1181,7 @@ def estimate_sync_adaptive(
         window_step_seconds=window_step_seconds,
         local_search_seconds=local_search_seconds,
         min_window_score=min_window_score,
+        min_valid_fraction=min_valid_fraction,
     )
 
     # 4. Fit final linear model to all accumulated observations.
@@ -1139,6 +1229,27 @@ def estimate_sync_adaptive(
         "n_windows_used": int(offsets.size),
         "fit_r2": round(float(fit_r2), 4),
         "drift_source": drift_source,
+        "fallback_used": fallback_used,
+        "anchor_count": int(offsets.size),
+        "accepted_windows": int(window_stats["accepted_windows"]),
+        "rejected_windows": int(window_stats["rejected_windows"]),
+        "local_corr_mean": float(np.mean(scores)) if scores.size else None,
+        "local_corr_median": float(np.median(scores)) if scores.size else None,
+        "drift_r2": float(fit_r2),
+        "residual_summary": None
+        if offsets.size == 0
+        else {
+            "mae": float(
+                np.mean(
+                    np.abs(
+                        offsets - (final_offset_s + final_drift_s_per_s * (target_times - tgt_origin_s))
+                    )
+                )
+            )
+        },
+        "signal_mode": signal_mode,
+        "segment_aware_used": False,
+        "calibration_usage_strategy": CALIBRATION_USAGE_FULL_STREAM,
     }
     if opening_anchor is not None:
         meta["opening_anchor"] = {
@@ -1166,6 +1277,9 @@ def synchronize_recording_adaptive(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+    min_valid_fraction: float = 0.5,
+    bootstrap_prefix_seconds: float = 60.0,
+    signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF,
 ) -> tuple[Path, Path, Path]:
     """Synchronize a recording using adaptive online estimation.
 
@@ -1197,6 +1311,9 @@ def synchronize_recording_adaptive(
         local_search_seconds=local_search_seconds,
         min_window_score=min_window_score,
         min_fit_r2=min_fit_r2,
+        min_valid_fraction=min_valid_fraction,
+        bootstrap_prefix_seconds=bootstrap_prefix_seconds,
+        signal_mode=signal_mode,
     )
 
     aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
@@ -1207,6 +1324,12 @@ def synchronize_recording_adaptive(
         ref_df=ref_df,
         tgt_df=tgt_df,
         sample_rate_hz=sample_rate_hz,
+        diagnostics=_shared_sync_diagnostics(
+            meta,
+            signal_mode=signal_mode,
+            calibration_usage_strategy=CALIBRATION_USAGE_FULL_STREAM,
+            fallback_used=bool(meta.get("fallback_used", False)),
+        ),
         extra={
             "drift_source": drift_source,
             "adaptive": meta,

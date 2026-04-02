@@ -36,7 +36,7 @@ def plot_comparison_data(
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Plot accelerometer norms (and optionally gyro) for all sensors in stage_dir."""
+    """Plot accelerometer, gyroscope, and magnetometer norms for all sensors."""
     sensor_dfs: dict[str, pd.DataFrame] = {}
     for sensor in SENSORS:
         csv = stage_dir / f"{sensor}.csv"
@@ -61,7 +61,11 @@ def plot_comparison_data(
     valid_starts = [ts[np.isfinite(ts)][0] for ts in all_ts_arrays if np.isfinite(ts).any()]
     t0_global = min(valid_starts) if valid_starts else 0.0
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    has_mag = any(all(col in df.columns for col in ("mx", "my", "mz")) for df in sensor_dfs.values())
+    n_rows = 3 if has_mag else 2
+    fig, axes = plt.subplots(n_rows, 1, figsize=(12, 3 * n_rows), sharex=True)
+    if n_rows == 1:
+        axes = [axes]
 
     for sensor, df in sensor_dfs.items():
         ts = pd.to_numeric(df.get("timestamp", pd.Series()), errors="coerce").to_numpy(dtype=float)
@@ -72,6 +76,7 @@ def plot_comparison_data(
 
         acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
         gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
+        mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
 
         if acc_cols:
             acc_norm = strict_vector_norm(df, acc_cols)
@@ -81,6 +86,10 @@ def plot_comparison_data(
             gyro_norm = strict_vector_norm(df, gyro_cols)
             x, y = filter_valid_plot_xy(ts_s, gyro_norm)
             axes[1].plot(x, y, lw=0.8, color=color, label=f"{sensor} |gyro|", alpha=0.8)
+        if has_mag and len(mag_cols) == 3:
+            mag_norm = strict_vector_norm(df, mag_cols)
+            x, y = filter_valid_plot_xy(ts_s, mag_norm)
+            axes[2].plot(x, y, lw=0.8, color=color, label=f"{sensor} |mag|", alpha=0.8)
 
     axes[0].set_ylabel("|acc| (m/s²)")
     axes[0].legend(loc="upper right", fontsize=7)
@@ -88,6 +97,9 @@ def plot_comparison_data(
 
     axes[1].set_ylabel("|gyro|")
     axes[1].legend(loc="upper right", fontsize=7)
+    if has_mag:
+        axes[2].set_ylabel("|mag| (µT)")
+        axes[2].legend(loc="upper right", fontsize=7)
 
     axes[-1].set_xlabel("Time (s)")
     fig.tight_layout()

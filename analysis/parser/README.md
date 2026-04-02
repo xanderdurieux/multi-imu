@@ -11,6 +11,7 @@ splits synchronized recordings into calibration-bounded sections.
 ```
 parser/
 ├── __init__.py          public API
+├── calibration_segments.py shared calibration-sequence detection
 ├── arduino.py           Arduino BLE log parser
 ├── arduino_batched.py   Arduino batched-packet parser variant
 ├── sporsa.py            Sporsa log parser
@@ -145,7 +146,7 @@ section_dirs = split_recording_into_sections(
 
 **How it works:**
 1. Detect calibration segments in the reference sensor (Sporsa) using
-   `common.calibration_segments.find_calibration_segments`.
+   `parser.calibration_segments.find_calibration_segments`.
 2. For a recording with N calibration segments, produce N−1 sections.
    Section `k` spans from the end of calibration segment `k` to the start
    of calibration segment `k+1`, including a small overlap with each flanking

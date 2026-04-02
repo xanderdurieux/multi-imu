@@ -1,15 +1,15 @@
-"""Calibration-stage visualizations.
+"""Calibration-stage visualizations (schema v2 — protocol-aware).
 
 Functions
 ---------
 plot_calibration_raw_vs_calibrated
     Individual-axis and norm comparison (raw → calibrated) per sensor.
 plot_calibration_parameters
-    Gyro bias, rotation matrix, gravity vector, and quality summary per sensor.
+    Gyro bias bars, alignment rotation matrix, gravity vector per sensor.
 plot_calibration_world_frame
     World-frame acceleration and gyroscope signals with reference lines.
-plot_calibration_methods
-    Method-comparison bar charts from ``all_methods.json`` (if present).
+plot_calibration_protocol
+    Protocol-detection overview: opening sequence, mount transition, alignment window.
 plot_calibration_stage
     Master entry point — calls all of the above for a section directory.
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
@@ -62,21 +62,6 @@ def _load_calibration_json(section_dir: Path) -> dict:
     return json.loads(cal_json.read_text(encoding="utf-8"))
 
 
-def _load_all_methods_json(section_dir: Path) -> dict | None:
-    path = section_dir / "calibrated" / "all_methods.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _static_calibration_reference(section_dir: Path) -> dict | None:
-    data = _load_all_methods_json(section_dir)
-    if not data:
-        return None
-    ref = data.get("static_calibration_reference")
-    return ref if isinstance(ref, dict) else None
-
-
 def _ts_s(df: pd.DataFrame) -> np.ndarray:
     return timestamps_to_relative_seconds(df["timestamp"])
 
@@ -95,9 +80,7 @@ def plot_calibration_raw_vs_calibrated(
     Outputs
     -------
     ``calibrated/<sensor>_calibration_comparison.png``
-        Existing norm comparison (acc + gyro norms).
     ``calibrated/<sensor>_axes_comparison.png``
-        Individual axes (ax/ay/az) before vs after calibration.
     """
     selected = sensors or list(_SENSORS)
     out_paths: list[Path] = []
@@ -119,7 +102,7 @@ def plot_calibration_raw_vs_calibrated(
         ts_cal = _ts_s(df_cal)
         color = _SENSOR_COLORS.get(sensor, "steelblue")
 
-        # --- Plot A: norm comparison ---
+        # --- Norm comparison ---
         acc_raw = strict_vector_norm(df_raw, [c for c in ("ax", "ay", "az") if c in df_raw.columns])
         gyro_raw = strict_vector_norm(df_raw, [c for c in ("gx", "gy", "gz") if c in df_raw.columns])
         acc_cal = strict_vector_norm(df_cal, [c for c in ("ax", "ay", "az") if c in df_cal.columns])
@@ -150,7 +133,7 @@ def plot_calibration_raw_vs_calibrated(
         out_paths.append(out_a)
         log.info("Plot written: %s", project_relative_path(out_a))
 
-        # --- Plot B: individual axes ---
+        # --- Per-axis comparison ---
         acc_axes = [c for c in ("ax", "ay", "az") if c in df_raw.columns and c in df_cal.columns]
         gyro_axes = [c for c in ("gx", "gy", "gz") if c in df_raw.columns and c in df_cal.columns]
         n_rows = max(len(acc_axes), len(gyro_axes))
@@ -197,7 +180,7 @@ def plot_calibration_raw_vs_calibrated(
 
 
 # ---------------------------------------------------------------------------
-# Plot 2: Calibration parameters — biases and rotation matrix
+# Plot 2: Calibration parameters — gyro bias and alignment rotation matrix
 # ---------------------------------------------------------------------------
 
 def plot_calibration_parameters(
@@ -205,10 +188,7 @@ def plot_calibration_parameters(
     *,
     sensors: list[str] | None = None,
 ) -> Path | None:
-    """Gyro bias bars, rotation matri, and gravity bars per sensor.
-
-    For Arduino, if ``all_methods.json`` includes a static calibration reference, the gyro row
-    shows dynamic vs static gyro bias (grouped bars). Accelerometer static reference is not shown.
+    """Gyro bias bars, alignment rotation matrix and gravity estimate per sensor.
 
     Output
     ------
@@ -220,72 +200,45 @@ def plot_calibration_parameters(
         return None
 
     selected = sensors or list(_SENSORS)
-    sensors_present = [s for s in selected if s in cal_data]
+    intrinsics_block = cal_data.get("intrinsics", {})
+    alignment_block = cal_data.get("alignment", {})
+    sensors_present = [s for s in selected if s in intrinsics_block or s in alignment_block]
     if not sensors_present:
         return None
 
-    static_ref = _static_calibration_reference(section_dir)
-
     n = len(sensors_present)
-    # Plain grid: rows = gyro, rotation matrix, gravity; columns = sensors
     fig, axes_grid = plt.subplots(3, n, figsize=(4 * n + 1, 8), squeeze=False)
-    fig.suptitle(f"{section_dir.name} — calibration parameters", fontsize=12)
+    fig.suptitle(
+        f"{section_dir.name} — calibration parameters"
+        f"  (protocol_detected={cal_data.get('protocol_detected', '?')})",
+        fontsize=11,
+    )
 
     axes_labels = ["x", "y", "z"]
     bar_x = np.arange(3)
-    bar_w = 0.35
-    _STATIC_REF_COLOR = "#d62728"
 
     for s_idx, sensor in enumerate(sensors_present):
-        params = cal_data[sensor]
-        gyro_bias = params.get("gyro_bias", [0, 0, 0])
-        rot_mat = params.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
-        grav_vec = params.get("gravity_vector_body", [0, 0, _G])
+        intr = intrinsics_block.get(sensor, {})
+        aln = alignment_block.get(sensor, {})
+        gyro_bias = intr.get("gyro_bias", [0, 0, 0])
+        rot_mat = aln.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        grav_est = aln.get("gravity_estimate", [0, 0, _G])
+        yaw_src = aln.get("yaw_source", "?")
+        yaw_conf = aln.get("yaw_confidence", 0.0)
         color = _SENSOR_COLORS.get(sensor, "steelblue")
 
+        # Row 0: gyro bias
         ax_gyro = axes_grid[0, s_idx]
-        if sensor == "arduino" and static_ref:
-            static_gyro = static_ref.get("gyroscope_bias_deg_s", {})
-            static_gyro_vals = [static_gyro.get(a, float("nan")) for a in axes_labels]
-            ax_gyro.bar(
-                bar_x - bar_w / 2,
-                gyro_bias,
-                bar_w,
-                label="dynamic",
-                color=color,
-                alpha=0.8,
-            )
-            ax_gyro.bar(
-                bar_x + bar_w / 2,
-                static_gyro_vals,
-                bar_w,
-                label="static ref",
-                color=_STATIC_REF_COLOR,
-                alpha=0.8,
-                hatch="//",
-            )
-            ax_gyro.legend(fontsize=8, loc="upper right", framealpha=0.92)
-            static_warnings = static_ref.get("warnings", [])
-            if static_warnings:
-                ax_gyro.text(
-                    0.02,
-                    0.98,
-                    "⚠ " + "; ".join(static_warnings),
-                    transform=ax_gyro.transAxes,
-                    fontsize=7,
-                    va="top",
-                    ha="left",
-                    color="#8c564b",
-                )
-        else:
-            ax_gyro.bar(bar_x, gyro_bias, color=color, alpha=0.8)
+        ax_gyro.bar(bar_x, gyro_bias, color=color, alpha=0.8)
         ax_gyro.axhline(0, color="gray", lw=0.7, ls="--")
         ax_gyro.set_xticks(bar_x)
         ax_gyro.set_xticklabels(axes_labels)
         ax_gyro.set_ylabel("Bias (deg/s)")
-        ax_gyro.set_title(f"{sensor} — gyro bias")
+        intr_q = intr.get("quality", "?")
+        ax_gyro.set_title(f"{sensor} — gyro bias  [intrinsics quality={intr_q}]")
         ax_gyro.grid(axis="y", alpha=0.3)
 
+        # Row 1: alignment rotation matrix
         ax_rot = axes_grid[1, s_idx]
         R = np.array(rot_mat, dtype=float)
         im = ax_rot.imshow(R, cmap="RdBu", vmin=-1.5, vmax=1.5, aspect="equal")
@@ -296,26 +249,27 @@ def plot_calibration_parameters(
         for i in range(3):
             for j in range(3):
                 ax_rot.text(
-                    j,
-                    i,
-                    f"{R[i, j]:.3f}",
-                    ha="center",
-                    va="center",
-                    fontsize=8,
+                    j, i, f"{R[i, j]:.3f}",
+                    ha="center", va="center", fontsize=8,
                     color="black" if abs(R[i, j]) < 0.7 else "white",
                 )
         fig.colorbar(im, ax=ax_rot)
-        ax_rot.set_title(f"{sensor} — rotation matrix")
+        ax_rot.set_title(
+            f"{sensor} — alignment rotation  "
+            f"[yaw={yaw_src} conf={yaw_conf:.2f}]"
+        )
 
+        # Row 2: gravity estimate (body frame)
         ax_grav = axes_grid[2, s_idx]
-        g = np.array(grav_vec, dtype=float)
+        g = np.array(grav_est, dtype=float)
         ax_grav.bar(bar_x, g, color=["#d62728", "#2ca02c", "#1f77b4"], alpha=0.8)
         ax_grav.axhline(_G, color="gray", lw=0.8, ls="--")
         ax_grav.axhline(-_G, color="gray", lw=0.8, ls="--")
         ax_grav.set_xticks(bar_x)
         ax_grav.set_xticklabels(axes_labels)
         ax_grav.set_ylabel("m/s²")
-        ax_grav.set_title(f"{sensor} — gravity (body frame)")
+        residual = aln.get("gravity_residual_ms2", float("nan"))
+        ax_grav.set_title(f"{sensor} — gravity (body frame)  [residual={residual:.3f} m/s²]")
         ax_grav.grid(axis="y", alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -335,11 +289,7 @@ def plot_calibration_world_frame(
     *,
     sensors: list[str] | None = None,
 ) -> list[Path]:
-    """Plot world-frame acc and gyro signals from the calibrated CSV.
-
-    ``az_world`` should remain near +9.81 m/s² when the sensor is on a bike
-    moving roughly level.  This plot makes gravity alignment quality immediately
-    visible.
+    """World-frame acc and gyro signals from the calibrated CSV.
 
     Output
     ------
@@ -360,7 +310,7 @@ def plot_calibration_world_frame(
         world_acc = [c for c in ("ax_world", "ay_world", "az_world") if c in df.columns]
         world_gyro = [c for c in ("gx_world", "gy_world", "gz_world") if c in df.columns]
         if not world_acc and not world_gyro:
-            log.info("No world-frame columns in %s/%s — skipping world-frame plot", section_dir.name, sensor)
+            log.info("No world-frame columns in %s/%s — skipping", section_dir.name, sensor)
             continue
 
         ts = _ts_s(df)
@@ -380,7 +330,7 @@ def plot_calibration_world_frame(
                 x, y = filter_valid_plot_xy(ts, vals)
                 ax.plot(x, y, lw=0.8, alpha=0.85, color=axis_colors[col], label=col)
             ax.axhline(_G, color="gray", lw=1.0, ls="--", label=f"+g ({_G} m/s²)")
-            ax.axhline(-_G, color="gray", lw=0.7, ls=":", label=f"−g")
+            ax.axhline(-_G, color="gray", lw=0.7, ls=":", label="−g")
             ax.axhline(0, color="black", lw=0.4, ls=":")
             ax.set_ylabel("World-frame acc (m/s²)")
             ax.legend(fontsize=8, loc="upper right", ncol=2)
@@ -411,158 +361,124 @@ def plot_calibration_world_frame(
 
 
 # ---------------------------------------------------------------------------
-# Plot 4: Method comparison (all_methods.json)
+# Plot 4: Protocol detection overview
 # ---------------------------------------------------------------------------
 
-def plot_calibration_methods(
+def plot_calibration_protocol(
     section_dir: Path,
-) -> Path | None:
-    """Bar chart comparison of all calibration methods from ``all_methods.json``.
+    *,
+    sensors: list[str] | None = None,
+) -> list[Path]:
+    """Protocol-detection overview per sensor.
 
-    Shows gravity residuals and forward confidence per method/sensor.
+    For each sensor shows the acc norm with annotated regions:
+    - Opening pre-tap static (bias estimation window)
+    - Tap cluster
+    - Opening post-tap static
+    - Mount transition gap (Arduino only)
+    - Alignment window (post-mount for Arduino, opening for Sporsa)
 
     Output
     ------
-    ``calibrated/methods_comparison.png``
+    ``calibrated/<sensor>_protocol.png``
     """
-    data = _load_all_methods_json(section_dir)
-    if data is None:
-        return None
+    cal_data = _load_calibration_json(section_dir)
+    if not cal_data:
+        log.warning("No calibration.json found in %s — skipping protocol plot", section_dir.name)
+        return []
 
-    methods_data: dict = data.get("methods", {})
-    selected_method: str = data.get("selected_method", "")
-    method_names = list(methods_data.keys())
-    if not method_names:
-        return None
+    selected = sensors or list(_SENSORS)
+    out_paths: list[Path] = []
+    cal_dir = section_dir / "calibrated"
 
-    n_methods = len(method_names)
-    sensors = list(_SENSORS)
-    bar_x = np.arange(n_methods)
-    bar_w = 0.35
+    opening_seq = cal_data.get("opening_sequence") or {}
+    alignment_block = cal_data.get("alignment", {})
+    protocol_detected = cal_data.get("protocol_detected", False)
 
-    n_rows = 2
-    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4 * n_rows))
-    fig.suptitle(f"{section_dir.name} — calibration method comparison", fontsize=12)
+    for sensor in selected:
+        raw_csv = section_dir / f"{sensor}.csv"
+        if not raw_csv.exists():
+            continue
+        df = read_csv(raw_csv)
+        if "timestamp" not in df.columns:
+            continue
 
-    method_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-    _METHOD_DISPLAY = {
-        "gravity_only": "gravity only",
-        "gravity_plus_forward": "gravity + forward",
-        "gravity_plus_mag": "gravity + mag",
-    }
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        ts = df["timestamp"].to_numpy(dtype=float)
+        t0 = ts[0]
+        ts_s = (ts - t0) / 1000.0
 
-    # Row 0: Gravity residuals per sensor
-    for s_idx, sensor in enumerate(sensors):
-        ax = axes[0][s_idx]
-        residuals = [
-            methods_data[m].get(sensor, {}).get("gravity_residual_ms2", float("nan"))
-            for m in method_names
-        ]
-        colors = [
-            method_colors[i % len(method_colors)] for i in range(n_methods)
-        ]
-        bars = ax.bar(bar_x, residuals, color=colors, alpha=0.8)
-        ax.axhline(1.0, color="orange", lw=1.0, ls="--", label="marginal threshold (1.0)")
-        ax.axhline(2.0, color="red", lw=1.0, ls="--", label="poor threshold (2.0)")
-        ax.set_xticks(bar_x)
-        ax.set_xticklabels(
-            [_METHOD_DISPLAY.get(m, m) for m in method_names], rotation=15, ha="right", fontsize=9
+        acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+        if not acc_cols:
+            continue
+        acc_norm = np.sqrt(np.nansum(df[acc_cols].to_numpy(dtype=float) ** 2, axis=1))
+
+        fig, ax = plt.subplots(figsize=(15, 4))
+        color = _SENSOR_COLORS.get(sensor, "steelblue")
+        ax.plot(ts_s, acc_norm, lw=0.7, color=color, alpha=0.8, label="|acc|")
+        ax.axhline(_G, color="gray", lw=0.8, ls="--", label=f"g = {_G} m/s²")
+
+        def _shade(start_ms: float, end_ms: float, facecolor: str, label: str, alpha: float = 0.18) -> None:
+            x0 = (start_ms - t0) / 1000.0
+            x1 = (end_ms - t0) / 1000.0
+            if x0 < x1:
+                ax.axvspan(x0, x1, facecolor=facecolor, alpha=alpha, label=label)
+
+        if protocol_detected and opening_seq:
+            _shade(opening_seq.get("pre_static_start_ms", 0),
+                   opening_seq.get("pre_static_end_ms", 0),
+                   "green", "pre-tap static (bias)")
+            _shade(opening_seq.get("post_static_start_ms", 0),
+                   opening_seq.get("post_static_end_ms", 0),
+                   "lime", "post-tap static")
+
+            # Mark tap peaks
+            tap_times_ms = opening_seq.get("tap_times_ms") or []
+            if tap_times_ms:
+                tap_ts_s: list[float] = []
+                tap_vals: list[float] = []
+                for tap_ms in tap_times_ms:
+                    idx = int(np.abs(ts - float(tap_ms)).argmin())
+                    tap_ts_s.append((ts[idx] - t0) / 1000.0)
+                    tap_vals.append(float(acc_norm[idx]))
+                ax.scatter(tap_ts_s, tap_vals, color="red", s=25, zorder=5, label="taps")
+            else:
+                tap_indices = opening_seq.get("tap_cluster", [])
+                if tap_indices:
+                    tap_ts_s = [(ts[i] - t0) / 1000.0 for i in tap_indices if 0 <= i < len(ts)]
+                    tap_vals = [acc_norm[i] for i in tap_indices if 0 <= i < len(acc_norm)]
+                    ax.scatter(tap_ts_s, tap_vals, color="red", s=25, zorder=5, label="taps")
+
+        # Alignment window
+        aln = alignment_block.get(sensor, {})
+        win_start = aln.get("alignment_window_start_ms")
+        win_end = aln.get("alignment_window_end_ms")
+        if win_start is not None and win_end is not None and win_end > win_start:
+            _shade(win_start, win_end, "blue", "alignment window", alpha=0.15)
+
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("|acc| (m/s²)")
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.2, lw=0.4)
+        ax.legend(fontsize=8, loc="upper right", ncol=2)
+
+        yaw_src = aln.get("yaw_source", "?")
+        yaw_conf = aln.get("yaw_confidence", 0.0)
+        residual = aln.get("gravity_residual_ms2", float("nan"))
+        detected_str = "detected" if protocol_detected else "NOT detected"
+        ax.set_title(
+            f"{section_dir.name} / {sensor} — protocol {detected_str}  "
+            f"| yaw={yaw_src} ({yaw_conf:.2f})  residual={residual:.3f} m/s²"
         )
-        ax.set_ylabel("Gravity residual (m/s²)")
-        ax.set_title(f"{sensor} — gravity residual (lower = better)")
-        ax.legend(fontsize=7)
-        ax.grid(axis="y", alpha=0.3)
-        for bar, v, m in zip(bars, residuals, method_names):
-            if np.isfinite(v):
-                label = f"{v:.3f}"
-                if m == selected_method:
-                    label += " ★"
-                ax.text(bar.get_x() + bar.get_width() / 2, v + 0.02, label,
-                        ha="center", va="bottom", fontsize=8,
-                        fontweight="bold" if m == selected_method else "normal")
 
-    # Row 1: Alignment confidence (forward / mag) + mag field norm secondary axis
-    ax_fwd = axes[1][0]
-    for i, method in enumerate(method_names):
-        fwd_confs = [
-            methods_data[method].get(s, {}).get("forward_confidence", 0.0)
-            for s in sensors
-        ]
-        x_pos = bar_x[i] + np.array([-bar_w / 2, bar_w / 2])
-        for j, (sensor, fc) in enumerate(zip(sensors, fwd_confs)):
-            ax_fwd.bar(x_pos[j], fc, width=bar_w * 0.9,
-                       color=_SENSOR_COLORS.get(sensor, "gray"), alpha=0.8,
-                       label=sensor if i == 0 else "_nolegend_")
-        # Overlay mag field norm for gravity_plus_mag method.
-        if method == "gravity_plus_mag":
-            for sensor in sensors:
-                mag_norm = methods_data[method].get(sensor, {}).get("mag_field_norm")
-                if mag_norm is not None:
-                    ax_fwd.annotate(
-                        f"|B|={mag_norm:.1f}",
-                        xy=(bar_x[i], 0.02), fontsize=6, ha="center", va="bottom",
-                        color="#7f7f7f",
-                    )
-                    break
-    ax_fwd.axhline(0.3, color="orange", lw=1.0, ls="--", label="min threshold (0.3)")
-    ax_fwd.set_xticks(bar_x)
-    ax_fwd.set_xticklabels(
-        [_METHOD_DISPLAY.get(m, m) for m in method_names], rotation=15, ha="right", fontsize=9
-    )
-    ax_fwd.set_ylabel("Alignment confidence [0–1]")
-    ax_fwd.set_title("Alignment confidence (forward / mag)")
-    ax_fwd.legend(fontsize=8)
-    ax_fwd.set_ylim(0, 1.05)
-    ax_fwd.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        out_path = cal_dir / f"{sensor}_protocol.png"
+        fig.savefig(out_path, dpi=120)
+        plt.close(fig)
+        out_paths.append(out_path)
+        log.info("Plot written: %s", project_relative_path(out_path))
 
-    # Quality labels
-    ax_q = axes[1][1]
-    ax_q.axis("off")
-    col_headers = ["Method", "Selected"] + sensors
-    cell_data = []
-    for method in method_names:
-        row_data = [_METHOD_DISPLAY.get(method, method), "★" if method == selected_method else ""]
-        for sensor in sensors:
-            q = methods_data[method].get(sensor, {}).get("quality", "?")
-            fb = methods_data[method].get(sensor, {}).get("fallback_used", False)
-            mag_tags = methods_data[method].get(sensor, {}).get("quality_tags", [])
-            extra = ""
-            if fb:
-                extra = " ⚠"
-            elif "mag_yaw_used" in mag_tags:
-                extra = " [mag]"
-            elif "mag_fallback_to_pca" in mag_tags:
-                extra = " (pca)"
-            row_data.append(f"{q}{extra}")
-        cell_data.append(row_data)
-
-    table = ax_q.table(
-        cellText=cell_data,
-        colLabels=col_headers,
-        loc="center",
-        cellLoc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.2, 1.8)
-    _quality_bg = {"good": "#d4edda", "marginal": "#fff3cd", "poor": "#f8d7da"}
-    for (row, col), cell in table.get_celld().items():
-        if row == 0:
-            cell.set_facecolor("#e8e8e8")
-        elif col >= 2:
-            text = cell.get_text().get_text()
-            for q, bg in _quality_bg.items():
-                if q in text:
-                    cell.set_facecolor(bg)
-                    break
-    ax_q.set_title("Quality summary")
-
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    out_path = section_dir / "calibrated" / "methods_comparison.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Plot written: %s", project_relative_path(out_path))
-    return out_path
+    return out_paths
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +497,7 @@ def plot_calibration_stage(
     - ``<sensor>_axes_comparison.png``          — per-axis before/after
     - ``calibration_parameters.png``            — biases + rotation matrix
     - ``<sensor>_world_frame.png``              — world-frame signals
-    - ``methods_comparison.png``                — method comparison (if all_methods.json present)
+    - ``<sensor>_protocol.png``                 — protocol detection overview
     """
     section_dir = _resolve_section_dir(target)
     out_paths: list[Path] = []
@@ -604,11 +520,9 @@ def plot_calibration_stage(
         log.warning("World-frame plot failed for %s: %s", section_dir.name, exc)
 
     try:
-        p = plot_calibration_methods(section_dir)
-        if p:
-            out_paths.append(p)
+        out_paths += plot_calibration_protocol(section_dir, sensors=sensors)
     except Exception as exc:
-        log.warning("Methods comparison plot failed for %s: %s", section_dir.name, exc)
+        log.warning("Protocol plot failed for %s: %s", section_dir.name, exc)
 
     return out_paths
 
@@ -634,7 +548,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--plot",
-        choices=["all", "raw_vs_cal", "parameters", "world_frame", "methods"],
+        choices=["all", "raw_vs_cal", "parameters", "world_frame", "protocol"],
         default="all",
         help="Which plot(s) to generate (default: all).",
     )
@@ -651,7 +565,7 @@ def main(argv: list[str] | None = None) -> None:
         "raw_vs_cal": lambda: plot_calibration_raw_vs_calibrated(section_dir, sensors=args.sensors),
         "parameters": lambda: [plot_calibration_parameters(section_dir, sensors=args.sensors)],
         "world_frame": lambda: plot_calibration_world_frame(section_dir, sensors=args.sensors),
-        "methods": lambda: [plot_calibration_methods(section_dir)],
+        "protocol": lambda: plot_calibration_protocol(section_dir, sensors=args.sensors),
         "all": lambda: plot_calibration_stage(section_dir, sensors=args.sensors),
     }
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,6 +13,15 @@ import pandas as pd
 from scipy.signal import butter, filtfilt
 
 from common.paths import read_csv
+from .segments import (
+    CALIBRATION_USAGE_FULL_STREAM,
+    CALIBRATION_USAGE_ONLY,
+    SegmentSelection,
+    build_segment_selection,
+    calibration_segments_to_windows_seconds,
+    detect_calibration_segments_for_stream,
+)
+from .signals import build_activity_signal as build_sync_activity_signal
 
 # ---------------------------------------------------------------------------
 # Stream utilities
@@ -230,6 +239,10 @@ class AlignmentSeries:
     timestamps_seconds: np.ndarray
     signal: np.ndarray
     sample_rate_hz: float
+    valid_mask: np.ndarray = field(default_factory=lambda: np.asarray([], dtype=bool))
+    segment_mask: np.ndarray = field(default_factory=lambda: np.asarray([], dtype=bool))
+    segment_count: int = 0
+    signal_mode: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -262,49 +275,37 @@ def _zscore(signal: np.ndarray) -> np.ndarray:
 def build_activity_signal(
     df: pd.DataFrame,
     *,
+    signal_mode: str | None = None,
     use_acc: bool = True,
-    use_gyro: bool = True,
+    use_gyro: bool = False,
     use_mag: bool = False,
     differentiate: bool = True,
 ) -> np.ndarray:
     """Build a single orientation-invariant activity signal from IMU data."""
-    base = add_vector_norms(df)
-    components: list[np.ndarray] = []
-
-    def _append_if_selected(flag: bool, name: str) -> None:
-        if not flag:
-            return
-        col = f"{name}_norm"
-        if col not in base.columns:
-            return
-        values = base[col].to_numpy(dtype=float)
-        if np.isfinite(values).any():
-            components.append(values)
-
-    _append_if_selected(use_acc, "acc")
-    _append_if_selected(use_gyro, "gyro")
-    _append_if_selected(use_mag, "mag")
-
-    if not components:
-        raise ValueError("No valid activity channels selected for alignment.")
-
-    stacked = np.vstack([_zscore(c) for c in components])
-    signal = np.nanmean(stacked, axis=0)
-
-    if differentiate and signal.size > 1:
-        signal = np.diff(signal, prepend=signal[0])
-    return _zscore(signal)
+    signal, _mode = build_sync_activity_signal(
+        df,
+        vector_axes=VECTOR_AXES,
+        signal_mode=signal_mode,
+        use_acc=use_acc,
+        use_gyro=use_gyro,
+        use_mag=use_mag,
+        differentiate=differentiate,
+    )
+    return signal
 
 
 def build_alignment_series(
     df: pd.DataFrame,
     *,
     sample_rate_hz: float,
+    signal_mode: str | None = None,
     use_acc: bool = True,
-    use_gyro: bool = True,
+    use_gyro: bool = False,
     use_mag: bool = False,
     differentiate: bool = True,
     lowpass_cutoff_hz: float | None = None,
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
+    segment_aware: bool = False,
 ) -> AlignmentSeries:
     """Resample one stream and derive its 1D activity-over-time signal."""
     if sample_rate_hz <= 0:
@@ -316,23 +317,47 @@ def build_alignment_series(
             timestamps_seconds=np.asarray([], dtype=float),
             signal=np.asarray([], dtype=float),
             sample_rate_hz=float(sample_rate_hz),
+            valid_mask=np.asarray([], dtype=bool),
+            segment_mask=np.asarray([], dtype=bool),
+            segment_count=0,
+            signal_mode=signal_mode or "legacy",
         )
 
     if lowpass_cutoff_hz is not None:
         resampled = lowpass_filter(resampled, lowpass_cutoff_hz, sample_rate_hz)
 
-    signal = build_activity_signal(
+    signal, resolved_signal_mode = build_sync_activity_signal(
         resampled,
+        vector_axes=VECTOR_AXES,
+        signal_mode=signal_mode,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         differentiate=differentiate,
     )
     ts_sec = pd.to_numeric(resampled["timestamp"], errors="coerce").to_numpy(dtype=float) / 1000.0
+    effective_segment_aware = bool(segment_aware or calibration_usage_strategy == CALIBRATION_USAGE_ONLY)
+    detected_segments = (
+        detect_calibration_segments_for_stream(df, sample_rate_hz=sample_rate_hz)
+        if effective_segment_aware
+        else []
+    )
+    windows_seconds = calibration_segments_to_windows_seconds(df, detected_segments)
+    selection: SegmentSelection = build_segment_selection(
+        ts_sec,
+        sample_rate_hz=sample_rate_hz,
+        segment_windows_seconds=windows_seconds,
+        calibration_usage_strategy=calibration_usage_strategy,
+        segment_aware=effective_segment_aware,
+    )
     return AlignmentSeries(
         timestamps_seconds=ts_sec,
         signal=signal,
         sample_rate_hz=float(sample_rate_hz),
+        valid_mask=selection.valid_mask,
+        segment_mask=selection.segment_mask,
+        segment_count=selection.segment_count,
+        signal_mode=resolved_signal_mode,
     )
 
 
@@ -348,12 +373,23 @@ def _fft_correlate_full(reference_signal: np.ndarray, target_signal: np.ndarray)
     return corr[:n]
 
 
+def _bool_mask(mask: np.ndarray | None, size: int) -> np.ndarray:
+    if mask is None:
+        return np.ones(size, dtype=bool)
+    out = np.asarray(mask, dtype=bool)
+    if out.size != size:
+        raise ValueError(f"Mask length {out.size} does not match signal length {size}.")
+    return out
+
+
 def estimate_lag(
     reference_signal: np.ndarray,
     target_signal: np.ndarray,
     *,
     max_lag_samples: int | None = None,
     min_overlap_samples: int = 10,
+    reference_valid_mask: np.ndarray | None = None,
+    target_valid_mask: np.ndarray | None = None,
 ) -> tuple[int, float]:
     """Estimate integer lag maximizing correlation score."""
     ref = np.asarray(reference_signal, dtype=float)
@@ -363,10 +399,14 @@ def estimate_lag(
     if n_ref == 0 or n_tgt == 0:
         return 0, float("-inf")
 
-    corr = _fft_correlate_full(ref, tgt)
-    lags = np.arange(-(n_tgt - 1), n_ref, dtype=int)
+    ref_mask = _bool_mask(reference_valid_mask, n_ref)
+    tgt_mask = _bool_mask(target_valid_mask, n_tgt)
+    ref_masked = np.where(ref_mask & np.isfinite(ref), ref, 0.0)
+    tgt_masked = np.where(tgt_mask & np.isfinite(tgt), tgt, 0.0)
 
-    overlap = np.minimum(n_ref, n_tgt + lags) - np.maximum(0, lags)
+    corr = _fft_correlate_full(ref_masked, tgt_masked)
+    lags = np.arange(-(n_tgt - 1), n_ref, dtype=int)
+    overlap = _fft_correlate_full(ref_mask.astype(float), tgt_mask.astype(float))
     valid = overlap >= max(1, int(min_overlap_samples))
     if max_lag_samples is not None:
         valid &= np.abs(lags) <= int(max_lag_samples)
@@ -384,7 +424,9 @@ def estimate_offset_from_series(
     target_series: AlignmentSeries,
     *,
     max_lag_seconds: float = 30.0,
-) -> OffsetEstimate:
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
+    return_diagnostics: bool = False,
+) -> OffsetEstimate | tuple[OffsetEstimate, dict[str, Any]]:
     """Estimate SDA coarse offset from two prepared alignment series."""
     if reference_series.signal.size == 0 or target_series.signal.size == 0:
         raise ValueError("Alignment signals must be non-empty.")
@@ -397,18 +439,39 @@ def estimate_offset_from_series(
         reference_series.signal,
         target_series.signal,
         max_lag_samples=max_lag_samples,
+        reference_valid_mask=reference_series.valid_mask,
+        target_valid_mask=target_series.valid_mask,
     )
     lag_seconds = float(lag_samples) / sample_rate_hz
     ref_start = float(reference_series.timestamps_seconds[0])
     tgt_start = float(target_series.timestamps_seconds[0])
     offset_seconds = (ref_start - tgt_start) + lag_seconds
-    return OffsetEstimate(
+    estimate = OffsetEstimate(
         lag_samples=int(lag_samples),
         lag_seconds=float(lag_seconds),
         offset_seconds=float(offset_seconds),
         score=float(score),
         sample_rate_hz=sample_rate_hz,
     )
+    if not return_diagnostics:
+        return estimate
+    diagnostics = {
+        **_segment_selection_summary(
+            reference_series,
+            target_series,
+            calibration_usage_strategy=calibration_usage_strategy,
+        ),
+        "signal_mode": reference_series.signal_mode,
+        "accepted_windows": 0,
+        "rejected_windows": 0,
+        "anchor_count": 1,
+        "local_corr_mean": None,
+        "local_corr_median": None,
+        "drift_r2": None,
+        "residual_summary": None,
+        "fallback_used": False,
+    }
+    return estimate, diagnostics
 
 
 def estimate_offset(
@@ -417,35 +480,47 @@ def estimate_offset(
     *,
     sample_rate_hz: float = 50.0,
     max_lag_seconds: float = 30.0,
+    signal_mode: str | None = None,
     use_acc: bool = True,
-    use_gyro: bool = True,
+    use_gyro: bool = False,
     use_mag: bool = False,
     differentiate: bool = True,
     lowpass_cutoff_hz: float | None = None,
-) -> OffsetEstimate:
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
+    segment_aware: bool = False,
+    return_diagnostics: bool = False,
+) -> OffsetEstimate | tuple[OffsetEstimate, dict[str, Any]]:
     """Estimate SDA coarse offset directly from input dataframes."""
     ref_series = build_alignment_series(
         reference_df,
         sample_rate_hz=sample_rate_hz,
+        signal_mode=signal_mode,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         differentiate=differentiate,
         lowpass_cutoff_hz=lowpass_cutoff_hz,
+        calibration_usage_strategy=calibration_usage_strategy,
+        segment_aware=segment_aware,
     )
     tgt_series = build_alignment_series(
         target_df,
         sample_rate_hz=sample_rate_hz,
+        signal_mode=signal_mode,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         differentiate=differentiate,
         lowpass_cutoff_hz=lowpass_cutoff_hz,
+        calibration_usage_strategy=calibration_usage_strategy,
+        segment_aware=segment_aware,
     )
     return estimate_offset_from_series(
         reference_series=ref_series,
         target_series=tgt_series,
         max_lag_seconds=max_lag_seconds,
+        calibration_usage_strategy=calibration_usage_strategy,
+        return_diagnostics=return_diagnostics,
     )
 
 
@@ -485,6 +560,26 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a_c, b_c) / (norm_a * norm_b))
 
 
+def _masked_ncc(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    a_valid: np.ndarray | None = None,
+    b_valid: np.ndarray | None = None,
+    min_valid_fraction: float = 0.0,
+) -> tuple[float, float]:
+    """Return (score, valid_fraction) for two equal-length windows."""
+    if a.shape != b.shape:
+        raise ValueError("Masked NCC requires equal-length arrays.")
+    a_mask = _bool_mask(a_valid, a.size).reshape(a.shape)
+    b_mask = _bool_mask(b_valid, b.size).reshape(b.shape)
+    valid = a_mask & b_mask & np.isfinite(a) & np.isfinite(b)
+    valid_fraction = float(valid.mean()) if valid.size else 0.0
+    if valid.sum() < 3 or valid_fraction < float(min_valid_fraction):
+        return float("-inf"), valid_fraction
+    return _ncc(a[valid], b[valid]), valid_fraction
+
+
 def _windowed_lag_refinement(
     reference_series: AlignmentSeries,
     target_series: AlignmentSeries,
@@ -494,7 +589,8 @@ def _windowed_lag_refinement(
     window_step_seconds: float,
     local_search_seconds: float,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    min_valid_fraction: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     ref_signal = reference_series.signal
     tgt_signal = target_series.signal
     ref_ts = reference_series.timestamps_seconds
@@ -505,7 +601,7 @@ def _windowed_lag_refinement(
     n_tgt = tgt_signal.size
     if n_ref == 0 or n_tgt == 0:
         empty = np.asarray([], dtype=float)
-        return empty, empty, empty, empty
+        return empty, empty, empty, empty, {"accepted_windows": 0, "rejected_windows": 0}
 
     window_n = max(20, int(round(float(window_seconds) * sample_rate_hz)))
     step_n = max(5, int(round(float(window_step_seconds) * sample_rate_hz)))
@@ -513,7 +609,7 @@ def _windowed_lag_refinement(
     half = window_n // 2
     if n_ref < window_n:
         empty = np.asarray([], dtype=float)
-        return empty, empty, empty, empty
+        return empty, empty, empty, empty, {"accepted_windows": 0, "rejected_windows": 0}
 
     # NOTE: These times must be expressed in the *target* clock domain because the
     # subsequent drift fit models offset(t_target) as a function of target time.
@@ -521,6 +617,9 @@ def _windowed_lag_refinement(
     offsets: list[float] = []
     scores: list[float] = []
     lags: list[float] = []
+    rejected_windows = 0
+    ref_valid = _bool_mask(reference_series.valid_mask, n_ref)
+    tgt_valid = _bool_mask(target_series.valid_mask, n_tgt)
 
     for center in range(half, n_ref - half, step_n):
         left = center - half
@@ -543,12 +642,21 @@ def _windowed_lag_refinement(
             if tgt_win.size != ref_win.size:
                 continue
 
-            score = _ncc(ref_win, tgt_win)
+            score, valid_fraction = _masked_ncc(
+                ref_win,
+                tgt_win,
+                a_valid=ref_valid[left:right],
+                b_valid=tgt_valid[t_left:t_right],
+                min_valid_fraction=min_valid_fraction,
+            )
+            if not np.isfinite(score):
+                continue
             if score > best_score:
                 best_score = score
                 best_lag = lag
 
         if best_lag is None or best_score < min_window_score:
+            rejected_windows += 1
             continue
 
         tgt_idx = center - best_lag
@@ -567,6 +675,10 @@ def _windowed_lag_refinement(
         np.asarray(offsets, dtype=float),
         np.asarray(scores, dtype=float),
         np.asarray(lags, dtype=float),
+        {
+            "accepted_windows": len(target_times),
+            "rejected_windows": rejected_windows,
+        },
     )
 
 
@@ -582,7 +694,8 @@ def _adaptive_windowed_refinement(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_points_for_drift: int = 3,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    min_valid_fraction: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Causal windowed lag refinement that updates the running model after each accepted window.
 
     Unlike :func:`_windowed_lag_refinement`, which uses the same global coarse lag for
@@ -613,7 +726,7 @@ def _adaptive_windowed_refinement(
     n_tgt = tgt_signal.size
     if n_ref == 0 or n_tgt == 0:
         empty = np.asarray([], dtype=float)
-        return empty, empty, empty
+        return empty, empty, empty, {"accepted_windows": 0, "rejected_windows": 0}
 
     window_n = max(20, int(round(float(window_seconds) * sample_rate_hz)))
     step_n = max(5, int(round(float(window_step_seconds) * sample_rate_hz)))
@@ -622,7 +735,7 @@ def _adaptive_windowed_refinement(
 
     if n_ref < window_n:
         empty = np.asarray([], dtype=float)
-        return empty, empty, empty
+        return empty, empty, empty, {"accepted_windows": 0, "rejected_windows": 0}
 
     # Running model — seeded from opening calibration, updated as windows accumulate.
     current_offset = float(initial_offset_seconds)
@@ -631,6 +744,9 @@ def _adaptive_windowed_refinement(
     target_times: list[float] = []
     offsets: list[float] = []
     scores: list[float] = []
+    rejected_windows = 0
+    ref_valid = _bool_mask(reference_series.valid_mask, n_ref)
+    tgt_valid = _bool_mask(target_series.valid_mask, n_tgt)
 
     for center in range(half, n_ref - half, step_n):
         t_ref_center = float(ref_ts[center])
@@ -665,12 +781,21 @@ def _adaptive_windowed_refinement(
             tgt_win = tgt_signal[t_left:t_right]
             if tgt_win.size != ref_win.size:
                 continue
-            score = _ncc(ref_win, tgt_win)
+            score, valid_fraction = _masked_ncc(
+                ref_win,
+                tgt_win,
+                a_valid=ref_valid[left:right],
+                b_valid=tgt_valid[t_left:t_right],
+                min_valid_fraction=min_valid_fraction,
+            )
+            if not np.isfinite(score):
+                continue
             if score > best_score:
                 best_score = score
                 best_lag = lag
 
         if best_lag is None or best_score < min_window_score:
+            rejected_windows += 1
             continue
 
         tgt_idx = center - best_lag
@@ -702,6 +827,10 @@ def _adaptive_windowed_refinement(
         np.asarray(target_times, dtype=float),
         np.asarray(offsets, dtype=float),
         np.asarray(scores, dtype=float),
+        {
+            "accepted_windows": len(target_times),
+            "rejected_windows": rejected_windows,
+        },
     )
 
 
@@ -737,6 +866,64 @@ def _fit_offset_drift(
     return float(intercept), float(slope), float(r2)
 
 
+def _residual_summary(
+    target_times_sec: np.ndarray,
+    offsets_sec: np.ndarray,
+    *,
+    intercept: float,
+    slope: float,
+    target_origin_seconds: float,
+) -> dict[str, float] | None:
+    if target_times_sec.size == 0 or offsets_sec.size == 0:
+        return None
+    x = np.asarray(target_times_sec, dtype=float) - float(target_origin_seconds)
+    y = np.asarray(offsets_sec, dtype=float)
+    residuals = y - (float(intercept) + float(slope) * x)
+    abs_res = np.abs(residuals)
+    return {
+        "mean": float(np.mean(residuals)),
+        "std": float(np.std(residuals)),
+        "mae": float(np.mean(abs_res)),
+        "median_abs": float(np.median(abs_res)),
+        "max_abs": float(np.max(abs_res)),
+    }
+
+
+def _segment_selection_summary(
+    reference_series: AlignmentSeries,
+    target_series: AlignmentSeries,
+    *,
+    calibration_usage_strategy: str,
+) -> dict[str, Any]:
+    ref_valid = _bool_mask(reference_series.valid_mask, reference_series.signal.size)
+    tgt_valid = _bool_mask(target_series.valid_mask, target_series.signal.size)
+    sample_rate_hz = float(reference_series.sample_rate_hz) if reference_series.sample_rate_hz > 0 else 0.0
+    usable_duration = float(min(ref_valid.sum(), tgt_valid.sum()) / sample_rate_hz) if sample_rate_hz > 0 else 0.0
+    ref_segment_count = int(reference_series.segment_count)
+    tgt_segment_count = int(target_series.segment_count)
+    segment_aware_used = bool(
+        calibration_usage_strategy != CALIBRATION_USAGE_FULL_STREAM
+        and (reference_series.segment_mask.any() or target_series.segment_mask.any())
+    )
+    return {
+        "calibration_usage_strategy": calibration_usage_strategy,
+        "segment_aware_used": segment_aware_used,
+        "segments_detected": {
+            "reference": ref_segment_count,
+            "target": tgt_segment_count,
+        },
+        "percentage_removed": {
+            "reference": float(100.0 * (1.0 - ref_valid.mean())) if ref_valid.size else 0.0,
+            "target": float(100.0 * (1.0 - tgt_valid.mean())) if tgt_valid.size else 0.0,
+        },
+        "percentage_used": {
+            "reference": float(100.0 * ref_valid.mean()) if ref_valid.size else 0.0,
+            "target": float(100.0 * tgt_valid.mean()) if tgt_valid.size else 0.0,
+        },
+        "usable_duration_seconds": usable_duration,
+    }
+
+
 def estimate_sync_model(
     reference_df: pd.DataFrame,
     target_df: pd.DataFrame,
@@ -750,39 +937,53 @@ def estimate_sync_model(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+    min_valid_fraction: float = 0.5,
+    signal_mode: str | None = None,
     use_acc: bool = True,
-    use_gyro: bool = True,
+    use_gyro: bool = False,
     use_mag: bool = False,
     lowpass_cutoff_hz: float | None = None,
-) -> SyncModel:
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
+    segment_aware: bool = False,
+    return_diagnostics: bool = False,
+) -> SyncModel | tuple[SyncModel, dict[str, Any]]:
     """Estimate complete synchronization model: coarse SDA lag + LIDA-style linear drift fit."""
     ref_series = build_alignment_series(
         reference_df,
         sample_rate_hz=sample_rate_hz,
+        signal_mode=signal_mode,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         lowpass_cutoff_hz=lowpass_cutoff_hz,
+        calibration_usage_strategy=calibration_usage_strategy,
+        segment_aware=segment_aware,
     )
     tgt_series = build_alignment_series(
         target_df,
         sample_rate_hz=sample_rate_hz,
+        signal_mode=signal_mode,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         lowpass_cutoff_hz=lowpass_cutoff_hz,
+        calibration_usage_strategy=calibration_usage_strategy,
+        segment_aware=segment_aware,
     )
     if ref_series.signal.size == 0 or tgt_series.signal.size == 0:
         raise ValueError("Cannot estimate sync model from empty streams.")
 
-    coarse: OffsetEstimate = estimate_offset_from_series(
+    coarse_result = estimate_offset_from_series(
         reference_series=ref_series,
         target_series=tgt_series,
         max_lag_seconds=max_lag_seconds,
+        calibration_usage_strategy=calibration_usage_strategy,
+        return_diagnostics=True,
     )
+    coarse, coarse_diag = coarse_result
     target_origin_seconds = float(tgt_series.timestamps_seconds[0])
 
-    target_times, offsets, scores, _lags = _windowed_lag_refinement(
+    target_times, offsets, scores, _lags, window_stats = _windowed_lag_refinement(
         reference_series=ref_series,
         target_series=tgt_series,
         coarse_lag_samples=coarse.lag_samples,
@@ -790,8 +991,10 @@ def estimate_sync_model(
         window_step_seconds=window_step_seconds,
         local_search_seconds=local_search_seconds,
         min_window_score=min_window_score,
+        min_valid_fraction=min_valid_fraction,
     )
 
+    fit_r2 = 0.0
     if offsets.size == 0:
         offset_seconds = float(coarse.offset_seconds)
         drift_seconds_per_second = 0.0
@@ -806,7 +1009,7 @@ def estimate_sync_model(
         if fit_r2 < min_fit_r2:
             drift_seconds_per_second = 0.0
 
-    return SyncModel(
+    model = SyncModel(
         reference_csv=str(reference_name),
         target_csv=str(target_name),
         target_time_origin_seconds=target_origin_seconds,
@@ -816,6 +1019,28 @@ def estimate_sync_model(
         max_lag_seconds=float(max_lag_seconds),
         created_at_utc=datetime.now(UTC).isoformat(),
     )
+    if not return_diagnostics:
+        return model
+    diagnostics = {
+        **coarse_diag,
+        "signal_mode": ref_series.signal_mode,
+        "accepted_windows": int(window_stats["accepted_windows"]),
+        "rejected_windows": int(window_stats["rejected_windows"]),
+        "kept_windows": int(window_stats["accepted_windows"]),
+        "anchor_count": int(offsets.size),
+        "local_corr_mean": float(np.mean(scores)) if scores.size else None,
+        "local_corr_median": float(np.median(scores)) if scores.size else None,
+        "drift_r2": float(fit_r2) if offsets.size else None,
+        "residual_summary": _residual_summary(
+            target_times,
+            offsets,
+            intercept=float(offset_seconds),
+            slope=float(drift_seconds_per_second),
+            target_origin_seconds=target_origin_seconds,
+        ),
+        "fallback_used": False,
+    }
+    return model, diagnostics
 
 
 def apply_sync_model(
@@ -880,10 +1105,14 @@ def fit_sync_from_paths(
     local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+    min_valid_fraction: float = 0.5,
+    signal_mode: str | None = None,
     use_acc: bool = True,
-    use_gyro: bool = True,
+    use_gyro: bool = False,
     use_mag: bool = False,
     lowpass_cutoff_hz: float | None = None,
+    calibration_usage_strategy: str = CALIBRATION_USAGE_FULL_STREAM,
+    segment_aware: bool = False,
 ) -> SyncModel:
     """Load two CSV paths and estimate a sync model."""
     reference_path = Path(reference_csv)
@@ -902,10 +1131,14 @@ def fit_sync_from_paths(
         local_search_seconds=local_search_seconds,
         min_window_score=min_window_score,
         min_fit_r2=min_fit_r2,
+        min_valid_fraction=min_valid_fraction,
+        signal_mode=signal_mode,
         use_acc=use_acc,
         use_gyro=use_gyro,
         use_mag=use_mag,
         lowpass_cutoff_hz=lowpass_cutoff_hz,
+        calibration_usage_strategy=calibration_usage_strategy,
+        segment_aware=segment_aware,
     )
 
 
