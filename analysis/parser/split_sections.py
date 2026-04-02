@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import find_sensor_csv, read_csv, section_dir, write_csv
-from common.calibration_segments import CalibrationSegment, find_calibration_segments
+from parser.calibration_segments import CalibrationSegment, find_calibration_segments
 from labels.section_transfer import (
     load_recording_interval_rows_for_transfer,
     write_section_labels_from_recording_intervals,

@@ -7,8 +7,6 @@ Small helpers shared across the thesis analysis pipeline.
   calibration-bounded sections.
 - `csv_schema.py`: a standardized IMU CSV column set plus `load_dataframe()` /
   `write_dataframe()` to keep pipeline stages consistent.
-- `calibration_segments.py`: calibration-sequence detection used by
-  `parser.split_sections` and by sync methods that rely on calibration anchors.
 - `quaternion.py`: quaternion math used by the orientation estimation stage.
 
 

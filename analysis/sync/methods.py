@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, write_csv
-from common.calibration_segments import _acc_norm, _find_peaks, _smooth, find_calibration_segments
+from parser.calibration_segments import _acc_norm, _find_peaks, _smooth, find_calibration_segments
 from common.paths import find_sensor_csv, recording_stage_dir
 
 from .core import (

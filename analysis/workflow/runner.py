@@ -143,45 +143,24 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 result["failed"] += 1
 
     elif stage == "calibration":
-        if cfg.frame_alignment == "auto":
-            from calibration.pipeline import calibrate_recording_sections_all_methods
-            for rec in recordings:
-                try:
-                    cals = calibrate_recording_sections_all_methods(
-                        rec,
-                        sample_rate_hz=cfg.sample_rate_hz,
-                        force=cfg.force,
-                    )
-                    result["ok"] += len(cals)
-                    if not cfg.no_plots:
-                        for section_dir in iter_sections_for_recording(rec):
-                            try:
-                                _run_section_stage_plots(section_dir, "calibration")
-                            except Exception as exc:
-                                log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
-                except Exception as exc:
-                    log.error("calibration failed for %s: %s", rec, exc)
-                    result["failed"] += 1
-        else:
-            from calibration.pipeline import calibrate_recording_sections
-            for rec in recordings:
-                try:
-                    cals = calibrate_recording_sections(
-                        rec,
-                        frame_alignment=cfg.frame_alignment,
-                        sample_rate_hz=cfg.sample_rate_hz,
-                        force=cfg.force,
-                    )
-                    result["ok"] += len(cals)
-                    if not cfg.no_plots:
-                        for section_dir in iter_sections_for_recording(rec):
-                            try:
-                                _run_section_stage_plots(section_dir, "calibration")
-                            except Exception as exc:
-                                log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
-                except Exception as exc:
-                    log.error("calibration failed for %s: %s", rec, exc)
-                    result["failed"] += 1
+        from calibration.pipeline import calibrate_recording_sections
+        for rec in recordings:
+            try:
+                cals = calibrate_recording_sections(
+                    rec,
+                    sample_rate_hz=cfg.sample_rate_hz,
+                    force=cfg.force,
+                )
+                result["ok"] += len(cals)
+                if not cfg.no_plots:
+                    for section_dir in iter_sections_for_recording(rec):
+                        try:
+                            _run_section_stage_plots(section_dir, "calibration")
+                        except Exception as exc:
+                            log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
+            except Exception as exc:
+                log.error("calibration failed for %s: %s", rec, exc)
+                result["failed"] += 1
 
     elif stage == "orientation":
         from orientation.pipeline import process_recording_orientation
@@ -331,7 +310,9 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
 
     for stage in stages:
         log.info("-------------------------------- Stage: %s --------------------------------", stage)
+        
         try:
+            recordings = _collect_recordings(cfg)
             r = _run_stage(stage, cfg, recordings)
         except Exception as exc:
             log.error("Stage %s crashed: %s\n%s", stage, exc, traceback.format_exc())
@@ -339,6 +320,7 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
         summary["stage_results"][stage] = r
         log.info("Stage %s: ok=%d failed=%d", stage, r.get("ok", 0), r.get("failed", 0))
 
+    summary["recordings"] = recordings
     summary["finished_at_utc"] = datetime.now(UTC).isoformat()
 
     # Write run summary.

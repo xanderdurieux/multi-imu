@@ -35,7 +35,6 @@ class WorkflowConfig:
     # Stage options
     sync_method: str = "auto"                        # "sda"|"lida"|"calibration"|"online"|"adaptive"|"auto"
     split_stage: str = "synced"                      # "parsed"|"synced"
-    frame_alignment: str = "auto"                    # "gravity_only"|"gravity_plus_forward"|"auto"
     orientation_filter: str = "auto"                 # "madgwick"|"complementary"|"auto"
     sample_rate_hz: float = 100.0
 
@@ -78,9 +77,6 @@ class WorkflowConfig:
         valid_split = {"parsed", "synced"}
         if self.split_stage not in valid_split:
             errors.append(f"split_stage must be one of {valid_split}, got {self.split_stage!r}")
-        valid_frame = {"gravity_only", "gravity_plus_forward", "auto"}
-        if self.frame_alignment not in valid_frame:
-            errors.append(f"frame_alignment must be one of {valid_frame}")
         valid_orient = {"madgwick", "complementary", "auto"}
         if self.orientation_filter not in valid_orient:
             errors.append(f"orientation_filter must be one of {valid_orient}")

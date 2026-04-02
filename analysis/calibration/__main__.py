@@ -1,10 +1,10 @@
-"""CLI entry point for the calibration stage.
+"""CLI entry point for the protocol-aware calibration stage.
 
 Usage::
 
     python -m calibration <section_name>
-    python -m calibration <section_name> --frame gravity_plus_forward
-    python -m calibration --recording 2026-02-26_r1 --all-sections
+    python -m calibration --recording 2026-02-26_r1
+    python -m calibration --recording 2026-02-26_r1 --force
 """
 
 from __future__ import annotations
@@ -23,7 +23,12 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = argparse.ArgumentParser(
         prog="python -m calibration",
-        description="Estimate and apply IMU calibration for one or more sections.",
+        description=(
+            "Protocol-aware IMU calibration: detects the opening routine "
+            "(static + taps + static), estimates intrinsics from the pre-tap "
+            "static window, and estimates alignment from the first post-mount "
+            "stable window (Arduino) or the opening static window (Sporsa)."
+        ),
     )
     parser.add_argument(
         "section_name",
@@ -33,12 +38,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--recording",
         help="Recording name to calibrate all its sections (e.g. 2026-02-26_r1).",
-    )
-    parser.add_argument(
-        "--frame",
-        default="gravity_only",
-        choices=["gravity_only", "gravity_plus_forward"],
-        help="Frame alignment mode (default: gravity_only).",
     )
     parser.add_argument(
         "--sample-rate-hz",
@@ -51,14 +50,32 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Overwrite existing calibration outputs.",
     )
+    parser.add_argument(
+        "--static-cal",
+        dest="static_cal",
+        default=None,
+        help=(
+            "Path to a static hardware calibration JSON file for the Arduino "
+            "sensor (accelerometer bias/scale + gyroscope bias).  When omitted "
+            "the pipeline looks for data/calibrations/arduino_imu_calibration.json."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    static_cal_path = None
+    if args.static_cal:
+        from pathlib import Path
+        static_cal_path = Path(args.static_cal)
+        if not static_cal_path.exists():
+            print(f"Static calibration file not found: {static_cal_path}", file=sys.stderr)
+            sys.exit(1)
 
     if args.recording:
         results = calibrate_recording_sections(
             args.recording,
-            frame_alignment=args.frame,
             sample_rate_hz=args.sample_rate_hz,
             force=args.force,
+            static_calibration_path=static_cal_path,
         )
         print(f"Calibrated {len(results)} section(s) for recording '{args.recording}'.")
     elif args.section_name:
@@ -73,13 +90,22 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(1)
         cal = calibrate_section(
             section_path,
-            frame_alignment=args.frame,
             sample_rate_hz=args.sample_rate_hz,
             force=args.force,
+            static_calibration_path=static_cal_path,
         )
-        print(f"Quality: {cal.calibration_quality}")
-        if cal.quality_tags:
-            print(f"Tags: {', '.join(cal.quality_tags)}")
+        q = cal.quality.get("overall", "?")
+        print(f"Protocol detected: {cal.protocol_detected}")
+        print(f"Overall quality: {q}")
+        tags = cal.quality.get("tags", [])
+        if tags:
+            print(f"Tags: {', '.join(tags)}")
+        for sensor, alignment in cal.alignment.items():
+            print(
+                f"  {sensor}: yaw_source={alignment.yaw_source}"
+                f"  confidence={alignment.yaw_confidence:.3f}"
+                f"  gravity_residual={alignment.gravity_residual_ms2:.3f} m/s²"
+            )
     else:
         parser.print_help()
         sys.exit(1)

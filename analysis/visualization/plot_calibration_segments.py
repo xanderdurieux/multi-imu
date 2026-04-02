@@ -13,7 +13,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
-from common.calibration_segments import find_calibration_segments
+from parser.calibration_segments import find_calibration_segments
 from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)

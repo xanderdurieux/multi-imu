@@ -214,11 +214,14 @@ def extract_features_for_section(
     # Load calibration quality metadata.
     # ------------------------------------------------------------------
     cal_json = _load_calibration_json(cal_dir / "calibration.json")
-    calibration_quality = str(cal_json.get("calibration_quality", "good"))
+    # Schema v2: quality nested under "quality.overall"; alignment under "alignment.<sensor>"
+    calibration_quality = str(
+        cal_json.get("quality", {}).get("overall", "good")
+    )
     # sync_confidence: try several plausible keys.
     sync_confidence = float(
         cal_json.get("sync_confidence",
-            cal_json.get("sporsa", {}).get("forward_confidence", 1.0)
+            cal_json.get("alignment", {}).get("sporsa", {}).get("yaw_confidence", 1.0)
         )
     )
 
