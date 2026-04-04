@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.paths import iter_sections_for_recording, read_csv, write_csv
+from common.paths import iter_sections_for_recording, project_relative_path, read_csv, write_csv
 from common.quaternion import euler_from_quat
 from .complementary import ComplementaryFilter
 from .ekf import EKFFilter
@@ -275,7 +275,7 @@ def process_section_orientation(
     if all_methods_json.exists() and stats_json.exists() and not force:
         log.info(
             "Orientation already exists for %s — skipping (use force=True to overwrite)",
-            section_dir.name,
+            project_relative_path(section_dir),
         )
         return json.loads(stats_json.read_text(encoding="utf-8"))
 
@@ -285,11 +285,11 @@ def process_section_orientation(
     for sensor in _SENSORS:
         cal_csv = section_dir / "calibrated" / f"{sensor}.csv"
         if not cal_csv.exists():
-            log.warning("Calibrated CSV not found for sensor '%s' in %s", sensor, section_dir.name)
+            log.warning("Calibrated CSV not found for sensor '%s' in %s", sensor, project_relative_path(section_dir))
             continue
         df = read_csv(cal_csv)
         if df.empty:
-            log.warning("Empty calibrated CSV for %s/%s", section_dir.name, sensor)
+            log.warning("Empty calibrated CSV for %s in %s", sensor, project_relative_path(section_dir))
             continue
         sensor_raw[sensor] = df
 
@@ -325,7 +325,7 @@ def process_section_orientation(
                 "Wrote orientation %s/%s → %s (%d rows)",
                 sensor,
                 method,
-                out_csv,
+                project_relative_path(out_csv),
                 len(df_orient),
             )
 

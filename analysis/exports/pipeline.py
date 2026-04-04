@@ -19,7 +19,7 @@ from common.paths import (
 )
 from exports.aggregate import aggregate_calibration_params, aggregate_sync_params
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 # Quality label ordering (higher index = higher quality)
 _QUALITY_ORDER = ["poor", "marginal", "good"]
@@ -60,7 +60,7 @@ def aggregate_features(
 
     root = sections_root()
     if not root.exists():
-        logger.warning("sections_root does not exist: %s", project_relative_path(root))
+        log.warning("sections_root does not exist: %s", project_relative_path(root))
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
@@ -73,18 +73,18 @@ def aggregate_features(
         if recording_names is not None:
             match = any(section_dir.name.startswith(rec) for rec in recording_names)
             if not match:
-                logger.debug("Skipping section %s (not in recording_names)", section_dir.name)
+                log.debug("Skipping section %s (not in recording_names)", section_dir.name)
                 continue
 
         features_csv = section_dir / "features" / "features.csv"
         if not features_csv.exists():
-            logger.debug("No features.csv for section %s", section_dir.name)
+            log.debug("No features.csv for section %s", section_dir.name)
             continue
 
         try:
             df = read_csv(features_csv)
         except Exception as exc:
-            logger.warning("Failed to read %s: %s", project_relative_path(features_csv), exc)
+            log.warning("Failed to read %s: %s", project_relative_path(features_csv), exc)
             continue
 
         # Inject section_id if not present
@@ -92,10 +92,10 @@ def aggregate_features(
             df.insert(0, "section_id", section_dir.name)
 
         frames.append(df)
-        logger.debug("Loaded %d rows from %s", len(df), project_relative_path(features_csv))
+        log.debug("Loaded %d rows from %s", len(df), project_relative_path(features_csv))
 
     if not frames:
-        logger.warning("No feature files found under %s", project_relative_path(root))
+        log.warning("No feature files found under %s", project_relative_path(root))
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
@@ -106,19 +106,19 @@ def aggregate_features(
         valid_labels = set(_QUALITY_ORDER[min_idx:])
         before = len(combined)
         combined = combined[combined["overall_quality_label"].isin(valid_labels)].copy()
-        logger.info(
+        log.info(
             "Quality filter (>= %s): %d → %d rows",
             min_quality_label,
             before,
             len(combined),
         )
     else:
-        logger.warning(
+        log.warning(
             "Column 'overall_quality_label' not found; skipping quality filter"
         )
 
     combined.reset_index(drop=True, inplace=True)
-    logger.info("Aggregated %d rows from %d section(s)", len(combined), len(frames))
+    log.info("Aggregated %d rows from %d section(s)", len(combined), len(frames))
     return combined
 
 
@@ -172,7 +172,7 @@ def export_feature_tables(
         out_path = output_dir / f"{name}.csv"
         write_csv(frame, out_path)
         paths[name] = out_path
-        logger.info(
+        log.info(
             "Wrote %s (%d rows, %d cols)",
             project_relative_path(out_path),
             len(frame),
@@ -185,13 +185,13 @@ def export_feature_tables(
         cal_path = output_dir / "calibration_params.csv"
         cal_df.to_csv(cal_path, index=False)
         paths["calibration_params"] = cal_path
-        logger.info(
+        log.info(
             "Wrote %s (%d sections)",
             project_relative_path(cal_path),
             len(cal_df),
         )
     else:
-        logger.warning("No calibration params found; calibration_params.csv not written")
+        log.warning("No calibration params found; calibration_params.csv not written")
 
     # Sync parameters (one row per recording)
     sync_df = aggregate_sync_params(recording_names)
@@ -199,13 +199,13 @@ def export_feature_tables(
         sync_path = output_dir / "sync_params.csv"
         sync_df.to_csv(sync_path, index=False)
         paths["sync_params"] = sync_path
-        logger.info(
+        log.info(
             "Wrote %s (%d recordings)",
             project_relative_path(sync_path),
             len(sync_df),
         )
     else:
-        logger.warning("No sync params found; sync_params.csv not written")
+        log.warning("No sync params found; sync_params.csv not written")
 
     # Build manifest
     label_dist: dict[str, int] = {}
@@ -230,7 +230,7 @@ def export_feature_tables(
     manifest_path = output_dir / "export_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
     paths["export_manifest"] = manifest_path
-    logger.info("Wrote manifest to %s", project_relative_path(manifest_path))
+    log.info("Wrote manifest to %s", project_relative_path(manifest_path))
 
     return paths, cal_df, sync_df
 
@@ -264,7 +264,7 @@ def run_exports(
 
     manifest_path = output_dir / "export_manifest.json"
     if not force and manifest_path.exists():
-        logger.info(
+        log.info(
             "Export already exists at %s (use force=True to re-run)",
             project_relative_path(output_dir),
         )
@@ -280,7 +280,7 @@ def run_exports(
             _run_eda_safe(existing.get("features_fused"), output_dir)
         return existing
 
-    logger.info(
+    log.info(
         "Running export pipeline (min_quality=%s, recordings=%s)",
         min_quality_label,
         recording_names,
@@ -288,7 +288,7 @@ def run_exports(
 
     df = aggregate_features(recording_names, min_quality_label=min_quality_label)
     if df.empty:
-        logger.warning("No data after aggregation; nothing to export.")
+        log.warning("No data after aggregation; nothing to export.")
         return {}
 
     paths, cal_df, sync_df = export_feature_tables(df, output_dir, recording_names=recording_names)
@@ -298,14 +298,14 @@ def run_exports(
             from visualization.plot_exports import run_eda
             run_eda(df, output_dir)
         except Exception as exc:
-            logger.warning("Feature EDA figure generation failed: %s", exc)
+            log.warning("Feature EDA figure generation failed: %s", exc)
 
         try:
             from visualization.plot_exports import run_calibration_eda, run_sync_eda
             run_calibration_eda(cal_df, output_dir)
             run_sync_eda(sync_df, output_dir)
         except Exception as exc:
-            logger.warning("Params EDA figure generation failed: %s", exc)
+            log.warning("Params EDA figure generation failed: %s", exc)
 
     return paths
 
@@ -320,4 +320,4 @@ def _run_eda_safe(fused_path: Path | None, output_dir: Path) -> None:
         if not df.empty:
             run_eda(df, output_dir)
     except Exception as exc:
-        logger.warning("EDA figure generation failed: %s", exc)
+        log.warning("EDA figure generation failed: %s", exc)

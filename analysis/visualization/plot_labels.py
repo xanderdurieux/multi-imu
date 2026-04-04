@@ -299,6 +299,218 @@ def plot_labels_features(
 
 
 # ---------------------------------------------------------------------------
+# Calibrated stage
+# ---------------------------------------------------------------------------
+
+def plot_labels_calibrated(
+    section_dir: Path,
+    labels: list[LabelRow],
+    *,
+    output_path: Path | None = None,
+    title: str = "",
+) -> Path | None:
+    """Plot acc/gyro norms for the calibrated sensor data with label spans overlaid.
+
+    Returns the saved PNG path, or None if no calibrated data was found.
+    """
+    cal_dir = section_dir / "calibrated"
+    if not cal_dir.is_dir():
+        log.warning("No calibrated directory found under %s", section_dir)
+        return None
+
+    if output_path is None:
+        output_path = cal_dir / "labels_overlay.png"
+
+    return plot_labels_sensor(
+        cal_dir,
+        labels,
+        output_path=output_path,
+        title=title or f"{section_dir.name} — calibrated with label overlay",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Orientation stage
+# ---------------------------------------------------------------------------
+
+_ORIENT_ANGLES = ("yaw_deg", "pitch_deg", "roll_deg")
+_ORIENT_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
+
+
+def plot_labels_orientation(
+    section_dir: Path,
+    labels: list[LabelRow],
+    *,
+    output_path: Path | None = None,
+    title: str = "",
+) -> Path | None:
+    """Plot orientation angles (yaw/pitch/roll) for both sensors with label spans overlaid.
+
+    Returns the saved PNG path, or None if no orientation data was found.
+    """
+    orient_dir = section_dir / "orientation"
+    if not orient_dir.is_dir():
+        log.warning("No orientation directory found under %s", section_dir)
+        return None
+
+    sensor_dfs: dict[str, pd.DataFrame] = {}
+    for sensor in ("sporsa", "arduino"):
+        csv_path = orient_dir / f"{sensor}.csv"
+        if csv_path.exists():
+            try:
+                df = read_csv(csv_path)
+                if "timestamp" in df.columns and any(c in df.columns for c in _ORIENT_ANGLES):
+                    sensor_dfs[sensor] = df
+            except Exception:
+                pass
+
+    if not sensor_dfs:
+        log.warning("No orientation CSVs with angle columns found in %s", orient_dir)
+        return None
+
+    t0_ms = min(
+        float(pd.to_numeric(df["timestamp"], errors="coerce").dropna().iloc[0])
+        for df in sensor_dfs.values()
+    )
+
+    colors = _label_colors(labels)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+
+    for sensor, df in sensor_dfs.items():
+        ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+        ts_s = (ts_ms - t0_ms) / 1000.0
+        sc = _ORIENT_SENSOR_COLORS.get(sensor, "gray")
+        for idx, angle_col in enumerate(_ORIENT_ANGLES):
+            if angle_col not in df.columns:
+                continue
+            y = pd.to_numeric(df[angle_col], errors="coerce").to_numpy(dtype=float)
+            x_plot, y_plot = filter_valid_plot_xy(ts_s, y)
+            if x_plot.size:
+                axes[idx].plot(x_plot, y_plot, lw=0.8, alpha=0.9, color=sc, label=sensor)
+
+    _draw_spans(list(axes), labels, t0_ms, colors)
+
+    for idx, angle_col in enumerate(_ORIENT_ANGLES):
+        axes[idx].set_ylabel(angle_col.replace("_deg", " (deg)"), fontsize=8)
+        axes[idx].grid(alpha=0.2, lw=0.4)
+        sensor_handles, sensor_labels_text = axes[idx].get_legend_handles_labels()
+        all_handles = sensor_handles + _label_patches(colors)
+        all_labels = sensor_labels_text + list(colors.keys())
+        if all_handles:
+            axes[idx].legend(all_handles, all_labels, loc="upper right", fontsize=7, framealpha=0.8)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(title or f"{section_dir.name} — orientation with label overlay", fontsize=10)
+    fig.tight_layout()
+
+    if output_path is None:
+        output_path = orient_dir / "labels_overlay.png"
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+    log.info("Saved orientation label overlay → %s", project_relative_path(output_path))
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Derived stage
+# ---------------------------------------------------------------------------
+
+_DERIVED_PANELS = [
+    ("acc_norm",     "acc norm (m/s²)"),
+    ("gyro_norm",    "gyro norm (°/s)"),
+    ("jerk_norm",    "jerk norm (m/s³)"),
+    ("acc_hf",       "acc HF (m/s²)"),
+]
+_DERIVED_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
+
+
+def plot_labels_derived(
+    section_dir: Path,
+    labels: list[LabelRow],
+    *,
+    output_path: Path | None = None,
+    title: str = "",
+) -> Path | None:
+    """Plot derived signals (acc norm, gyro norm, jerk, …) with label spans overlaid.
+
+    Returns the saved PNG path, or None if no derived data was found.
+    """
+    derived_dir = section_dir / "derived"
+    if not derived_dir.is_dir():
+        log.warning("No derived directory found under %s", section_dir)
+        return None
+
+    sensor_dfs: dict[str, pd.DataFrame] = {}
+    for sensor in ("sporsa", "arduino"):
+        csv_path = derived_dir / f"{sensor}_signals.csv"
+        if csv_path.exists():
+            try:
+                df = read_csv(csv_path)
+                if "timestamp" in df.columns:
+                    sensor_dfs[sensor] = df
+            except Exception:
+                pass
+
+    if not sensor_dfs:
+        log.warning("No derived signal CSVs found in %s", derived_dir)
+        return None
+
+    # Determine which panels have any data
+    available_panels = [
+        (col, ylabel)
+        for col, ylabel in _DERIVED_PANELS
+        if any(col in df.columns for df in sensor_dfs.values())
+    ]
+    if not available_panels:
+        log.warning("No plottable derived columns found in %s", derived_dir)
+        return None
+
+    t0_ms = min(
+        float(pd.to_numeric(df["timestamp"], errors="coerce").dropna().iloc[0])
+        for df in sensor_dfs.values()
+    )
+
+    colors = _label_colors(labels)
+    n_rows = len(available_panels)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(14, max(3, 2.0 * n_rows)), sharex=True)
+    if n_rows == 1:
+        axes = [axes]
+
+    for ax_idx, (col, ylabel) in enumerate(available_panels):
+        ax = axes[ax_idx]
+        for sensor, df in sensor_dfs.items():
+            if col not in df.columns:
+                continue
+            ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+            ts_s = (ts_ms - t0_ms) / 1000.0
+            y = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            x_plot, y_plot = filter_valid_plot_xy(ts_s, y)
+            if x_plot.size:
+                sc = _DERIVED_SENSOR_COLORS.get(sensor, "gray")
+                ax.plot(x_plot, y_plot, lw=0.7, alpha=0.8, color=sc, label=sensor)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.grid(alpha=0.2, lw=0.4)
+        sensor_handles, sensor_labels_text = ax.get_legend_handles_labels()
+        all_handles = sensor_handles + _label_patches(colors)
+        all_labels = sensor_labels_text + list(colors.keys())
+        if all_handles:
+            ax.legend(all_handles, all_labels, loc="upper right", fontsize=7, framealpha=0.8)
+
+    _draw_spans(list(axes), labels, t0_ms, colors)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(title or f"{section_dir.name} — derived signals with label overlay", fontsize=10)
+    fig.tight_layout()
+
+    if output_path is None:
+        output_path = derived_dir / "labels_overlay.png"
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+    log.info("Saved derived label overlay → %s", project_relative_path(output_path))
+    return output_path
+
+
+# ---------------------------------------------------------------------------
 # Label resolution
 # ---------------------------------------------------------------------------
 
@@ -329,6 +541,16 @@ def _infer_labels_path(target_dir: Path) -> Path:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _resolve_section_root(target_dir: Path) -> Path:
+    """Return the section root for *target_dir*, resolving subdirectory references."""
+    secs_root = sections_root()
+    try:
+        rel = target_dir.relative_to(secs_root)
+        return secs_root / rel.parts[0]
+    except ValueError:
+        return target_dir
+
+
 def plot_labels(
     target: str | Path,
     *,
@@ -344,9 +566,12 @@ def plot_labels(
         A recording stage reference (``<recording>/<stage>``), a section
         directory name, or an absolute path to either.
     stage:
-        ``"sensor"`` — acc/gyro norm overlay.
-        ``"features"`` — feature series overlay.
-        ``"auto"`` (default) — sensor if sensor CSVs exist, else features.
+        ``"calibrated"`` — acc/gyro norm overlay for calibrated sensor data.
+        ``"orientation"`` — yaw/pitch/roll overlay for orientation estimates.
+        ``"derived"``     — derived signal overlay (acc norm, gyro norm, jerk, …).
+        ``"sensor"``      — acc/gyro norm overlay on the target directory directly.
+        ``"features"``    — feature series overlay.
+        ``"auto"`` (default) — calibrated if that dir exists, else sensor, else features.
     top_n:
         Number of top-variance features to show in features mode.
     output_path:
@@ -358,31 +583,36 @@ def plot_labels(
     if not labels:
         log.info("No labels at %s — spans will be omitted", labels_path)
 
+    section_root = _resolve_section_root(target_dir)
+
+    if stage == "calibrated":
+        return plot_labels_calibrated(section_root, labels, output_path=output_path)
+
+    if stage == "orientation":
+        return plot_labels_orientation(section_root, labels, output_path=output_path)
+
+    if stage == "derived":
+        return plot_labels_derived(section_root, labels, output_path=output_path)
+
     if stage == "features":
-        use_features = True
-    elif stage == "sensor":
-        use_features = False
-    else:  # auto
-        has_sensors = bool(_load_sensor_dfs(target_dir))
-        use_features = not has_sensors and _resolve_features_csv(target_dir) is not None
-
-    if use_features:
-        # Resolve section root in case target is sections/<name>/features/
-        secs_root = sections_root()
-        try:
-            rel = target_dir.relative_to(secs_root)
-            section_root = secs_root / rel.parts[0]
-        except ValueError:
-            section_root = target_dir
-
         return plot_labels_features(
-            section_root,
-            labels,
-            top_n=top_n,
-            output_path=output_path,
+            section_root, labels, top_n=top_n, output_path=output_path
         )
 
-    return plot_labels_sensor(target_dir, labels, output_path=output_path)
+    if stage == "sensor":
+        return plot_labels_sensor(target_dir, labels, output_path=output_path)
+
+    # auto: try calibrated → sensor → features
+    if (section_root / "calibrated").is_dir():
+        return plot_labels_calibrated(section_root, labels, output_path=output_path)
+    if _load_sensor_dfs(target_dir):
+        return plot_labels_sensor(target_dir, labels, output_path=output_path)
+    if _resolve_features_csv(section_root) is not None:
+        return plot_labels_features(
+            section_root, labels, top_n=top_n, output_path=output_path
+        )
+    log.warning("Could not auto-detect a plottable stage under %s", target_dir)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +636,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--stage",
-        choices=["auto", "sensor", "features"],
+        choices=["auto", "calibrated", "orientation", "derived", "sensor", "features"],
         default="auto",
         help="Stage to visualize (default: auto-detect from directory contents).",
     )

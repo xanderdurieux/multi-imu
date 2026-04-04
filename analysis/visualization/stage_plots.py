@@ -23,20 +23,26 @@ def plot_section_pipeline_stage(section_dir: Path, stage: str) -> None:
     """Plot outputs for one section (calibration, orientation, derived, features)."""
     if stage == "calibration":
         from visualization.plot_calibration import plot_calibration_stage
+        from visualization.plot_labels import plot_labels
 
         plot_calibration_stage(section_dir)
+        plot_labels(section_dir, stage="calibrated")
     elif stage == "orientation":
         from visualization.plot_orientation import plot_orientation_stage
+        from visualization.plot_labels import plot_labels
 
         plot_orientation_stage(section_dir)
+        plot_labels(section_dir, stage="orientation")
     elif stage == "derived":
         from visualization.plot_derived import plot_derived_stage
+        from visualization.plot_labels import plot_labels
 
         plot_derived_stage(section_dir)
+        plot_labels(section_dir, stage="derived")
     elif stage == "features":
         from visualization.plot_features import plot_features_stage
         from visualization.plot_labels import plot_labels
 
         plot_features_stage(section_dir)
-        plot_labels(section_dir, stage="sensor")
+        plot_labels(section_dir, stage="calibrated")
         plot_labels(section_dir, stage="features")

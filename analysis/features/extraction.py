@@ -30,12 +30,17 @@ _EPSILON = 1e-9
 
 
 def _safe_mean(arr: np.ndarray) -> float:
-    v = np.nanmean(arr)
-    return float(v) if np.isfinite(v) else float("nan")
+    clean = arr[np.isfinite(arr)]
+    if len(clean) == 0:
+        return float("nan")
+    return float(np.mean(clean))
 
 
 def _safe_std(arr: np.ndarray) -> float:
-    v = np.nanstd(arr)
+    clean = arr[np.isfinite(arr)]
+    if len(clean) == 0:
+        return float("nan")
+    v = np.std(clean)
     return float(v) if np.isfinite(v) else float("nan")
 
 
@@ -326,6 +331,31 @@ def _event_features(
 # Label features
 # ---------------------------------------------------------------------------
 
+# Priority order for resolving simultaneous overlapping labels.
+# Higher index = higher priority (last entry wins when multiple labels overlap).
+_LABEL_PRIORITY: list[str] = [
+    "calibration_sequence",
+    "helmet_move",
+    "grounded",
+    "riding",
+    "riding_standing",
+    "forest",
+    "uneven_road",
+    "head_movement",
+    "shoulder_check",
+    "accelerating",
+    "cornering",
+    "braking",
+    "sprinting",
+    "sprint_standing",
+    "hard_braking",
+    "swerving",
+    "fall",
+]
+
+_LABEL_PRIORITY_RANK: dict[str, int] = {lbl: i for i, lbl in enumerate(_LABEL_PRIORITY)}
+
+
 def _label_feature(
     labels_df: pd.DataFrame | None,
     window_start_ms: float,
@@ -333,17 +363,18 @@ def _label_feature(
     *,
     containment_threshold: float = 0.5,
 ) -> str:
-    """Return all scenario_labels for the window as a pipe-separated string, or 'unlabeled'.
+    """Return the single highest-priority scenario_label for the window, or 'unlabeled'.
 
     Labeling strategy:
-    1. Compute the containment ratio (overlap / label duration) for every label
+    1. Compute the containment ratio (overlap / window duration) for every label
        that touches the window.
-    2. Include every label whose containment ratio >= *containment_threshold*
-       (i.e., at least half the label falls inside the window). Multiple labels
-       can apply simultaneously (e.g. 'riding_standing' and 'head_movement').
-    3. If no label meets the containment threshold, fall back to the label with
-       the greatest absolute overlap.
-    4. Labels are sorted and joined with '|' so the result is deterministic.
+    2. Keep labels whose containment ratio >= *containment_threshold* (the label
+       covers at least half the window). Using window duration ensures long
+       scenario labels are always captured.
+    3. If no label meets the threshold, fall back to all overlapping labels.
+    4. From the candidate labels, return the single highest-priority label
+       according to ``_LABEL_PRIORITY``. Unknown labels fall back to the one
+       with the greatest absolute overlap.
     """
     if labels_df is None or labels_df.empty:
         return "unlabeled"
@@ -364,14 +395,13 @@ def _label_feature(
         overlapping["end_ms"].clip(upper=window_end_ms)
         - overlapping["start_ms"].clip(lower=window_start_ms)
     )
-    label_dur_ms = (overlapping["end_ms"] - overlapping["start_ms"]).clip(lower=1.0)
-    containment = overlap_ms / label_dur_ms
+    window_dur_ms = max(window_end_ms - window_start_ms, 1.0)
+    containment = overlap_ms / window_dur_ms
 
     well_contained = overlapping[containment >= containment_threshold]
     if well_contained.empty:
-        # Fallback: largest absolute overlap only
-        best_idx = overlap_ms.idxmax()
-        well_contained = overlapping.loc[[best_idx]]
+        well_contained = overlapping
+        overlap_ms = overlap_ms.loc[well_contained.index]
 
     def _row_label(row: pd.Series) -> str:
         if "scenario_label" in row.index and pd.notna(row["scenario_label"]) and str(row["scenario_label"]).strip():
@@ -380,8 +410,20 @@ def _label_feature(
             return str(row["label"])
         return ""
 
-    labels = sorted({_row_label(row) for _, row in well_contained.iterrows()} - {""})
-    return "|".join(labels) if labels else "unlabeled"
+    candidates: list[tuple[str, float]] = []
+    for (idx, row), ov in zip(well_contained.iterrows(), overlap_ms.loc[well_contained.index]):
+        lbl = _row_label(row)
+        if lbl:
+            candidates.append((lbl, float(ov)))
+
+    if not candidates:
+        return "unlabeled"
+
+    # Pick the highest-priority known label; for unknowns use largest overlap.
+    known = [(lbl, ov) for lbl, ov in candidates if lbl in _LABEL_PRIORITY_RANK]
+    if known:
+        return max(known, key=lambda t: _LABEL_PRIORITY_RANK[t[0]])[0]
+    return max(candidates, key=lambda t: t[1])[0]
 
 
 # ---------------------------------------------------------------------------

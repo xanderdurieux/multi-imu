@@ -14,7 +14,7 @@ from common.paths import (
     sections_root,
 )
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 _ALL_SYNC_METHODS = ["sda", "lida", "calibration", "online", "adaptive"]
 
@@ -53,7 +53,7 @@ def aggregate_calibration_params(
     """
     root = sections_root()
     if not root.exists():
-        logger.warning("sections_root does not exist: %s", project_relative_path(root))
+        log.warning("sections_root does not exist: %s", project_relative_path(root))
         return pd.DataFrame()
 
     rows: list[dict] = []
@@ -68,13 +68,13 @@ def aggregate_calibration_params(
 
         cal_json = section_dir / "calibrated" / "calibration.json"
         if not cal_json.exists():
-            logger.debug("No calibration.json for section %s", section_dir.name)
+            log.debug("No calibration.json for section %s", section_dir.name)
             continue
 
         try:
             data = json.loads(cal_json.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to read %s: %s", project_relative_path(cal_json), exc)
+            log.warning("Failed to read %s: %s", project_relative_path(cal_json), exc)
             continue
 
         # Derive recording name from section folder name (strip trailing sN).
@@ -130,14 +130,14 @@ def aggregate_calibration_params(
             row[f"{sensor}_alignment_window_end_ms"] = aln.get("alignment_window_end_ms")
 
         rows.append(row)
-        logger.debug("Loaded calibration for section %s", section_dir.name)
+        log.debug("Loaded calibration for section %s", section_dir.name)
 
     if not rows:
-        logger.warning("No calibration.json files found under %s", project_relative_path(root))
+        log.warning("No calibration.json files found under %s", project_relative_path(root))
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    logger.info("Aggregated calibration params: %d sections", len(df))
+    log.info("Aggregated calibration params: %d sections", len(df))
     return df
 
 
@@ -182,7 +182,7 @@ def aggregate_sync_params(
     """
     root = recordings_root()
     if not root.exists():
-        logger.warning("recordings_root does not exist: %s", project_relative_path(root))
+        log.warning("recordings_root does not exist: %s", project_relative_path(root))
         return pd.DataFrame()
 
     rows: list[dict] = []
@@ -197,7 +197,7 @@ def aggregate_sync_params(
 
         synced_dir = rec_dir / "synced"
         if not synced_dir.is_dir():
-            logger.debug("No synced/ directory for recording %s", rec_dir.name)
+            log.debug("No synced/ directory for recording %s", rec_dir.name)
             continue
 
         row = _build_sync_row(rec_dir.name, synced_dir)
@@ -205,11 +205,11 @@ def aggregate_sync_params(
             rows.append(row)
 
     if not rows:
-        logger.warning("No sync data found under %s", project_relative_path(root))
+        log.warning("No sync data found under %s", project_relative_path(root))
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    logger.info("Aggregated sync params: %d recordings", len(df))
+    log.info("Aggregated sync params: %d recordings", len(df))
     return df
 
 
@@ -225,7 +225,7 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         try:
             data = json.loads(all_methods_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to read %s: %s", project_relative_path(all_methods_path), exc)
+            log.warning("Failed to read %s: %s", project_relative_path(all_methods_path), exc)
             data = {}
 
         row["selected_method"] = data.get("selected_method", "")
@@ -248,7 +248,7 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         try:
             info = json.loads(sync_info_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to read %s: %s", project_relative_path(sync_info_path), exc)
+            log.warning("Failed to read %s: %s", project_relative_path(sync_info_path), exc)
             info = {}
 
         row["offset_seconds"] = info.get("offset_seconds")
@@ -266,8 +266,8 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         if "selected_method" not in row:
             row["selected_method"] = ""
     elif "selected_method" not in row:
-        logger.debug("No sync data for recording %s", recording_name)
+        log.debug("No sync data for recording %s", recording_name)
         return None
 
-    logger.debug("Loaded sync params for recording %s", recording_name)
+    log.debug("Loaded sync params for recording %s", recording_name)
     return row

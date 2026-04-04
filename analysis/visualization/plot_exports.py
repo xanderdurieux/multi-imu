@@ -17,7 +17,7 @@ from sklearn.preprocessing import StandardScaler
 
 from common.paths import project_relative_path
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 _DPI = 150
 _LABEL_CMAP = "tab10"
@@ -114,7 +114,7 @@ def _short_recording(name: str) -> str:
 def _save(fig: plt.Figure, path: Path) -> Path:
     fig.savefig(path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(path))
+    log.info("Wrote %s", project_relative_path(path))
     return path
 
 
@@ -133,7 +133,7 @@ def plot_label_distribution(df: pd.DataFrame, output_dir: Path) -> Path:
     out_path = output_dir / "label_distribution.png"
 
     if "scenario_label" not in df.columns:
-        logger.warning("No scenario_label column; skipping label distribution plot")
+        log.warning("No scenario_label column; skipping label distribution plot")
         return out_path
 
     counts = (
@@ -173,7 +173,7 @@ def plot_label_distribution(df: pd.DataFrame, output_dir: Path) -> Path:
     fig.tight_layout()
     fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(out_path))
+    log.info("Wrote %s", project_relative_path(out_path))
     return out_path
 
 
@@ -265,7 +265,7 @@ def _violin_by_label(
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97), pad=0.45, w_pad=0.35, h_pad=0.45)
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight", pad_inches=0.03)
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(output_path))
+    log.info("Wrote %s", project_relative_path(output_path))
     return output_path
 
 
@@ -278,7 +278,7 @@ def plot_feature_distributions_by_label(
     for group, key_cols in _KEY_FEATURES.items():
         cols = _available(key_cols, df)
         if not cols:
-            logger.debug("No columns for group '%s'", group)
+            log.debug("No columns for group '%s'", group)
             continue
         out_path = output_dir / f"feature_distributions_{group}.png"
         result = _violin_by_label(df, cols, _GROUP_TITLES[group], out_path)
@@ -303,7 +303,7 @@ def plot_feature_correlation(
         and not df[c].isna().all()
     ]
     if len(feature_cols) < 2:
-        logger.debug("Not enough numeric feature columns for correlation heatmap")
+        log.debug("Not enough numeric feature columns for correlation heatmap")
         return None
 
     variances = df[feature_cols].apply(pd.to_numeric, errors="coerce").var(skipna=True)
@@ -338,7 +338,7 @@ def plot_feature_correlation(
     fig.tight_layout()
     fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(out_path))
+    log.info("Wrote %s", project_relative_path(out_path))
     return out_path
 
 
@@ -348,7 +348,7 @@ def plot_pca_by_label(df: pd.DataFrame, output_dir: Path) -> Path | None:
 
     labeled = _labeled_only(df)
     if len(labeled) < 5:
-        logger.debug("Too few labeled rows for PCA (%d)", len(labeled))
+        log.debug("Too few labeled rows for PCA (%d)", len(labeled))
         return None
 
     feature_cols = [
@@ -395,7 +395,7 @@ def plot_pca_by_label(df: pd.DataFrame, output_dir: Path) -> Path | None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(out_path))
+    log.info("Wrote %s", project_relative_path(out_path))
     return out_path
 
 
@@ -404,7 +404,7 @@ def plot_quality_distribution(df: pd.DataFrame, output_dir: Path) -> Path | None
     out_path = output_dir / "quality_distribution.png"
 
     if "quality_tier" not in df.columns:
-        logger.debug("No quality_tier column; skipping quality distribution")
+        log.debug("No quality_tier column; skipping quality distribution")
         return None
 
     tier_order = ["A", "B", "C"]
@@ -442,7 +442,7 @@ def plot_quality_distribution(df: pd.DataFrame, output_dir: Path) -> Path | None
     fig.tight_layout()
     fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(out_path))
+    log.info("Wrote %s", project_relative_path(out_path))
     return out_path
 
 
@@ -503,7 +503,7 @@ def plot_section_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote %s", project_relative_path(out_path))
+    log.info("Wrote %s", project_relative_path(out_path))
     return out_path
 
 
@@ -529,7 +529,7 @@ def run_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     figures_dir = output_dir / "figures" / "features"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(
+    log.info(
         "Running EDA on %d rows, %d columns → %s",
         len(df),
         len(df.columns),
@@ -553,7 +553,7 @@ def run_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     _add(plot_feature_correlation(df, figures_dir))
     _add(plot_pca_by_label(df, figures_dir))
 
-    logger.info(
+    log.info(
         "EDA complete: %d figures written to %s",
         len(generated),
         project_relative_path(figures_dir),
@@ -1011,7 +1011,7 @@ def plot_sync_offset_overview(df: pd.DataFrame, output_dir: Path) -> Path | None
 
 def run_calibration_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     if df.empty:
-        logger.warning("Calibration params DataFrame is empty; skipping calibration EDA")
+        log.warning("Calibration params DataFrame is empty; skipping calibration EDA")
         return []
     figures_dir = Path(output_dir) / "figures" / "calibration"
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -1028,13 +1028,13 @@ def run_calibration_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
                 generated.extend(result)
             else:
                 generated.append(result)
-    logger.info("Calibration EDA complete: %d figures", len(generated))
+    log.info("Calibration EDA complete: %d figures", len(generated))
     return generated
 
 
 def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     if df.empty:
-        logger.warning("Sync params DataFrame is empty; skipping sync EDA")
+        log.warning("Sync params DataFrame is empty; skipping sync EDA")
         return []
     figures_dir = Path(output_dir) / "figures" / "sync"
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -1048,5 +1048,5 @@ def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     ):
         if result is not None:
             generated.append(result)
-    logger.info("Sync EDA complete: %d figures", len(generated))
+    log.info("Sync EDA complete: %d figures", len(generated))
     return generated

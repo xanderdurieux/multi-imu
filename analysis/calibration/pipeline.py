@@ -205,7 +205,7 @@ def calibrate_section(
 
         out_csv = cal_dir / f"{sensor}.csv"
         write_csv(cal_df, out_csv)
-        log.info("Wrote calibrated %s → %s (%d rows)", sensor, out_csv, len(cal_df))
+        log.info("Wrote calibrated %s → %s (%d rows)", sensor, project_relative_path(out_csv), len(cal_df))
 
     # Overall quality
     qualities = [v.quality for v in all_intrinsics.values()]
@@ -230,7 +230,7 @@ def calibrate_section(
     )
 
     cal_json_path.write_text(json.dumps(section_cal.to_dict(), indent=2), encoding="utf-8")
-    log.info("Wrote calibration.json → %s (quality=%s)", cal_dir, overall)
+    log.info("Wrote calibration.json → %s (quality=%s)", project_relative_path(cal_dir), overall)
     return section_cal
 
 

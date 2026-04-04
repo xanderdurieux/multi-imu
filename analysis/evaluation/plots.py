@@ -14,7 +14,7 @@ import pandas as pd
 
 from common.paths import project_relative_path
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 _DPI = 150
 
@@ -108,7 +108,7 @@ def plot_confusion_matrix(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.debug("Wrote confusion matrix → %s", project_relative_path(output_path))
+    log.debug("Wrote confusion matrix → %s", project_relative_path(output_path))
     return output_path
 
 
@@ -134,7 +134,7 @@ def plot_feature_importance(
     """
     fi_df = fi_df.copy().sort_values("importance", ascending=False).head(top_n)
     if fi_df.empty:
-        logger.warning("No feature importance data to plot; skipping")
+        log.warning("No feature importance data to plot; skipping")
         return output_path
 
     # Reverse so most important is at the top
@@ -164,7 +164,7 @@ def plot_feature_importance(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.debug("Wrote feature importance → %s", project_relative_path(output_path))
+    log.debug("Wrote feature importance → %s", project_relative_path(output_path))
     return output_path
 
 
@@ -186,7 +186,7 @@ def plot_model_comparison(
         DataFrame with columns ``feature_set``, ``model``, ``accuracy``, ``macro_f1``.
     """
     if metrics_df.empty:
-        logger.warning("Empty metrics DataFrame; skipping model comparison plot")
+        log.warning("Empty metrics DataFrame; skipping model comparison plot")
         return output_path
 
     feature_sets = sorted(metrics_df["feature_set"].unique())
@@ -256,7 +256,7 @@ def plot_model_comparison(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote model comparison → %s", project_relative_path(output_path))
+    log.info("Wrote model comparison → %s", project_relative_path(output_path))
     return output_path
 
 
@@ -285,7 +285,7 @@ def plot_per_class_f1(
     """
     models = [m for m in _MODEL_DISPLAY if f"{feature_set}__{m}" in all_results]
     if not models:
-        logger.debug("No results for feature set '%s'; skipping per-class F1 plot", feature_set)
+        log.debug("No results for feature set '%s'; skipping per-class F1 plot", feature_set)
         return None
 
     x = np.arange(len(classes))
@@ -324,7 +324,7 @@ def plot_per_class_f1(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Wrote per-class F1 → %s", project_relative_path(output_path))
+    log.info("Wrote per-class F1 → %s", project_relative_path(output_path))
     return output_path
 
 
@@ -357,9 +357,9 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             plot_model_comparison(metrics_df, out)
             generated.append(out)
         except Exception as exc:
-            logger.warning("Failed to generate model comparison figure: %s", exc)
+            log.warning("Failed to generate model comparison figure: %s", exc)
     else:
-        logger.warning(
+        log.warning(
             "metrics_table.csv not found in %s — skipping model comparison",
             project_relative_path(output_dir),
         )
@@ -375,7 +375,7 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             plot_confusion_matrix(cm_df, out, title=f"Confusion matrix — {human}")
             generated.append(out)
         except Exception as exc:
-            logger.warning("Failed to plot confusion matrix %s: %s", cm_path.name, exc)
+            log.warning("Failed to plot confusion matrix %s: %s", cm_path.name, exc)
 
     # ---- feature importances ----
     for fi_path in sorted(output_dir.glob("feature_importance_*.csv")):
@@ -388,9 +388,9 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             plot_feature_importance(fi_df, out, title=f"Feature importance — {human}")
             generated.append(out)
         except Exception as exc:
-            logger.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
+            log.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
 
-    logger.info(
+    log.info(
         "Evaluation figures: %d written to %s",
         len(generated),
         project_relative_path(figures_dir),

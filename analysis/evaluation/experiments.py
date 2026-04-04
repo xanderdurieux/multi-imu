@@ -19,7 +19,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from common.paths import project_relative_path, read_csv, write_csv
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 _QUALITY_ORDER = ["poor", "marginal", "good"]
 
@@ -174,12 +174,12 @@ def run_evaluation(
     # ------------------------------------------------------------------
     # 1. Load data
     # ------------------------------------------------------------------
-    logger.info("Loading features from %s", project_relative_path(features_path))
+    log.info("Loading features from %s", project_relative_path(features_path))
     if not features_path.exists():
         raise FileNotFoundError(f"Features file not found: {features_path}")
 
     df = read_csv(features_path)
-    logger.info("Loaded %d rows, %d columns", len(df), len(df.columns))
+    log.info("Loaded %d rows, %d columns", len(df), len(df.columns))
 
     # Apply quality filter
     if "overall_quality_label" in df.columns:
@@ -189,20 +189,20 @@ def run_evaluation(
         valid = set(_QUALITY_ORDER[min_idx:])
         before = len(df)
         df = df[df["overall_quality_label"].isin(valid)].copy()
-        logger.info("Quality filter: %d → %d rows", before, len(df))
+        log.info("Quality filter: %d → %d rows", before, len(df))
 
     # Drop unlabeled rows
     if label_col not in df.columns:
         raise ValueError(f"Label column {label_col!r} not found in features.")
     before = len(df)
     df = df[df[label_col].notna() & (df[label_col] != "unlabeled")].copy()
-    logger.info("Dropped unlabeled rows: %d → %d", before, len(df))
+    log.info("Dropped unlabeled rows: %d → %d", before, len(df))
 
     if len(df) == 0:
         raise ValueError("No labeled rows remain after filtering.")
 
     classes = sorted(df[label_col].unique().tolist())
-    logger.info("Classes: %s (%d total windows)", classes, len(df))
+    log.info("Classes: %s (%d total windows)", classes, len(df))
 
     # ------------------------------------------------------------------
     # 2. Determine feature sets
@@ -216,9 +216,9 @@ def run_evaluation(
         cols = _select_feature_cols(df, prefixes)
         if cols:
             active_sets[fs_name] = cols
-            logger.info("Feature set '%s': %d features", fs_name, len(cols))
+            log.info("Feature set '%s': %d features", fs_name, len(cols))
         else:
-            logger.warning("Feature set '%s': no columns found, skipping", fs_name)
+            log.warning("Feature set '%s': no columns found, skipping", fs_name)
 
     if not active_sets:
         raise ValueError("No feature columns found for any feature set.")
@@ -234,7 +234,7 @@ def run_evaluation(
     if group_col in df.columns:
         groups_all = df[group_col].values
     else:
-        logger.warning("Group column '%s' not found; using no-group CV", group_col)
+        log.warning("Group column '%s' not found; using no-group CV", group_col)
 
     # ------------------------------------------------------------------
     # 4. Train and evaluate
@@ -249,14 +249,14 @@ def run_evaluation(
         n_groups = len(np.unique(groups_all)) if groups_all is not None else len(y_all)
         n_splits = min(5, n_groups)
         if n_splits < 2:
-            logger.warning(
+            log.warning(
                 "Feature set '%s': only %d groups available, skipping CV", fs_name, n_groups
             )
             continue
 
         for model_name in _MODEL_REGISTRY:
             key = f"{fs_name}__{model_name}"
-            logger.info("Evaluating %s ...", key)
+            log.info("Evaluating %s ...", key)
 
             model = _build_model(model_name, seed)
             try:
@@ -269,7 +269,7 @@ def run_evaluation(
                     seed=seed,
                 )
             except Exception as exc:
-                logger.warning("Evaluation failed for %s: %s", key, exc)
+                log.warning("Evaluation failed for %s: %s", key, exc)
                 continue
 
             all_results[key] = result
@@ -291,7 +291,7 @@ def run_evaluation(
                 columns=le.classes_,
             )
             cm_df.to_csv(cm_path, index=True)
-            logger.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
+            log.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
 
             # Write feature importances
             if result["feature_importances"] is not None:
@@ -303,7 +303,7 @@ def run_evaluation(
                     }
                 ).sort_values("importance", ascending=False)
                 write_csv(fi_df, fi_path)
-                logger.debug("Wrote feature importances to %s", project_relative_path(fi_path))
+                log.debug("Wrote feature importances to %s", project_relative_path(fi_path))
 
     # ------------------------------------------------------------------
     # 5. Write metrics table
@@ -312,7 +312,7 @@ def run_evaluation(
         metrics_df = pd.DataFrame(metrics_rows)
         metrics_path = output_dir / "metrics_table.csv"
         write_csv(metrics_df, metrics_path)
-        logger.info("Wrote metrics table to %s", project_relative_path(metrics_path))
+        log.info("Wrote metrics table to %s", project_relative_path(metrics_path))
 
     # ------------------------------------------------------------------
     # 6. Build evaluation summary
@@ -340,7 +340,7 @@ def run_evaluation(
 
     summary_path = output_dir / "evaluation_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
-    logger.info("Wrote evaluation summary to %s", project_relative_path(summary_path))
+    log.info("Wrote evaluation summary to %s", project_relative_path(summary_path))
 
     # ------------------------------------------------------------------
     # 7. Write THESIS_SUMMARY.md
@@ -373,7 +373,7 @@ def run_evaluation(
                     feature_set=fs_name,
                 )
         except Exception as exc:
-            logger.warning("Evaluation figure generation failed: %s", exc)
+            log.warning("Evaluation figure generation failed: %s", exc)
 
     return summary
 
@@ -427,4 +427,4 @@ def _write_thesis_summary(
 
     md_path = output_dir / "THESIS_SUMMARY.md"
     md_path.write_text("\n".join(lines))
-    logger.info("Wrote thesis summary to %s", project_relative_path(md_path))
+    log.info("Wrote thesis summary to %s", project_relative_path(md_path))

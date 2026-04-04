@@ -22,6 +22,7 @@ from common.paths import (
     recording_stage_dir,
     iter_sections_for_recording,
     parse_section_folder_name,
+    project_relative_path,
     read_csv,
     recording_labels_csv,
     section_sensor_csv,
@@ -124,7 +125,7 @@ def write_section_labels_from_recording_intervals(
     write_labels(clipped, out_path)
     log.info(
         "Wrote %d label row(s) to %s",
-        len(clipped), out_path,
+        len(clipped), project_relative_path(out_path),
     )
 
 
