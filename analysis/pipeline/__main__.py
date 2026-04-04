@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 from common.paths import iter_sections_for_recording, parse_section_folder_name, section_dir
+from orientation.pipeline import DEFAULT_ORIENTATION_VARIANTS
+from visualization.stage_plots import plot_section_pipeline_stage
 
 
 def _section_dir(name: str) -> Path:
@@ -44,23 +46,7 @@ def _section_dir(name: str) -> Path:
 def _run_stage_plots_for_sections(recording: str, stage: str) -> None:
     """Generate stage plots for every section in a recording."""
     for section_dir in iter_sections_for_recording(recording):
-        _run_stage_plots_for_section(section_dir, stage)
-
-
-def _run_stage_plots_for_section(section_dir: Path, stage: str) -> None:
-    """Generate stage plots for one section."""
-    if stage == "calibration":
-        from visualization.plot_calibration import plot_calibration_stage
-        plot_calibration_stage(section_dir)
-    elif stage == "orientation":
-        from visualization.plot_orientation import plot_orientation_stage
-        plot_orientation_stage(section_dir)
-    elif stage == "features":
-        from visualization.plot_features import plot_features_stage
-        from visualization.plot_labels import plot_labels
-        plot_features_stage(section_dir)
-        plot_labels(section_dir, stage="sensor")
-        plot_labels(section_dir, stage="features")
+        plot_section_pipeline_stage(section_dir, stage)
 
 
 def _run_calibration(args: argparse.Namespace) -> None:
@@ -79,16 +65,19 @@ def _run_calibration(args: argparse.Namespace) -> None:
         cal = calibrate_section(d, frame_alignment=args.frame, force=args.force)
         print(f"Quality: {cal.calibration_quality}")
         if not args.no_plots:
-            _run_stage_plots_for_section(d, "calibration")
+            plot_section_pipeline_stage(d, "calibration")
 
 
 def _run_orientation(args: argparse.Namespace) -> None:
     from orientation.pipeline import process_section_orientation, process_recording_orientation
+
+    variants = list(DEFAULT_ORIENTATION_VARIANTS)
     if args.recording:
         results = process_recording_orientation(
             args.recording,
             canonical_variant=args.filter,
             force=args.force,
+            variants=variants,
         )
         print(f"Processed {len(results)} section(s).")
         if not args.no_plots:
@@ -96,11 +85,14 @@ def _run_orientation(args: argparse.Namespace) -> None:
     else:
         d = _section_dir(args.target)
         stats = process_section_orientation(
-            d, canonical_variant=args.filter, force=args.force
+            d,
+            canonical_variant=args.filter,
+            force=args.force,
+            variants=variants,
         )
         print(f"Done. Canonical: {args.filter}")
         if not args.no_plots:
-            _run_stage_plots_for_section(d, "orientation")
+            plot_section_pipeline_stage(d, "orientation")
 
 
 def _run_derived(args: argparse.Namespace) -> None:
@@ -146,7 +138,7 @@ def _run_features(args: argparse.Namespace) -> None:
         )
         print(f"Extracted {len(df)} feature window(s).")
         if not args.no_plots:
-            _run_stage_plots_for_section(d, "features")
+            plot_section_pipeline_stage(d, "features")
 
 
 def _run_exports(args: argparse.Namespace) -> None:
@@ -196,8 +188,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--filter",
         default="madgwick",
-        choices=["madgwick", "complementary"],
-        help="[orientation] Filter variant.",
+        choices=[
+            "madgwick",
+            "madgwick_marg",
+            "complementary",
+            "ekf",
+            "ekf_marg",
+        ],
+        help="[orientation] Preferred variant when scores tie; all variants still run.",
     )
     parser.add_argument(
         "--event-config",

@@ -19,9 +19,16 @@ from common.paths import (
     recording_stage_dir,
     recordings_root,
 )
-from .config import WorkflowConfig
+from orientation.pipeline import (
+    DEFAULT_CANONICAL_ORIENTATION_METHOD,
+    DEFAULT_ORIENTATION_VARIANTS,
+)
+from visualization.stage_plots import (
+    plot_recording_pipeline_stage,
+    plot_section_pipeline_stage,
+)
 
-_ALL_ORIENTATION_FILTERS = ["madgwick", "complementary"]
+from .config import WorkflowConfig
 
 log = logging.getLogger(__name__)
 
@@ -57,35 +64,6 @@ def _collect_sections(recordings: list[str]) -> list[Path]:
     return sections
 
 
-def _run_recording_stage_plots(recording_name: str, stage: str) -> None:
-    """Generate recording-level plots for a given stage output."""
-    if stage == "synced":
-        from visualization.plot_sync import plot_sync_stage
-        plot_sync_stage(recording_stage_dir(recording_name, stage))
-    elif stage == "parsed":
-        from visualization.plot_comparison import plot_stage_data
-        plot_stage_data(recording_stage_dir(recording_name, stage))
-
-
-def _run_section_stage_plots(section_dir: Path, stage: str) -> None:
-    """Generate section-level plots for a given stage output."""
-    if stage == "calibration":
-        from visualization.plot_calibration import plot_calibration_stage
-        plot_calibration_stage(section_dir)
-    elif stage == "orientation":
-        from visualization.plot_orientation import plot_orientation_stage
-        plot_orientation_stage(section_dir)
-    elif stage == "derived":
-        from visualization.plot_derived import plot_derived_stage
-        plot_derived_stage(section_dir)
-    elif stage == "features":
-        from visualization.plot_features import plot_features_stage
-        from visualization.plot_labels import plot_labels
-        plot_features_stage(section_dir)
-        plot_labels(section_dir, stage="sensor")
-        plot_labels(section_dir, stage="features")
-
-
 def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[str, Any]:
     """Run a single pipeline stage for all recordings/sections."""
     result: dict[str, Any] = {"stage": stage, "ok": 0, "failed": 0, "skipped": 0}
@@ -112,7 +90,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 result["ok"] += 1
                 if not cfg.no_plots:
                     try:
-                        _run_recording_stage_plots(rec, "synced")
+                        plot_recording_pipeline_stage(rec, "synced")
                     except Exception as exc:
                         log.warning("sync plots failed for %s: %s", rec, exc)
             except Exception as exc:
@@ -155,7 +133,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            _run_section_stage_plots(section_dir, "calibration")
+                            plot_section_pipeline_stage(section_dir, "calibration")
                         except Exception as exc:
                             log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
@@ -164,8 +142,16 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "orientation":
         from orientation.pipeline import process_recording_orientation
-        canonical = _ALL_ORIENTATION_FILTERS[0] if cfg.orientation_filter == "auto" else cfg.orientation_filter
-        variants = _ALL_ORIENTATION_FILTERS if cfg.orientation_filter == "auto" else [cfg.orientation_filter]
+        canonical = (
+            DEFAULT_CANONICAL_ORIENTATION_METHOD
+            if cfg.orientation_filter == "auto"
+            else cfg.orientation_filter
+        )
+        variants = (
+            list(DEFAULT_ORIENTATION_VARIANTS)
+            if cfg.orientation_filter == "auto"
+            else [cfg.orientation_filter]
+        )
         for rec in recordings:
             try:
                 results = process_recording_orientation(
@@ -179,7 +165,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            _run_section_stage_plots(section_dir, "orientation")
+                            plot_section_pipeline_stage(section_dir, "orientation")
                         except Exception as exc:
                             log.warning("orientation plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
@@ -200,7 +186,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            _run_section_stage_plots(section_dir, "derived")
+                            plot_section_pipeline_stage(section_dir, "derived")
                         except Exception as exc:
                             log.warning("derived plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
@@ -237,7 +223,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            _run_section_stage_plots(section_dir, "features")
+                            plot_section_pipeline_stage(section_dir, "features")
                         except Exception as exc:
                             log.warning("features plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
@@ -279,16 +265,6 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1
 
-    elif stage == "reporting":
-        from reporting.bundle import generate_report_bundle
-        out = data_root() / "thesis_report_bundle"
-        try:
-            generate_report_bundle(out, force=cfg.force)
-            result["ok"] += 1
-        except Exception as exc:
-            log.error("reporting failed: %s", exc)
-            result["failed"] += 1
-
     return result
 
 
@@ -310,7 +286,7 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
 
     for stage in stages:
         log.info("-------------------------------- Stage: %s --------------------------------", stage)
-        
+
         try:
             recordings = _collect_recordings(cfg)
             r = _run_stage(stage, cfg, recordings)

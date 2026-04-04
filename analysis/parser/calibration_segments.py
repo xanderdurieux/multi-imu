@@ -24,6 +24,8 @@ from typing import List
 import numpy as np
 import pandas as pd
 
+from common.signals import acc_norm_from_imu_df, find_peaks_simple, smooth_moving_average
+
 
 @dataclass(frozen=True)
 class CalibrationSegment:
@@ -105,61 +107,6 @@ def describe_calibration_segments(
         )
 
     return pd.DataFrame.from_records(records)
-
-
-def _acc_norm(df: pd.DataFrame) -> np.ndarray:
-    acc = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-    return np.sqrt(np.nansum(acc ** 2, axis=1))
-
-
-def _smooth(signal: np.ndarray, window: int) -> np.ndarray:
-    """Centered box-car moving average, same length as input."""
-    if window <= 1:
-        return signal.copy()
-    return (
-        pd.Series(signal)
-        .rolling(window, center=True, min_periods=1)
-        .mean()
-        .to_numpy(dtype=float)
-    )
-
-
-def _find_peaks(
-    signal: np.ndarray,
-    *,
-    height: float = 0.0,
-    distance: int = 1,
-) -> np.ndarray:
-    """Return indices of local maxima above *height* with minimum *distance*."""
-    x = np.asarray(signal, dtype=float)
-    n = len(x)
-    if n < 3:
-        return np.empty(0, dtype=int)
-
-    candidates = [
-        i
-        for i in range(1, n - 1)
-        if x[i] > x[i - 1] and x[i] >= x[i + 1] and x[i] >= height
-    ]
-    if not candidates:
-        return np.empty(0, dtype=int)
-
-    if distance <= 1:
-        return np.array(candidates, dtype=int)
-
-    cands = np.array(candidates, dtype=int)
-    order = np.argsort(x[cands])[::-1]
-    sorted_cands = cands[order]
-
-    keep = np.ones(len(sorted_cands), dtype=bool)
-    for i in range(len(sorted_cands)):
-        if not keep[i]:
-            continue
-        for j in range(i + 1, len(sorted_cands)):
-            if keep[j] and abs(int(sorted_cands[i]) - int(sorted_cands[j])) < distance:
-                keep[j] = False
-
-    return np.sort(sorted_cands[keep])
 
 
 def _refine_peaks_to_raw_max(
@@ -324,7 +271,7 @@ def find_calibration_segments(
     and otherwise dominates the quality ranking.  ``None`` (default) means no
     upper limit.
     """
-    norm = _acc_norm(df)
+    norm = acc_norm_from_imu_df(df)
     if len(norm) == 0:
         return []
 
@@ -346,9 +293,9 @@ def find_calibration_segments(
     norm_for_smooth[is_dropout] = g
 
     smooth_win = max(3, int(sample_rate_hz * 0.1))
-    dynamic_smooth = np.abs(_smooth(norm_for_smooth, smooth_win) - g)
+    dynamic_smooth = np.abs(smooth_moving_average(norm_for_smooth, smooth_win) - g)
 
-    peaks = _find_peaks(
+    peaks = find_peaks_simple(
         dynamic_smooth,
         height=peak_min_height,
         distance=max(1, int(sample_rate_hz * 0.3)),

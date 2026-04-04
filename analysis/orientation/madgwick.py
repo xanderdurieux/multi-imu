@@ -52,6 +52,10 @@ class MadgwickFilter:
         """Set initial orientation from the first accelerometer sample."""
         self._q = tilt_quat_from_acc(acc)
 
+    def current_quaternion(self) -> np.ndarray:
+        """Copy of the current orientation quaternion [w, x, y, z]."""
+        return self._q.copy()
+
     def update(
         self,
         acc: np.ndarray,

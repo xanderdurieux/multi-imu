@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, resolve_data_dir
+from common.signals import smooth_moving_average
 from visualization._utils import filter_valid_plot_xy
 
 log = logging.getLogger(__name__)
@@ -71,12 +72,6 @@ def _yclip(arr: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> tuple[float, f
     return ylo - pad, yhi + pad
 
 
-def _smooth(y: np.ndarray, window: int = 50) -> np.ndarray:
-    """Lightweight uniform rolling mean, NaN-aware."""
-    s = pd.Series(y).rolling(window=window, center=True, min_periods=1).mean().to_numpy(dtype=float)
-    return s
-
-
 # ---------------------------------------------------------------------------
 # Overview
 # ---------------------------------------------------------------------------
@@ -127,7 +122,7 @@ def plot_derived_overview(section_dir: Path) -> Path | None:
             ax.plot(xp, yp, lw=0.6, alpha=0.55,
                     color=_SENSOR_COLORS[sensor], label=sensor)
             # Bold smoothed line for readability.
-            ys = _smooth(yp)
+            ys = smooth_moving_average(yp, 50)
             xps, yps = filter_valid_plot_xy(xp, ys)
             if xps.size:
                 ax.plot(xps, yps, lw=1.4, alpha=0.9,
@@ -220,7 +215,7 @@ def plot_linear_acceleration(section_dir: Path) -> Path | None:
             # Raw signal, thin + transparent.
             ax.plot(xp, yp, lw=0.5, alpha=0.3, color=_SENSOR_COLORS[sensor])
             # Smoothed overlay, bold.
-            ys = _smooth(yp, window=30)
+            ys = smooth_moving_average(yp, 30)
             xps, yps = filter_valid_plot_xy(xp, ys)
             if xps.size:
                 ax.plot(xps, yps, lw=1.5, alpha=0.9,

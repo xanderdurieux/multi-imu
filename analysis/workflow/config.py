@@ -19,7 +19,6 @@ _KNOWN_STAGES = [
     "features",
     "exports",
     "evaluation",
-    "reporting",
 ]
 
 
@@ -35,7 +34,7 @@ class WorkflowConfig:
     # Stage options
     sync_method: str = "auto"                        # "sda"|"lida"|"calibration"|"online"|"adaptive"|"auto"
     split_stage: str = "synced"                      # "parsed"|"synced"
-    orientation_filter: str = "auto"                 # "madgwick"|"complementary"|"auto"
+    orientation_filter: str = "auto"                 # madgwick[_marg]|complementary|ekf[_marg]|auto
     sample_rate_hz: float = 100.0
 
     # Feature / event options
@@ -77,7 +76,14 @@ class WorkflowConfig:
         valid_split = {"parsed", "synced"}
         if self.split_stage not in valid_split:
             errors.append(f"split_stage must be one of {valid_split}, got {self.split_stage!r}")
-        valid_orient = {"madgwick", "complementary", "auto"}
+        valid_orient = {
+            "madgwick",
+            "madgwick_marg",
+            "complementary",
+            "ekf",
+            "ekf_marg",
+            "auto",
+        }
         if self.orientation_filter not in valid_orient:
             errors.append(f"orientation_filter must be one of {valid_orient}")
         if not self.stages:
@@ -91,7 +97,7 @@ class WorkflowConfig:
             errors.append("hop_s must be > 0")
         return errors
 
-    
+
 def known_stages() -> list[str]:
     """Return the known stage names in canonical order."""
     return list(_KNOWN_STAGES)

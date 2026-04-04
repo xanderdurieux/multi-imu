@@ -109,7 +109,7 @@ def labels_root() -> Path:
 def exports_root() -> Path:
     """Return the directory containing exported dataset artifacts."""
     return data_root() / "exports"
-    
+
 
 def evaluation_root() -> Path:
     """Return the directory containing evaluation artifacts."""

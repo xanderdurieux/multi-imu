@@ -3,9 +3,8 @@
 - Fix faulty calibration sequence extraction in r5
 
 #### Necessary pipeline features
-- Magnetometer-aware heading and better yaw calculation
-- Add EKF Filter to orientation stage
-- Add reporting module
+- Magnetometer-aware heading and better yaw calculation (Madgwick MARG + EKF MARG exist; tune and validate)
+- Optional thesis report bundling stage (not wired in the workflow yet)
 
 #### Verify existing correctness
 - Review orientation correctness

@@ -1,7 +1,7 @@
-"""Orientation estimation package for dual-IMU cycling pipeline.
+"""Orientation estimation for the dual-IMU cycling pipeline.
 
-Provides Madgwick and complementary filter implementations as well as a
-pipeline for processing calibrated section CSVs into orientation outputs.
+Implements Madgwick (IMU/MARG), complementary, and quaternion EKF filters plus
+a section/recording pipeline that scores variants and flattens the best result.
 
 Usage
 -----
@@ -17,6 +17,9 @@ CLI::
 """
 
 from .pipeline import (
+    ALL_ORIENTATION_METHODS,
+    DEFAULT_CANONICAL_ORIENTATION_METHOD,
+    DEFAULT_ORIENTATION_VARIANTS,
     OrientationStats,
     run_orientation_filters,
     process_section_orientation,
@@ -24,6 +27,9 @@ from .pipeline import (
 )
 
 __all__ = [
+    "ALL_ORIENTATION_METHODS",
+    "DEFAULT_CANONICAL_ORIENTATION_METHOD",
+    "DEFAULT_ORIENTATION_VARIANTS",
     "OrientationStats",
     "run_orientation_filters",
     "process_section_orientation",

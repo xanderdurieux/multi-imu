@@ -16,7 +16,13 @@ import logging
 import sys
 
 from common.paths import parse_section_folder_name, project_relative_path, section_dir
-from .pipeline import process_section_orientation, process_recording_orientation
+from .pipeline import (
+    ALL_ORIENTATION_METHODS,
+    DEFAULT_CANONICAL_ORIENTATION_METHOD,
+    DEFAULT_ORIENTATION_VARIANTS,
+    process_section_orientation,
+    process_recording_orientation,
+)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -47,17 +53,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--variants",
         nargs="+",
-        default=["madgwick", "complementary"],
-        choices=["madgwick", "complementary"],
+        default=None,
+        choices=list(ALL_ORIENTATION_METHODS),
         metavar="VARIANT",
-        help="Filter variants to run (default: madgwick complementary).",
+        help=(
+            "Filter variants to run (default: all — "
+            + ", ".join(ALL_ORIENTATION_METHODS)
+            + ")."
+        ),
     )
     parser.add_argument(
         "--canonical-variant",
-        default="madgwick",
-        choices=["madgwick", "complementary"],
+        default=DEFAULT_CANONICAL_ORIENTATION_METHOD,
+        choices=list(ALL_ORIENTATION_METHODS),
         metavar="VARIANT",
-        help="Canonical (primary) variant to record in stats (default: madgwick).",
+        help="Preferred variant when scores tie (default: madgwick).",
     )
     parser.add_argument(
         "--force",
@@ -66,13 +76,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    variants = list(args.variants) if args.variants is not None else list(DEFAULT_ORIENTATION_VARIANTS)
+
     if args.recording:
         results = process_recording_orientation(
             args.recording,
             sample_rate_hz=args.sample_rate_hz,
             force=args.force,
             canonical_variant=args.canonical_variant,
-            variants=args.variants,
+            variants=variants,
         )
         print(f"Processed {len(results)} section(s) for recording '{args.recording}'.")
         for i, stats in enumerate(results, start=1):
@@ -97,7 +109,7 @@ def main(argv: list[str] | None = None) -> None:
             sample_rate_hz=args.sample_rate_hz,
             force=args.force,
             canonical_variant=args.canonical_variant,
-            variants=args.variants,
+            variants=variants,
         )
         print(f"Selected method: {stats.get('selected_method', '?')}")
         for sensor in ("sporsa", "arduino"):

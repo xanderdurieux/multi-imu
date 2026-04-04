@@ -22,7 +22,8 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, write_csv
-from parser.calibration_segments import _acc_norm, _find_peaks, _smooth, find_calibration_segments
+from common.signals import acc_norm_from_imu_df, find_peaks_simple, smooth_moving_average
+from parser.calibration_segments import find_calibration_segments
 from common.paths import find_sensor_csv, recording_stage_dir
 
 from .core import (
@@ -469,13 +470,13 @@ def _coarse_offset_from_opening_calibration(
     search_end_ms = ts[0] + search_first_s * 1000.0
     n_search = int(np.sum(ts <= search_end_ms))
 
-    norm = _acc_norm(tgt_df_clean)
+    norm = acc_norm_from_imu_df(tgt_df_clean)
     g = float(np.nanmedian(norm))
     smooth_win = max(3, int(actual_sr * 0.1))
-    dyn_smooth = np.abs(_smooth(norm[:n_search], smooth_win) - g)
+    dyn_smooth = np.abs(smooth_moving_average(norm[:n_search], smooth_win) - g)
 
     dist = max(1, int(actual_sr * min_inter_peak_s))
-    peaks = _find_peaks(dyn_smooth, height=peak_min_height, distance=dist)
+    peaks = find_peaks_simple(dyn_smooth, height=peak_min_height, distance=dist)
     if len(peaks) == 0:
         raise ValueError(
             f"No peaks above {peak_min_height} m/s² found in first {search_first_s}s of target."

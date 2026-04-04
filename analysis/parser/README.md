@@ -13,7 +13,6 @@ parser/
 ├── __init__.py          public API
 ├── calibration_segments.py shared calibration-sequence detection
 ├── arduino.py           Arduino BLE log parser
-├── arduino_batched.py   Arduino batched-packet parser variant
 ├── sporsa.py            Sporsa log parser
 ├── stats.py             timing and quality statistics
 ├── split_sections.py    section splitting from calibration sequences
@@ -65,12 +64,10 @@ Parses the Sporsa (bicycle) raw text log into a normalized DataFrame.
 
 ---
 
-### `arduino.py` / `arduino_batched.py` — Arduino log parsers
+### `arduino.py` — Arduino log parser
 
-Parses the Arduino (helmet) BLE log. The Arduino transmits two formats:
-- **Standard**: one IMU sample per BLE packet.
-- **Batched**: multiple IMU samples bundled in one BLE packet to reduce
-  transmission latency.
+Parses the Arduino (helmet) BLE log (one sensor payload per notification line;
+acc/gyro/mag rows are merged by device timestamp).
 
 **Output columns:**
 

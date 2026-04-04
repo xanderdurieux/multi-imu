@@ -20,6 +20,7 @@ import pandas as pd
 from common.paths import iter_sections_for_recording, read_csv, write_csv
 from common.quaternion import euler_from_quat
 from .complementary import ComplementaryFilter
+from .ekf import EKFFilter
 from .madgwick import MadgwickFilter
 
 log = logging.getLogger(__name__)
@@ -27,12 +28,23 @@ log = logging.getLogger(__name__)
 _SENSORS = ("sporsa", "arduino")
 _DEG_PER_RAD = 180.0 / np.pi
 _RAD_PER_DEG = np.pi / 180.0
-_ALL_METHODS = ["madgwick", "madgwick_marg", "complementary"]
-_DEFAULT_METHOD = "madgwick"
+
+ALL_ORIENTATION_METHODS: tuple[str, ...] = (
+    "madgwick",
+    "madgwick_marg",
+    "complementary",
+    "ekf",
+    "ekf_marg",
+)
+DEFAULT_CANONICAL_ORIENTATION_METHOD: str = "madgwick"
+DEFAULT_ORIENTATION_VARIANTS: list[str] = list(ALL_ORIENTATION_METHODS)
+_DEFAULT_METHOD = DEFAULT_CANONICAL_ORIENTATION_METHOD
 _METHOD_PARAMS: dict[str, dict[str, float]] = {
     "madgwick": {"beta": 0.1},
     "madgwick_marg": {"beta": 0.1},
     "complementary": {"alpha": 0.98},
+    "ekf": {"sigma_gyro": 0.01, "sigma_acc": 0.1},
+    "ekf_marg": {"sigma_gyro": 0.01, "sigma_acc": 0.1, "sigma_mag": 0.1},
 }
 
 
@@ -49,12 +61,20 @@ class OrientationStats:
     quality: str
 
 
-def _build_filter(method: str, *, sample_rate_hz: float) -> MadgwickFilter | ComplementaryFilter:
+def _build_filter(method: str, *, sample_rate_hz: float) -> MadgwickFilter | ComplementaryFilter | EKFFilter:
     if method in ("madgwick", "madgwick_marg"):
         return MadgwickFilter(beta=_METHOD_PARAMS["madgwick"]["beta"], sample_rate_hz=sample_rate_hz)
     if method == "complementary":
         return ComplementaryFilter(
             alpha=_METHOD_PARAMS["complementary"]["alpha"],
+            sample_rate_hz=sample_rate_hz,
+        )
+    if method in ("ekf", "ekf_marg"):
+        params = _METHOD_PARAMS[method]
+        return EKFFilter(
+            sigma_gyro=params["sigma_gyro"],
+            sigma_acc=params["sigma_acc"],
+            sigma_mag=params.get("sigma_mag", 0.1),
             sample_rate_hz=sample_rate_hz,
         )
     raise ValueError(f"Unknown orientation method: {method}")
@@ -69,7 +89,7 @@ def run_orientation_filters(
 ) -> dict[str, pd.DataFrame]:
     """Run orientation filters on calibrated IMU data."""
     if methods is None:
-        methods = list(_ALL_METHODS)
+        methods = list(DEFAULT_ORIENTATION_VARIANTS)
 
     has_world = all(c in df.columns for c in ("ax_world", "ay_world", "az_world"))
     acc_cols = ("ax_world", "ay_world", "az_world") if has_world else ("ax", "ay", "az")
@@ -101,7 +121,7 @@ def run_orientation_filters(
 
     results: dict[str, pd.DataFrame] = {}
     for method in methods:
-        use_mag = method.endswith("_marg") and mag_arr is not None
+        use_mag = method.endswith("_marg") and has_mag
         filt = _build_filter(method, sample_rate_hz=sample_rate_hz)
         filt.initialize_from_acc(first_acc)
 
@@ -121,7 +141,7 @@ def run_orientation_filters(
             if not np.all(np.isfinite(gyro_i)):
                 # No gyro this step — repeat last quaternion, carry dt forward so
                 # the next real gyro sample integrates over the full elapsed time.
-                q = filt._q.copy()
+                q = filt.current_quaternion()
             else:
                 if use_mag:
                     q = filt.update(acc_i, gyro_i, mag=mag_i, dt=pending_dt)
@@ -247,7 +267,7 @@ def process_section_orientation(
     variants: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run orientation method(s) for one section and flatten the selected result."""
-    methods = list(variants) if variants is not None else list(_ALL_METHODS)
+    methods = list(variants) if variants is not None else list(DEFAULT_ORIENTATION_VARIANTS)
     orient_dir = section_dir / "orientation"
     all_methods_json = orient_dir / "all_methods.json"
     stats_json = orient_dir / "orientation_stats.json"
