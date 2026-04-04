@@ -1,4 +1,0 @@
-scope,recording_id,section_id,scenario_label,label_source,labeler,label_confidence,label_status,label_schema_version
-recording,2026-01-15_r1,,steady_state,fixture,smoke_test,0.9,confirmed,thesis_fixture_v1
-recording,2026-01-15_r2,,hard_braking,fixture,smoke_test,0.9,confirmed,thesis_fixture_v1
-recording,2026-01-15_r3,,steady_state,fixture,smoke_test,0.9,confirmed,thesis_fixture_v1

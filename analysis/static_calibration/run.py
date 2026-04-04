@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from common import load_dataframe
+from common.paths import read_csv
 
 from .imu_static import (
     calibration_data_dir,
@@ -50,7 +50,7 @@ def run_calibration_pipeline(
 
     summaries = []
     for stem in sorted(stem_to_csv.keys()):
-        df = load_dataframe(stem_to_csv[stem])
+        df = read_csv(stem_to_csv[stem])
         summaries.append(summarize_stationary_recording(df, stem, trim_fraction=trim_fraction))
 
     calibration = estimate_calibration_from_summaries(summaries)
@@ -63,7 +63,7 @@ def run_calibration_pipeline(
 
     plot_outputs: dict[str, Path | list[Path]] = {}
     if write_plots:
-        parsed_by_stem = {stem: load_dataframe(csv_path) for stem, csv_path in stem_to_csv.items()}
+        parsed_by_stem = {stem: read_csv(csv_path) for stem, csv_path in stem_to_csv.items()}
         per_recording = calibration["per_recording"]
         plot_outputs["overview"] = plot_recordings_overview(
             per_recording,

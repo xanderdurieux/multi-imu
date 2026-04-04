@@ -1,16 +1,41 @@
-"""Ride-level world-frame calibration for multi-IMU sections."""
+"""Protocol-aware IMU calibration and world-frame alignment.
 
-from __future__ import annotations
+Stages
+------
+1. Detect opening routine (pre-tap static → taps → post-tap static).
+2. Estimate sensor intrinsics (gyro bias; acc from static hardware cal if available).
+3. Estimate alignment rotation from first post-mount stable window (Arduino)
+   or opening static window (Sporsa).
+4. Apply calibration: bias-correct raw axes, rotate to world frame.
+5. Write ``calibrated/<sensor>.csv`` and ``calibrated/calibration.json``.
 
+CLI::
 
-def __getattr__(name):  # noqa: D401
-    if name == "calibrate_section":
-        from .calibrate import calibrate_section
-        return calibrate_section
-    if name == "validate":
-        from .validate import validate
-        return validate
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    python -m calibration <section_name>
+    python -m calibration --recording 2026-02-26_r1 --force
+"""
 
+from .core import (
+    OpeningSequence,
+    SensorIntrinsics,
+    SensorAlignment,
+    SectionCalibration,
+    detect_protocol_landmarks,
+    estimate_sensor_intrinsics,
+    estimate_sensor_alignment,
+    apply_calibration,
+)
+from .pipeline import calibrate_section, calibrate_recording_sections
 
-__all__ = ["calibrate_section", "validate"]
+__all__ = [
+    "OpeningSequence",
+    "SensorIntrinsics",
+    "SensorAlignment",
+    "SectionCalibration",
+    "detect_protocol_landmarks",
+    "estimate_sensor_intrinsics",
+    "estimate_sensor_alignment",
+    "apply_calibration",
+    "calibrate_section",
+    "calibrate_recording_sections",
+]

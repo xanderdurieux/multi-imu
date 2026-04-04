@@ -1,121 +1,309 @@
-"""Plot physically interpretable derived dual-IMU signals for a section.
+"""Plot derived signals for one section.
 
-Run from ``analysis/``:
-
-    uv run python -m visualization.plot_derived <section>
+Generates:
+- ``derived/derived_overview.png``     all derived signals, both sensors
+- ``derived/linear_acceleration.png``  orientation-aware linear acc, per axis
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
-from derived.compute import derive_section_signals
+from common.paths import project_relative_path, read_csv, resolve_data_dir
+from common.signals import smooth_moving_average
+from visualization._utils import filter_valid_plot_xy
+
+log = logging.getLogger(__name__)
+
+_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
+_AXIS_COLORS   = {"x": "#e41a1c", "y": "#4daf4a", "z": "#377eb8"}
+_SENSORS = ("sporsa", "arduino")
 
 
-def _resolve_section_path(section_arg: str) -> Path:
-    p = Path(section_arg)
-    if p.is_dir():
-        return p.resolve()
-    from common.paths import sections_root
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
-    cand = sections_root() / section_arg
-    if cand.is_dir():
-        return cand.resolve()
-    raise FileNotFoundError(f"Section not found: {section_arg}")
+def _load_derived_csvs(section_dir: Path) -> dict[str, pd.DataFrame]:
+    derived_dir = section_dir / "derived"
+    out: dict[str, pd.DataFrame] = {}
+    for name in ("sporsa_signals", "arduino_signals", "cross_sensor_signals"):
+        p = derived_dir / f"{name}.csv"
+        if p.exists():
+            try:
+                out[name] = read_csv(p)
+            except Exception as exc:
+                log.warning("Could not read %s: %s", p, exc)
+    return out
 
 
-def plot_derived_signals(
-    section_path: Path,
-    *,
-    orientation_variant: str = "complementary_orientation",
-    recompute: bool = False,
-) -> Path:
-    """Create a section-level overview figure for derived signals."""
-    section_path = _resolve_section_path(str(section_path))
-    ddir = section_path / "derived"
+def _global_t0(dfs: dict[str, pd.DataFrame]) -> float:
+    """Return minimum timestamp (ms) across all loaded DataFrames."""
+    mins: list[float] = []
+    for df in dfs.values():
+        if "timestamp" not in df.columns:
+            continue
+        ts = pd.to_numeric(df["timestamp"], errors="coerce").dropna()
+        if len(ts):
+            mins.append(float(ts.min()))
+    return min(mins) if mins else 0.0
 
-    needed = [
-        ddir / "sporsa_signals.csv",
-        ddir / "arduino_signals.csv",
-        ddir / "cross_sensor_signals.csv",
-        ddir / "derived_signals_meta.json",
-    ]
-    if recompute or not all(p.exists() for p in needed):
-        derive_section_signals(section_path, orientation_variant=orientation_variant, include_normalized=True)
 
-    bike = pd.read_csv(ddir / "sporsa_signals.csv")
-    rider = pd.read_csv(ddir / "arduino_signals.csv")
-    cross = pd.read_csv(ddir / "cross_sensor_signals.csv")
-    meta = json.loads((ddir / "derived_signals_meta.json").read_text(encoding="utf-8"))
+def _to_seconds(df: pd.DataFrame, t0_ms: float) -> np.ndarray:
+    """Convert df['timestamp'] (ms) to seconds relative to t0_ms."""
+    return (pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float) - t0_ms) / 1000.0
 
-    fig, axs = plt.subplots(4, 1, figsize=(14, 11), sharex=True)
 
-    axs[0].plot(bike["time_s"], bike["acc_vertical_m_s2"], label="Bike vertical", lw=1.0, color="#e05c44")
-    axs[0].plot(rider["time_s"], rider["acc_vertical_m_s2"], label="Rider vertical", lw=1.0, color="#4c9be8", alpha=0.9)
-    axs[0].set_ylabel("m/s²")
-    axs[0].set_title("Gravity-compensated vertical acceleration")
-    axs[0].grid(alpha=0.3)
-    axs[0].legend(loc="upper right")
+def _yclip(arr: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> tuple[float, float]:
+    """Return y-limits clipped to the lo/hi percentile of finite values."""
+    finite = arr[np.isfinite(arr)]
+    if len(finite) == 0:
+        return -1.0, 1.0
+    ylo, yhi = float(np.percentile(finite, lo)), float(np.percentile(finite, hi))
+    pad = max((yhi - ylo) * 0.1, 0.05)
+    return ylo - pad, yhi + pad
 
-    axs[1].plot(cross["time_s"], cross["residual_vertical_m_s2"], lw=1.0, color="#2c7fb8", label="Vertical residual")
-    if "residual_longitudinal_m_s2" in cross.columns:
-        axs[1].plot(cross["time_s"], cross["residual_longitudinal_m_s2"], lw=0.9, color="#fd8d3c", alpha=0.8, label="Longitudinal residual")
-    if "residual_lateral_m_s2" in cross.columns:
-        axs[1].plot(cross["time_s"], cross["residual_lateral_m_s2"], lw=0.9, color="#31a354", alpha=0.8, label="Lateral residual")
-    axs[1].axhline(0.0, color="k", lw=0.8, alpha=0.4)
-    axs[1].set_ylabel("m/s²")
-    axs[1].set_title("Rider-minus-bike residual motion")
-    axs[1].grid(alpha=0.3)
-    axs[1].legend(loc="upper right")
 
-    axs[2].plot(cross["time_s"], cross["shock_transmission_gain"], color="#d95f0e", lw=1.0)
-    axs[2].axhline(1.0, color="k", lw=0.8, alpha=0.4, ls="--")
-    axs[2].set_ylabel("gain")
-    axs[2].set_title("Shock transmission (bike → rider, vertical RMS ratio)")
-    axs[2].grid(alpha=0.3)
+# ---------------------------------------------------------------------------
+# Overview
+# ---------------------------------------------------------------------------
 
-    axs[3].plot(bike["time_s"], bike["tilt_roll_rate_rad_s"], color="#756bb1", lw=0.9, label="Bike roll-rate")
-    axs[3].plot(rider["time_s"], rider["tilt_roll_rate_rad_s"], color="#9e9ac8", lw=0.9, label="Rider roll-rate")
-    axs[3].plot(bike["time_s"], bike["tilt_pitch_rate_rad_s"], color="#006d2c", lw=0.9, label="Bike pitch-rate")
-    axs[3].plot(rider["time_s"], rider["tilt_pitch_rate_rad_s"], color="#74c476", lw=0.9, label="Rider pitch-rate")
-    axs[3].set_ylabel("rad/s")
-    axs[3].set_xlabel("Section time (s)")
-    axs[3].set_title("Tilt-rate derivatives from orientation")
-    axs[3].grid(alpha=0.3)
-    axs[3].legend(loc="upper right", ncol=2, fontsize=9)
+def plot_derived_overview(section_dir: Path) -> Path | None:
+    """Multi-panel overview of all derived signals for both sensors."""
+    dfs = _load_derived_csvs(section_dir)
+    if not dfs:
+        log.warning("No derived CSVs found in %s", section_dir / "derived")
+        return None
 
-    fa = bool(meta.get("full_horizontal_alignment_available", False))
-    note = (
-        f"alignment={meta.get('frame_alignment', 'unknown')} | "
-        f"full_horizontal_alignment_available={fa}"
+    t0 = _global_t0(dfs)
+
+    has_linear = any(
+        "acc_linear_norm" in dfs.get(f"{s}_signals", pd.DataFrame()).columns
+        for s in _SENSORS
     )
-    fig.suptitle(f"Derived signal overview — {section_path.name}\n{note}", fontsize=12)
+    has_cross = "cross_sensor_signals" in dfs
 
-    out_path = ddir / "derived_signals_overview.png"
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=170)
+    panels: list[tuple[str, str, float | None]] = [
+        ("acc_norm",        "acc norm (m/s²)",     9.81),
+        ("acc_vertical",    "acc vertical (m/s²)",  9.81),
+        ("acc_hf",          "acc HF (m/s²)",        0.0),
+        ("gyro_norm",       "gyro norm (°/s)",      None),
+        ("jerk_norm",       "jerk norm (m/s³)",     None),
+        ("energy_acc",      "energy acc (m/s²)",    None),
+    ]
+    if has_linear:
+        panels.insert(3, ("acc_linear_norm", "linear acc norm (m/s²)", 0.0))
+
+    n_rows = len(panels) + (1 if has_cross else 0)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(14, 2.0 * n_rows), sharex=True)
+    if n_rows == 1:
+        axes = [axes]
+
+    for ax_idx, (col, ylabel, hline) in enumerate(panels):
+        ax = axes[ax_idx]
+        any_data = False
+        for sensor in _SENSORS:
+            df = dfs.get(f"{sensor}_signals")
+            if df is None or col not in df.columns:
+                continue
+            ts = _to_seconds(df, t0)
+            y = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            xp, yp = filter_valid_plot_xy(ts, y)
+            if xp.size == 0:
+                continue
+            ax.plot(xp, yp, lw=0.6, alpha=0.55,
+                    color=_SENSOR_COLORS[sensor], label=sensor)
+            # Bold smoothed line for readability.
+            ys = smooth_moving_average(yp, 50)
+            xps, yps = filter_valid_plot_xy(xp, ys)
+            if xps.size:
+                ax.plot(xps, yps, lw=1.4, alpha=0.9,
+                        color=_SENSOR_COLORS[sensor])
+            any_data = True
+        if hline is not None:
+            ax.axhline(hline, color="gray", lw=0.6, ls="--", alpha=0.5)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.grid(alpha=0.15, lw=0.4)
+        if any_data:
+            handles, labels = ax.get_legend_handles_labels()
+            uniq = dict(zip(labels, handles))
+            ax.legend(uniq.values(), uniq.keys(), fontsize=7, loc="upper right",
+                      handlelength=1.2)
+
+    if has_cross:
+        ax = axes[len(panels)]
+        cross_df = dfs["cross_sensor_signals"]
+        ts = _to_seconds(cross_df, t0)
+        for col, color, label in [
+            ("disagree_score",  "#9467bd", "disagree score"),
+            ("acc_correlation", "#8c564b", "acc correlation"),
+        ]:
+            if col not in cross_df.columns:
+                continue
+            y = pd.to_numeric(cross_df[col], errors="coerce").to_numpy(dtype=float)
+            xp, yp = filter_valid_plot_xy(ts, y)
+            if xp.size:
+                ax.plot(xp, yp, lw=0.7, alpha=0.75, color=color, label=label)
+        ax.set_ylabel("cross-sensor", fontsize=8)
+        ax.grid(alpha=0.15, lw=0.4)
+        ax.legend(fontsize=7, loc="upper right", handlelength=1.2)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(f"{section_dir.name} — derived signals overview", fontsize=10)
+    fig.tight_layout(h_pad=0.3)
+
+    out_path = section_dir / "derived" / "derived_overview.png"
+    fig.savefig(out_path, dpi=130)
     plt.close(fig)
+    log.info("Plot written: %s", project_relative_path(out_path))
     return out_path
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(prog="python -m visualization.plot_derived")
-    ap.add_argument("section", help="Section folder path or section name")
-    ap.add_argument("--orientation-variant", default="complementary_orientation")
-    ap.add_argument("--recompute", action="store_true", help="Recompute derived signals before plotting")
-    args = ap.parse_args()
+# ---------------------------------------------------------------------------
+# Linear acceleration detail
+# ---------------------------------------------------------------------------
 
-    out = plot_derived_signals(
-        Path(args.section),
-        orientation_variant=args.orientation_variant,
-        recompute=args.recompute,
+def plot_linear_acceleration(section_dir: Path) -> Path | None:
+    """Per-axis linear acceleration, both sensors overlaid in each panel."""
+    dfs = _load_derived_csvs(section_dir)
+
+    lin_cols = ("acc_linear_x", "acc_linear_y", "acc_linear_z", "acc_linear_norm")
+    available = {
+        s: dfs[f"{s}_signals"]
+        for s in _SENSORS
+        if f"{s}_signals" in dfs
+        and all(c in dfs[f"{s}_signals"].columns for c in lin_cols)
+    }
+    if not available:
+        log.warning("No linear acceleration columns in derived CSVs for %s", section_dir.name)
+        return None
+
+    t0 = _global_t0(dfs)
+    method = _get_method_label(section_dir)
+
+    axis_panels = [
+        ("acc_linear_x",    "X  lateral (m/s²)",   _AXIS_COLORS["x"]),
+        ("acc_linear_y",    "Y  forward (m/s²)",    _AXIS_COLORS["y"]),
+        ("acc_linear_z",    "Z  vertical (m/s²)",   _AXIS_COLORS["z"]),
+        ("acc_linear_norm", "norm (m/s²)",           "black"),
+    ]
+
+    fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
+
+    for row, (col, ylabel, axis_color) in enumerate(axis_panels):
+        ax = axes[row]
+        all_y: list[np.ndarray] = []
+
+        for sensor in _SENSORS:
+            df = available.get(sensor)
+            if df is None:
+                continue
+            ts = _to_seconds(df, t0)
+            y = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            xp, yp = filter_valid_plot_xy(ts, y)
+            if xp.size == 0:
+                continue
+            all_y.append(yp)
+            # Raw signal, thin + transparent.
+            ax.plot(xp, yp, lw=0.5, alpha=0.3, color=_SENSOR_COLORS[sensor])
+            # Smoothed overlay, bold.
+            ys = smooth_moving_average(yp, 30)
+            xps, yps = filter_valid_plot_xy(xp, ys)
+            if xps.size:
+                ax.plot(xps, yps, lw=1.5, alpha=0.9,
+                        color=_SENSOR_COLORS[sensor], label=sensor)
+
+        ax.axhline(0.0, color="gray", lw=0.6, ls="--", alpha=0.5)
+        ax.set_ylabel(ylabel, fontsize=9, color=axis_color)
+        ax.grid(alpha=0.15, lw=0.4)
+
+        # Clip y-axis to signal range, ignoring outlier spikes.
+        if all_y:
+            combined = np.concatenate(all_y)
+            ylo, yhi = _yclip(combined, lo=0.5, hi=99.5)
+            if col != "acc_linear_norm":
+                bound = max(abs(ylo), abs(yhi), 0.25)
+                ylo, yhi = -bound, bound
+            ax.set_ylim(ylo, yhi)
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            uniq = dict(zip(labels, handles))
+            ax.legend(uniq.values(), uniq.keys(), fontsize=8, loc="upper right",
+                      handlelength=1.2)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(
+        f"{section_dir.name} — orientation-aware linear acceleration  [{method}]",
+        fontsize=10,
     )
-    print(str(out))
+    fig.tight_layout(h_pad=0.4)
+
+    out_path = section_dir / "derived" / "linear_acceleration.png"
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    log.info("Plot written: %s", project_relative_path(out_path))
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_method_label(section_dir: Path) -> str:
+    import json
+    p = section_dir / "orientation" / "orientation_stats.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8")).get("selected_method", "orientation")
+        except Exception:
+            pass
+    return "orientation"
+
+
+def plot_derived_stage(target: str | Path) -> list[Path]:
+    """Generate all derived signal plots for a section."""
+    section_dir = resolve_data_dir(target)
+    while section_dir != section_dir.parent:
+        if (section_dir / "derived").is_dir() or (section_dir / "calibrated").is_dir():
+            break
+        section_dir = section_dir.parent
+
+    out_paths: list[Path] = []
+    for plot_fn in (plot_derived_overview, plot_linear_acceleration):
+        try:
+            p = plot_fn(section_dir)
+        except Exception as exc:
+            log.warning("%s failed for %s: %s", plot_fn.__name__, section_dir.name, exc)
+            continue
+        if p is not None:
+            out_paths.append(p)
+    return out_paths
+
+
+def main(argv: list[str] | None = None) -> None:
+    import sys
+    argv = list(argv if argv is not None else sys.argv[1:])
+    parser = argparse.ArgumentParser(prog="python -m visualization.plot_derived")
+    parser.add_argument("target", help="Section directory or name")
+    args = parser.parse_args(argv)
+    try:
+        paths = plot_derived_stage(args.target)
+    except Exception as exc:
+        log.error("Failed to plot derived signals: %s", exc)
+        return
+    if not paths:
+        print("No derived plots generated.")
+    for p in paths:
+        print(f"Saved -> {p}")
 
 
 if __name__ == "__main__":

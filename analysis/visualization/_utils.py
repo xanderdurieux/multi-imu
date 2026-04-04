@@ -1,115 +1,61 @@
-"""Shared low-level utilities for visualization modules."""
+"""Internal visualization utilities."""
 
 from __future__ import annotations
-
-import re
 
 import numpy as np
 import pandas as pd
 
-from common.paths import recording_stage_dir as _recording_stage_dir
-from common.paths import section_dir as _section_dir
+def _as_float_vector(values: np.ndarray) -> np.ndarray:
+    """Return a flattened float vector for plotting helpers."""
+    return np.ravel(np.asarray(values, dtype=float))
 
 
-def mask_dropout_packets(df: pd.DataFrame, epsilon_fraction: float = 0.1) -> pd.DataFrame:
-    """Set sensor columns to NaN for rows where acc_norm is near-zero.
+def _mask_valid_plot_x(x: np.ndarray) -> np.ndarray:
+    """Return boolean mask of finite, monotonically non-decreasing values."""
+    x = _as_float_vector(x)
+    if x.size == 0:
+        return np.array([], dtype=bool)
+    finite = np.isfinite(x)
+    # Also mask negative jumps (time going backwards).
+    diffs = np.diff(x, prepend=x[0])
+    monotone = diffs >= 0
+    return finite & monotone
 
-    The timestamp column is preserved so dropout periods appear as visible
-    gaps rather than zero-value spikes on the time axis.
-    """
-    acc_cols = ["ax", "ay", "az"]
-    if not all(c in df.columns for c in acc_cols):
-        return df
-    acc_norm = np.sqrt((df[acc_cols].to_numpy(dtype=float) ** 2).sum(axis=1))
-    g_approx = float(np.nanmedian(acc_norm))
-    if g_approx <= 0:
-        return df
-    dropout = acc_norm < epsilon_fraction * g_approx
-    if not dropout.any():
-        return df
-    out = df.copy()
-    sensor_cols = [c for c in df.columns if c != "timestamp"]
-    out.loc[dropout, sensor_cols] = np.nan
+
+def filter_valid_plot_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return x/y arrays already filtered to values safe to plot."""
+    x = _as_float_vector(x)
+    y = _as_float_vector(y)
+    if x.shape != y.shape:
+        raise ValueError(f"Plot arrays must have the same shape, got {x.shape} and {y.shape}")
+    valid = _mask_valid_plot_x(x) & np.isfinite(y)
+    return x[valid], y[valid]
+
+
+def strict_vector_norm(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
+    """Return row-wise vector norm while preserving NaN for incomplete rows."""
+    if not cols:
+        return np.array([], dtype=float)
+    missing = [col for col in cols if col not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns for vector norm: {missing}")
+
+    arr = np.column_stack([pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float) for col in cols])
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    valid = np.isfinite(arr).all(axis=1)
+    out[valid] = np.linalg.norm(arr[valid], axis=1)
     return out
 
 
-def time_axis_seconds(timestamps_ms: pd.Series) -> pd.Series:
-    """Convert a millisecond timestamp series to seconds starting at zero."""
-    ts = timestamps_ms.astype(float)
-    return (ts - float(ts.iloc[0])) / 1000.0
-
-
-def acc_norm_series(df: pd.DataFrame) -> np.ndarray:
-    """Compute accelerometer vector norm for each row."""
-    acc = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-    return np.sqrt((acc ** 2).sum(axis=1))
-
-
-def mask_valid_plot_x(x: np.ndarray | pd.Series) -> np.ndarray:
-    """True where *x* is safe to use as a time-like plot abscissa.
-
-    Drops non-finite values. Drops **accidental** ``x == 0``: zeros are kept
-    only in the leading run before any positive *x* (typical ``t=0`` at
-    recording start); a zero after a positive time is treated as invalid.
-    """
-    xv = np.asarray(x, dtype=float)
-    n = xv.size
-    if n == 0:
-        return np.zeros(0, dtype=bool)
-    finite = np.isfinite(xv)
+def timestamps_to_relative_seconds(values: pd.Series | np.ndarray) -> np.ndarray:
+    """Convert timestamp-like values in ms to relative seconds."""
+    ts = _as_float_vector(pd.to_numeric(values, errors="coerce").to_numpy(dtype=float))
+    if ts.size == 0:
+        return ts
+    finite = np.isfinite(ts)
     if not finite.any():
-        return finite
-    xf = np.where(finite, xv, -np.inf)
-    cmax = np.maximum.accumulate(xf)
-    prev_max = np.empty(n, dtype=float)
-    prev_max[0] = -np.inf
-    if n > 1:
-        prev_max[1:] = cmax[:-1]
-    bad_zero = finite & (xv == 0.0) & (prev_max > 0.0)
-    return finite & ~bad_zero
-
-
-def nan_mask_invalid_plot_x(
-    x: np.ndarray | pd.Series,
-    y: np.ndarray | pd.Series,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(x, y)`` as float arrays with NaNs where the abscissa is invalid.
-
-    Use for :meth:`~matplotlib.axes.Axes.plot` / :meth:`~matplotlib.axes.Axes.fill_between`
-    so segments break at bad timestamps instead of drawing spikes to ``x=0``.
-    """
-    xa = np.asarray(x, dtype=float)
-    ya = np.asarray(y, dtype=float)
-    xm = mask_valid_plot_x(xa)
-    return np.where(xm, xa, np.nan), np.where(xm, ya, np.nan)
-
-
-_SECTION_RE = re.compile(r"^(?P<rec>.+_r\d+)s(?P<idx>\d+)$")
-
-
-def parse_recording_or_section_id(name: str) -> tuple[str, int | None]:
-    """Parse either a recording id or a section id.
-
-    - recording: ``<session>_r<idx>`` (e.g. ``2026-02-26_r2``) → ``(name, None)``
-    - section:   ``<recording>s<section_idx>`` (e.g. ``2026-02-26_r2s1``) → ``(<recording>, section_idx)``
-    """
-    n = name.strip()
-    m = _SECTION_RE.match(n)
-    if not m:
-        return n, None
-    return str(m.group("rec")), int(m.group("idx"))
-
-
-def resolve_stage_dir(recording_or_section_id: str, stage: str):
-    """Resolve a stage directory for both recording-level and section-level layouts.
-
-    This lets visualization scripts accept either:
-    - a recording id (e.g. ``2026-02-26_r2``) with stages like ``orientation`` / ``calibrated`` / ``synced``
-    - a section id (e.g. ``2026-02-26_r2s1``) with the same stage names, located under ``data/sections/``.
-    """
-    from pathlib import Path
-
-    rec, section_idx = parse_recording_or_section_id(recording_or_section_id)
-    if section_idx is None:
-        return _recording_stage_dir(rec, stage)
-    return _section_dir(rec, section_idx) / stage
+        return np.full_like(ts, np.nan, dtype=float)
+    t0 = ts[finite][0]
+    out = (ts - t0) / 1000.0
+    out[~finite] = np.nan
+    return out

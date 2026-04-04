@@ -1,7 +1,8 @@
 """Interactive browser labeler: synced IMU (acc, gyro, mag) + session GPS on a map.
 
-Time on the x-axis is **seconds from the first ``sporsa`` sample** in the chosen folder
-(same origin as ``labels.parser`` interval ``window_*_s`` for sections).
+Time on the x-axis is **seconds from the first ``sporsa`` sample** in the chosen folder.
+Exported CSVs include both these relative seconds and feature-compatible
+absolute ``start_ms`` / ``end_ms`` timestamps.
 
 GPS is clipped to the IMU span plus a few seconds, loaded from
 ``data/sessions/<session>/*gps*.csv``. The map sits beside the time stack; charts use the browser width (no horizontal
@@ -33,11 +34,60 @@ from plotly.subplots import make_subplots
 from plotly.utils import PlotlyJSONEncoder
 
 import plotly
-from common import load_dataframe
-from common.paths import session_input_dir, recording_stage_dir
+from common.paths import list_csv_files, read_csv, resolve_data_dir, session_input_dir
 from parser.gps import parse_gps_csv
-from visualization._utils import mask_dropout_packets, mask_valid_plot_x
-from visualization.thesis_style import THESIS_COLORS, plotly_template_layout
+
+# ---------------------------------------------------------------------------
+# Inline style helpers (no external thesis_style dependency)
+# ---------------------------------------------------------------------------
+
+THESIS_COLORS: list[str] = [
+    "#4f46e5",  # indigo
+    "#0ea5e9",  # sky
+    "#f59e0b",  # amber
+    "#22c55e",  # green
+    "#ef4444",  # red
+    "#a855f7",  # purple
+    "#ec4899",  # pink
+    "#14b8a6",  # teal
+    "#f97316",  # orange
+    "#64748b",  # slate
+]
+
+
+def plotly_template_layout() -> dict:
+    """Return a Plotly layout dict with a consistent thesis style."""
+    return {
+        "paper_bgcolor": "#ffffff",
+        "plot_bgcolor": "#f8fafc",
+        "font": {"family": "system-ui, sans-serif", "size": 11, "color": "#0f172a"},
+        "xaxis": {"gridcolor": "#e2e8f0", "linecolor": "#cbd5e1"},
+        "yaxis": {"gridcolor": "#e2e8f0", "linecolor": "#cbd5e1"},
+    }
+
+
+def mask_valid_plot_x(t: np.ndarray) -> np.ndarray:
+    """Return boolean mask of finite, monotonically non-decreasing time values."""
+    t = np.asarray(t, dtype=float)
+    if t.size == 0:
+        return np.array([], dtype=bool)
+    finite = np.isfinite(t)
+    diffs = np.diff(t, prepend=t[0])
+    return finite & (diffs >= 0)
+
+
+def mask_dropout_packets(df: pd.DataFrame) -> pd.DataFrame:
+    """NaN-out value columns for rows with non-finite or backward-jumping timestamps."""
+    ts = df["timestamp"].to_numpy(dtype=float)
+    bad = ~np.isfinite(ts)
+    diffs = np.diff(ts, prepend=ts[0])
+    bad |= diffs < 0
+    if not bad.any():
+        return df
+    result = df.copy()
+    value_cols = [c for c in df.columns if c != "timestamp"]
+    result.loc[bad, value_cols] = np.nan
+    return result
 
 log = logging.getLogger(__name__)
 
@@ -46,13 +96,20 @@ GYRO = ("gx", "gy", "gz")
 MAG = ("mx", "my", "mz")
 
 LABEL_CSV_HEADER = [
+    "start_ms",
+    "end_ms",
+    "start_s",
+    "end_s",
+    "label",
+    "scenario_label",
     "scope",
     "recording_id",
     "section_id",
-    "window_start_s",
-    "window_end_s",
-    "scenario_label",
     "label_source",
+    "annotator",
+    "confidence",
+    "ambiguous",
+    "notes",
 ]
 
 
@@ -77,53 +134,6 @@ def session_name_from_recording_id(recording_id: str) -> str | None:
     return m.group(1) if m else None
 
 
-def resolve_labeling_data_dir(target: str | Path) -> Path:
-    """Resolve ``recording/<stage>`` or a section-folder name or a directory path.
-
-    Supported shorthand inputs (relative to ``analysis/``):
-    - ``<recording>/<stage>`` (e.g. ``2026-02-26_r5/parsed``)
-    - ``<recording>s<section_idx>`` (e.g. ``2026-02-26_r5s1``)
-    """
-    if isinstance(target, Path):
-        p = target.resolve()
-        if p.is_dir() and (p / "sporsa.csv").is_file():
-            return p
-        raise FileNotFoundError(f"Not a directory with sporsa.csv: {p}")
-
-    s = str(target).strip().rstrip("/").replace("\\", "/")
-    parts = s.split("/")
-
-    # Section-folder shorthand: <recording>s<section_idx> (e.g. 2026-02-26_r5s1).
-    if len(parts) == 1:
-        from common.paths import parse_section_folder_name, sections_root
-
-        try:
-            _rec_name, _sec_idx = parse_section_folder_name(parts[0])
-        except Exception:
-            _rec_name = None
-        else:
-            d = sections_root() / parts[0]
-            if d.is_dir() and (d / "sporsa.csv").is_file():
-                return d
-
-    if len(parts) >= 2:
-        rec = parts[0]
-        stage = "/".join(parts[1:])
-        d = recording_stage_dir(rec, stage)
-        if d.is_dir() and (d / "sporsa.csv").is_file():
-            return d
-
-    p = Path(s)
-    if p.is_dir() and (p / "sporsa.csv").is_file():
-        return p.resolve()
-
-    raise FileNotFoundError(
-        f"Could not resolve {target!r}. Try e.g. '2026-02-26_r5/parsed' or "
-        f"'2026-02-26_r5s1' (from analysis/)."
-    )
-
-
-
 def _nan_where_bad_time_x(t: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -138,7 +148,7 @@ def _load_imu(
 ) -> tuple[np.ndarray, pd.DataFrame] | None:
     if not csv_path.is_file():
         return None
-    df = load_dataframe(csv_path)
+    df = read_csv(csv_path)
     if df.empty or "timestamp" not in df.columns:
         return None
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
@@ -160,7 +170,7 @@ def find_best_gps_csv(session_dir: Path, imu_t0_ms: float, imu_t1_ms: float) -> 
     if not session_dir.is_dir():
         return None
     candidates = sorted(
-        (p for p in session_dir.glob("*.csv") if "gps" in p.name.lower()),
+        (p for p in list_csv_files(session_dir) if "gps" in p.name.lower()),
         key=lambda x: x.name,
     )
     if not candidates:
@@ -552,14 +562,14 @@ def _apply_per_subplot_legends(fig: go.Figure, n_rows: int, *, legend_x_paper: f
 
 def build_event_labeler_figure(
     data_dir: Path,
-) -> tuple[go.Figure, go.Figure | None, float, str, dict[str, list[float]]]:
+) -> tuple[go.Figure, go.Figure | None, float, str, dict[str, list[float]], float]:
     """Return time-series figure, optional map figure, duration (s), GPS note, GPS arrays for JS sync.
 
     Figures use ``autosize=True`` so the HTML page can fit them to the viewport (no fixed pixel width).
     """
     data_dir = Path(data_dir)
     sp = data_dir / "sporsa.csv"
-    ts_b = load_dataframe(sp).dropna(subset=["timestamp"]).sort_values("timestamp")
+    ts_b = read_csv(sp).dropna(subset=["timestamp"]).sort_values("timestamp")
     if ts_b.empty:
         raise FileNotFoundError(f"No timestamps in {sp}")
     t0_ms = float(ts_b["timestamp"].iloc[0])
@@ -583,10 +593,7 @@ def build_event_labeler_figure(
             cand = session_input_dir(session)
             log.info("No overlapping GPS CSV under %s; trying any *gps*.csv name.", cand)
             if cand.is_dir():
-                any_gps = sorted(
-                    (p for p in cand.glob("*.csv") if "gps" in p.name.lower()),
-                    key=lambda x: x.name,
-                )
+                any_gps = [p for p in list_csv_files(cand) if "gps" in p.name.lower()]
                 gps_path = any_gps[0] if any_gps else None
 
     gps_t_s, gps_lat, gps_lon, gps_speed, gps_note = _prepare_gps_track_arrays(
@@ -794,7 +801,7 @@ def build_event_labeler_figure(
             "lon": [float(x) for x in gps_lon],
         }
 
-    return fig, fig_map, duration_s, gps_note, gps_payload
+    return fig, fig_map, duration_s, gps_note, gps_payload, t0_ms
 
 
 def _slug(s: str) -> str:
@@ -944,7 +951,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         <b>Navigate:</b> default drag is <b>box zoom</b> (shared time axis on all rows); use the mode bar <b>Pan</b> to drag. <b>Scroll wheel</b> zooms in the time plot.
         The strip fits the page width.
         <b>Hover:</b> each row shows Timestamp plus <code>…_x / _y / _z</code> (e.g. <code>bike_acc</code>); spikes align across panels. <b>Y range is fixed</b> — only the time axis zooms. The map cursor follows the hovered time, and a <b>vertical line</b> marks the same time on the speed chart. The right column shows <b>GPS speed</b> (m/s) under the map when the CSV has a speed column. The map is framed with margin so the full track stays in view.
-        <b>Interval:</b> two clicks; <b>Peak:</b> one click. Times are seconds from the first sporsa sample in this folder.
+        <b>Interval:</b> two clicks; <b>Peak:</b> one click. Times shown here are seconds from the first sporsa sample in this folder; downloaded CSVs also include absolute millisecond timestamps for the pipeline.
       </p>
       <p class="gps-note">{gps_note_esc}</p>
       {section_warn}
@@ -1020,6 +1027,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 
   function fmt4(x) {{
     return Math.round(x * 10000) / 10000;
+  }}
+
+  function fmt3(x) {{
+    return Math.round(x * 1000) / 1000;
   }}
 
   function labelShapes() {{
@@ -1303,16 +1314,26 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     const rec = recEl.value.trim();
     const sec = secEl.value.trim();
     const src = srcEl.value.trim() || 'manual';
+    const originMs = Number(payload.timeOriginMs || 0);
     const lines = [payload.csvHeader.join(',')];
     rows.forEach(function(r) {{
+      const startMs = originMs + (r.t0 * 1000.0);
+      const endMs = originMs + (r.t1 * 1000.0);
       lines.push([
-        'interval',
-        csvEscape(rec),
-        csvEscape(sec),
+        fmt3(startMs),
+        fmt3(endMs),
         fmt4(r.t0),
         fmt4(r.t1),
         csvEscape(r.label),
+        csvEscape(r.label),
+        'interval',
+        csvEscape(rec),
+        csvEscape(sec),
         csvEscape(src),
+        '',
+        '1.0',
+        'False',
+        '',
       ].join(','));
     }});
     return lines.join('\\n');
@@ -1322,9 +1343,6 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     if (!recEl.value.trim()) {{
       alert('Set recording_id before download.');
       return;
-    }}
-    if (!secEl.value.trim()) {{
-      if (!confirm('Section ID is empty. Interval labels require section_id for the feature pipeline. Continue?')) return;
     }}
     const blob = new Blob([buildCsv()], {{ type: 'text/csv;charset=utf-8' }});
     const a = document.createElement('a');
@@ -1364,27 +1382,53 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     const lines = text.split(/\\r?\\n/).filter(function(l) {{ return l.trim().length; }});
     if (!lines.length) return {{ error: 'Empty file', rows: [] }};
     const header = lines[0].split(',').map(function(h) {{ return h.trim().toLowerCase(); }});
-    const need = ['scope', 'recording_id', 'section_id', 'window_start_s', 'window_end_s', 'scenario_label'];
+    const need = ['scope', 'recording_id', 'section_id', 'start_ms', 'end_ms', 'start_s', 'end_s', 'label', 'scenario_label'];
     const idx = {{}};
     need.forEach(function(k) {{
       const i = header.indexOf(k);
       if (i < 0) return;
       idx[k] = i;
     }});
-    if (idx.scope === undefined || idx.window_start_s === undefined || idx.window_end_s === undefined)
-      return {{ error: 'CSV must include scope, window_start_s, window_end_s', rows: [] }};
+    const legacyStartIdx = header.indexOf('window_start_s');
+    const legacyEndIdx = header.indexOf('window_end_s');
+    if (
+      idx.start_s === undefined && idx.end_s === undefined &&
+      idx.start_ms === undefined && idx.end_ms === undefined &&
+      legacyStartIdx < 0 && legacyEndIdx < 0
+    ) {{
+      return {{ error: 'CSV must include start/end columns in seconds or milliseconds', rows: [] }};
+    }}
     let recordingId = '';
     let sectionId = null;
     let labelSource = '';
     const out = [];
     let maxId = 0;
+    const originMs = Number(payload.timeOriginMs || 0);
     for (let li = 1; li < lines.length; li++) {{
       const cells = splitCsvLine(lines[li]);
-      const scope = (cells[idx.scope] || '').trim().toLowerCase();
-      if (scope !== 'interval') continue;
-      const t0 = parseFloat(cells[idx.window_start_s]);
-      const t1 = parseFloat(cells[idx.window_end_s]);
-      const lab = (cells[idx.scenario_label] || '').trim();
+      const scope = idx.scope !== undefined ? (cells[idx.scope] || '').trim().toLowerCase() : 'interval';
+      if (scope && scope !== 'interval') continue;
+      let t0 = NaN;
+      let t1 = NaN;
+      if (idx.start_s !== undefined && idx.end_s !== undefined) {{
+        t0 = parseFloat(cells[idx.start_s]);
+        t1 = parseFloat(cells[idx.end_s]);
+      }} else if (legacyStartIdx >= 0 && legacyEndIdx >= 0) {{
+        t0 = parseFloat(cells[legacyStartIdx]);
+        t1 = parseFloat(cells[legacyEndIdx]);
+      }} else if (idx.start_ms !== undefined && idx.end_ms !== undefined) {{
+        const startMs = parseFloat(cells[idx.start_ms]);
+        const endMs = parseFloat(cells[idx.end_ms]);
+        if (isFinite(startMs) && isFinite(endMs)) {{
+          t0 = (startMs - originMs) / 1000.0;
+          t1 = (endMs - originMs) / 1000.0;
+        }}
+      }}
+      const lab = (
+        (idx.scenario_label !== undefined ? cells[idx.scenario_label] : '') ||
+        (idx.label !== undefined ? cells[idx.label] : '') ||
+        ''
+      ).trim();
       if (!isFinite(t0) || !isFinite(t1) || !lab) continue;
       if (!recordingId && idx.recording_id !== undefined) recordingId = (cells[idx.recording_id] || '').trim();
       if (sectionId === null && idx.section_id !== undefined) sectionId = (cells[idx.section_id] || '').trim();
@@ -1429,7 +1473,7 @@ def write_event_labeler_html(
     *,
     pixels_per_second: float | None = None,
 ) -> Path:
-    data_dir = resolve_labeling_data_dir(target)
+    data_dir = resolve_data_dir(target)
     if out_path is None:
         out_path = data_dir / "event_labeler.html"
     out_path = Path(out_path)
@@ -1438,7 +1482,7 @@ def write_event_labeler_html(
     recording_id, section_id = infer_recording_section_ids(data_dir)
     if pixels_per_second is not None:
         log.warning("pixels_per_second is ignored; event labeler uses viewport width.")
-    fig_time, fig_map, duration_s, gps_note, gps_payload = build_event_labeler_figure(data_dir)
+    fig_time, fig_map, duration_s, gps_note, gps_payload, time_origin_ms = build_event_labeler_figure(data_dir)
     fig_time_json = fig_time.to_plotly_json()
     fig_map_json = fig_map.to_plotly_json() if fig_map is not None else None
     map_wrap_class = "hidden" if fig_map is None else ""
@@ -1450,8 +1494,9 @@ def write_event_labeler_html(
     section_warn = ""
     if not section_id:
         section_warn = (
-            '<p class="warn">This folder is not under <code>sections/section_N</code>. '
-            "Set Section ID manually so exported interval rows match your feature windows.</p>"
+            '<p class="hint">Labeling at recording level — leave Section ID empty. '
+            "After labeling, run <code>python -m labels.section_transfer "
+            f"{recording_id}</code> to transfer labels to all sections.</p>"
         )
 
     payload = {
@@ -1462,6 +1507,7 @@ def write_event_labeler_html(
         "gpsT": gps_payload["t"],
         "gpsLat": gps_payload["lat"],
         "gpsLon": gps_payload["lon"],
+        "timeOriginMs": time_origin_ms,
         "csvHeader": LABEL_CSV_HEADER,
         "suggestedFilename": suggested,
     }

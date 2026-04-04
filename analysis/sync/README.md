@@ -1,9 +1,9 @@
 # `sync/` — IMU Stream Synchronization
 
 This package aligns the Arduino (helmet, **target**) timestamps to the Sporsa
-(bicycle, **reference**) clock. It provides four independent methods, a shared
-quality-metric layer, a comparison/selection pipeline, and a session-level
-orchestrator that ties everything together.
+(bicycle, **reference**) clock. It provides four sync methods, shared signal
+processing utilities, a comparison/selection pipeline, and a session-level
+orchestrator for the broader Multi-IMU workflow.
 
 ---
 
@@ -48,16 +48,11 @@ so they are directly comparable across methods.
 
 ```
 sync/
-├── core.py                # streams, SDA alignment, LIDA SyncModel, shared metrics
-├── sda_sync.py            # Method 1: SDA only              → synced/sda/
-├── lida_sync.py           # Method 2: SDA + LIDA             → synced/lida/
-├── calibration_sync.py    # Method 3: calibration anchors    → synced/cal/
-├── online_sync.py         # Method 4: opening anchor + drift  → synced/online/
-├── selection.py    # compare methods, select best, apply to synced/
-├── pipeline.py     # run methods + selection (Python API)
-├── run.py          # CLI (`python -m sync`)
-├── __main__.py     # delegates to run.main()
-└── __init__.py
+├── core.py        # shared stream utilities, SDA/LIDA math, SyncModel, metrics
+├── methods.py     # the four concrete sync methods + recording/file I/O
+├── pipeline.py    # orchestration, comparison, selection, CLI main()
+├── __main__.py    # delegates to pipeline.main()
+└── __init__.py    # package exports
 ```
 
 ---
@@ -67,7 +62,7 @@ sync/
 Input is always ``data/recordings/<recording>/parsed/`` (Sporsa + Arduino CSVs).
 
 ```bash
-# One recording: run all four methods, select best, flat synced/ + plots
+# One recording: run all four methods, select best, flatten into synced/
 uv run -m sync 2026-02-26_r5
 
 # Whole session (every folder 2026-02-26_r*)
@@ -76,7 +71,7 @@ uv run -m sync 2026-02-26 --all
 
 Per-method outputs live under ``synced/sda`` … only until selection finishes; then
 they are removed and only the chosen streams remain in ``synced/`` together with
-comparison figures and ``all_methods.json``.
+``all_methods.json``.
 
 ### Python API
 
@@ -97,15 +92,16 @@ python -m sync <recording_or_session_prefix> [--all]
 
 ---
 
-## `run.py` / `pipeline.py`
+## `pipeline.py`
 
-Thin CLI plus orchestration: always all four methods, always apply selection to ``synced/``.
+High-level orchestration: run methods, compare them, apply the selected result,
+and expose the CLI entrypoint used by ``python -m sync``.
 
 ---
 
 ## Sync methods
 
-### Method 1 — SDA only (`sda_sync.py`)
+### Method 1 — SDA only (`methods.py`)
 
 **When to use:** quick baseline; recordings too short for reliable drift
 estimation; sanity-checking the offset independently of drift.
@@ -122,7 +118,7 @@ estimation; sanity-checking the offset independently of drift.
 
 ---
 
-### Method 2 — SDA + LIDA (`lida.py`)
+### Method 2 — SDA + LIDA (`methods.py`)
 
 **When to use:** standard offline post-processing for recordings without
 reliable calibration sequences.
@@ -153,7 +149,7 @@ file-to-file use without the recording-directory convention.
 
 ---
 
-### Method 3 — Calibration-sequence sync (`calibration_sync.py`)
+### Method 3 — Calibration-sequence sync (`methods.py`)
 
 **When to use:** preferred method when both opening and closing calibration
 tap-bursts are present and well-detected. Gives the most precise offset and
@@ -165,13 +161,14 @@ drift because it uses known, sharp events as timing anchors.
    segments (opening + closing).
 2. Coarse offset: match the opening calibration cluster in the target by
    peak-cluster timing. Falls back to low-rate SDA if no cluster is found.
-3. Fine offset at each calibration window: narrow-window SDA cross-correlation
-   centred on each calibration's peak burst. Produces two independent offset
-   measurements at two known target-clock times.
-4. Drift = `(offset_close − offset_open) / (t_close − t_open)`. If the
-   computed drift exceeds 1 % (physically implausible), fall back to the
-   recording-duration ratio.
-5. Back-propagate the opening offset to the target time origin.
+3. Fine offset at each in-range calibration window: narrow-window SDA
+   cross-correlation centred on each calibration's peak burst.
+4. If 3+ windows are successfully refined, fit a weighted linear model
+   `offset(t) = offset_0 + drift * (t - t_origin)` across all windows
+   (weights from per-window correlation scores). If fit quality is poor,
+   fall back to the previous first/last-anchor estimate.
+5. If the resulting drift exceeds 1 % (physically implausible), fall back to
+   the recording-duration ratio.
 
 **Output (intermediate):** `synced/cal/`
 
@@ -190,7 +187,7 @@ drift because it uses known, sharp events as timing anchors.
 
 ---
 
-### Method 4 — Online sync (`online_sync.py`)
+### Method 4 — Online sync (`methods.py`)
 
 **When to use:** real-time/causal context where the closing calibration has
 not yet occurred. Also useful as a reference point when evaluating how much
@@ -220,9 +217,9 @@ drift matters for a given recording.
 
 ---
 
-## `selection.py` — comparison and selection
+## Comparison and selection
 
-After any methods have been run, `selection.py` compares them and picks the
+After any methods have been run, `pipeline.py` compares them and picks the
 best result.
 
 ### Selection heuristic
@@ -237,9 +234,8 @@ best result.
 ### `synced/` output
 
 `apply_selection` (called automatically by the pipeline) copies the winner into
-flat `synced/` and adds `sync_methods_comparison.png`, `sync_method_metrics.png`,
-`synced_norms_overlay.png`, `all_methods.json`, then
-removes the per-method subfolders.
+flat `synced/`, writes `all_methods.json`, and then removes the per-method
+subfolders.
 
 | File | Description |
 |---|---|

@@ -14,8 +14,7 @@ configured sensors into matching time windows saved under::
 
 CLI usage::
 
-    python -m parser.split_sections 2026-02-26_r5/synced_lida
-    python -m parser.split_sections 2026-02-26_r5/synced_cal --no-plot
+    python -m parser.split_sections 2026-02-26_r5/synced
 """
 
 from __future__ import annotations
@@ -28,9 +27,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common.csv_schema import load_dataframe, write_dataframe
-from common.paths import find_sensor_csv, recording_dir
-from common.calibration_segments import CalibrationSegment, find_calibration_segments
+from common.paths import find_sensor_csv, read_csv, section_dir, write_csv
+from parser.calibration_segments import CalibrationSegment, find_calibration_segments
 from labels.section_transfer import (
     load_recording_interval_rows_for_transfer,
     write_section_labels_from_recording_intervals,
@@ -46,22 +44,29 @@ _GRAVITY_MS2 = 9.81
 # ---------------------------------------------------------------------------
 
 
-def _plot_section(recording_name: str, section_stage: str, sensors: list[str]) -> None:
+def _plot_section(section_path: Path, sensors: list[str]) -> None:
     """Generate sensor and comparison plots for one section directory."""
-    from visualization import plot_comparison, plot_sensor
+    from visualization.plot_comparison import plot_comparison_data
+    from visualization.plot_sensor import plot_sensor_data
 
-    stage_ref = f"{recording_name}/{section_stage}"
     for sensor_name in sensors:
+        csv_path = section_path / f"{sensor_name}.csv"
+        if not csv_path.exists():
+            continue
         try:
-            plot_sensor.main([stage_ref, sensor_name])
-            plot_sensor.main([stage_ref, sensor_name, "--norm", "--acc"])
-        except SystemExit:
-            pass
+            plot_sensor_data(csv_path)
+            plot_sensor_data(
+                csv_path,
+                norm_only=True,
+                acc_only=True,
+                output_path=section_path / f"{sensor_name}_norm_acc.png",
+            )
+        except Exception as exc:
+            log.warning("Plotting failed for %s/%s: %s", section_path.name, sensor_name, exc)
     try:
-        plot_comparison.main([stage_ref])
-        plot_comparison.main([stage_ref, "--norm"])
-    except SystemExit:
-        pass
+        plot_comparison_data(section_path)
+    except Exception as exc:
+        log.warning("Comparison plotting failed for %s: %s", section_path.name, exc)
 
 
 def split_recording(
@@ -119,7 +124,7 @@ def split_recording(
 
     # Load reference sensor and detect calibration segments.
     ref_csv = find_sensor_csv(recording_name, stage, reference_sensor)
-    ref_df = load_dataframe(ref_csv)
+    ref_df = read_csv(ref_csv)
     ref_df = ref_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     calibrations = find_calibration_segments(
@@ -141,25 +146,22 @@ def split_recording(
         except FileNotFoundError:
             log.warning("Sensor '%s' not found in %s/%s — skipping", sensor, recording_name, stage)
             continue
-        df = load_dataframe(csv_path)
+        df = read_csv(csv_path)
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         sensor_dfs[sensor] = df
 
-    from common.paths import sections_root as _sections_root
-
-    sections_base = _sections_root()
     available_sensors = list(sensor_dfs)
 
-    recording_stage_dir = recording_dir(recording_name) / stage
     recording_origin_ms = float(ref_df["timestamp"].iloc[0])
     source_interval_rows = load_recording_interval_rows_for_transfer(
-        recording_stage_dir, recording_name
+        recording_name,
+        recording_origin_ms=recording_origin_ms,
     )
     if source_interval_rows:
         log.info(
-            "Label transfer: loaded %d recording-level interval row(s) from %s",
+            "Label transfer: loaded %d recording-level interval row(s) for %s",
             len(source_interval_rows),
-            recording_stage_dir,
+            recording_name,
         )
 
     def _write_section(
@@ -168,21 +170,19 @@ def split_recording(
         ts_start: float,
         ts_end: float,
     ) -> list[Path]:
-        # Used only for visualization stage-ref strings (not on-disk naming).
-        section_stage = f"{recording_name}s{section_idx}"
-        section_dir = sections_base / f"{recording_name}s{section_idx}"
-        section_dir.mkdir(parents=True, exist_ok=True)
+        section_path = section_dir(recording_name, section_idx)
+        section_path.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []
         for sensor, df in sensor_slices.items():
-            out_path = section_dir / f"{sensor}.csv"
-            write_dataframe(df, out_path)
+            out_path = section_path / f"{sensor}.csv"
+            write_csv(df, out_path)
             paths.append(out_path)
-            log.info("Wrote %s/%s (%d rows)", section_stage, out_path.name, len(df))
+            log.info("Wrote %s/%s (%d rows)", section_path.name, out_path.name, len(df))
         if source_interval_rows and reference_sensor in sensor_slices:
             write_section_labels_from_recording_intervals(
                 recording_name=recording_name,
                 section_idx=section_idx,
-                section_dir=section_dir,
+                section_dir=section_path,
                 recording_origin_ms=recording_origin_ms,
                 section_abs_start_ms=ts_start,
                 section_abs_end_ms=ts_end,
@@ -190,7 +190,7 @@ def split_recording(
                 intervals=source_interval_rows,
             )
         if plot:
-            _plot_section(recording_name, f"sections/{section_stage}", available_sensors)
+            _plot_section(section_path, available_sensors)
         return paths
 
     if len(calibrations) < 2:
@@ -263,7 +263,7 @@ def sync_sections(
     plot:
         If ``True``, regenerate sensor and comparison plots after syncing.
     """
-    from sync.calibration_sync import synchronize_from_calibration
+    from sync.methods import synchronize_from_calibration
 
     from common.paths import iter_sections_for_recording
 
@@ -309,10 +309,7 @@ def sync_sections(
                 shutil.rmtree(tmp_dir)
 
         if plot:
-            from common.paths import parse_section_folder_name
-
-            _rec_name, sec_idx = parse_section_folder_name(section_dir.name)
-            _plot_section(recording_name, f"sections/{section_dir.name}", [reference_sensor, target_sensor])
+            _plot_section(section_dir, [reference_sensor, target_sensor])
 
 
 # ---------------------------------------------------------------------------

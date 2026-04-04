@@ -1,15 +1,13 @@
 [project]
-name = "analysis"
+name = "master-thesis-analysis"
 version = "0.1.0"
-description = "Reproducible dual-IMU thesis analysis workflow"
+description = "Multi-IMU cycling recording pipeline: parse, sync, calibrate, orientation, features, exports"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.13"
 dependencies = [
-    "ahrs>=0.3.1,<1",
-    "matplotlib>=3.8,<4",
-    "numpy>=1.26,<3",
-    "pandas>=2.2,<3",
-    "plotly>=5.20,<6",
-    "scikit-learn>=1.4,<2",
-    "scipy>=1.11,<2",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.2",
+    "plotly>=5.0",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
 ]

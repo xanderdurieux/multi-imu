@@ -1,6 +1,6 @@
-"""Allow ``python -m sync`` (see :mod:`sync.run`)."""
+"""Allow ``python -m sync``."""
 
-from .run import main
+from .pipeline import main
 
 if __name__ == "__main__":
     main()

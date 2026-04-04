@@ -1,50 +1,115 @@
-"""Run evaluation report: ``uv run python -m evaluation <features_fused.csv> [out_dir] [--config cfg.json]``."""
+"""CLI entry point for the evaluation package.
+
+Usage::
+
+    python -m evaluation [--features data/exports/features_fused.csv]
+                         [--output outputs/evaluation]
+                         [--seed 42]
+                         [--quality marginal]
+                         [--label scenario_label]
+                         [--group section_id]
+"""
 
 from __future__ import annotations
 
 import argparse
-import os
+import logging
+import sys
 from pathlib import Path
 
-from .experiments import run_evaluation_report, run_primary_thesis_bundle
+from common.paths import evaluation_root, fused_features_csv
+from evaluation.experiments import run_evaluation
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run thesis-oriented dual-IMU experiments.")
-    parser.add_argument("features_csv", type=Path, help="Path to fused feature CSV")
-    parser.add_argument(
-        "out_dir",
-        nargs="?",
-        type=Path,
-        help="Output directory (default: <csv_parent>/evaluation_report)",
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m evaluation",
+        description="Train and evaluate classification models on feature tables.",
     )
     parser.add_argument(
-        "--config",
-        type=Path,
-        default=None,
-        help="Optional JSON config path for feature subsets/experiment settings",
+        "--features",
+        metavar="PATH",
+        default=str(fused_features_csv()),
+        help="Path to feature CSV (default: data/exports/features_fused.csv).",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="DIR",
+        default=str(evaluation_root()),
+        help="Output directory (default: data/evaluation/).",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
-        help="Optional deterministic seed override (falls back to config/default).",
+        default=42,
+        help="Random seed (default: 42).",
     )
     parser.add_argument(
-        "--primary",
-        action="store_true",
-        help="Run the thesis primary bundle (main comparison + compact supporting ablations).",
+        "--quality",
+        metavar="LABEL",
+        default="marginal",
+        dest="min_quality",
+        choices=["poor", "marginal", "good"],
+        help="Minimum quality label filter (default: marginal).",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--label",
+        metavar="COL",
+        default="scenario_label",
+        dest="label_col",
+        help="Target label column (default: scenario_label).",
+    )
+    parser.add_argument(
+        "--group",
+        metavar="COL",
+        default="section_id",
+        dest="group_col",
+        help="Group column for CV splitting (default: section_id).",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=False,
+        help="Enable debug logging.",
+    )
+    return parser
 
-    out = args.out_dir if args.out_dir is not None else args.features_csv.parent / "evaluation_report"
-    env_seed = os.environ.get("MULTI_IMU_EVALUATION_SEED")
-    effective_seed = args.seed if args.seed is not None else (int(env_seed) if env_seed else 42)
-    if args.primary:
-        run_primary_thesis_bundle(args.features_csv, out, config_path=args.config, random_state=effective_seed)
-    else:
-        run_evaluation_report(args.features_csv, out, config_path=args.config, random_state=effective_seed)
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    try:
+        summary = run_evaluation(
+            features_path=Path(args.features),
+            output_dir=Path(args.output),
+            label_col=args.label_col,
+            group_col=args.group_col,
+            seed=args.seed,
+            min_quality=args.min_quality,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Evaluation complete.")
+    print(f"  Windows evaluated : {summary['n_windows']}")
+    print(f"  Classes           : {', '.join(summary['classes'])}")
+    if summary.get("results"):
+        best = max(summary["results"], key=lambda k: summary["results"][k]["accuracy"])
+        r = summary["results"][best]
+        print(
+            f"  Best result       : {best}  "
+            f"acc={r['accuracy']:.3f}  macro-F1={r['macro_f1']:.3f}"
+        )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

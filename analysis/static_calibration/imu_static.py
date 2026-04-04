@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common import write_dataframe
+from common.paths import write_csv
 from parser.arduino import parse_arduino_log
 
 GRAVITY = 9.81
@@ -222,7 +222,7 @@ def write_parsed_csvs(
         label = _FACE_TO_PARSED_STEM.get(face)
         stem = f"log{log_number}({label if label else "unknown"})"
         out = parsed_dir / f"{stem}.csv"
-        write_dataframe(df, out)
+        write_csv(df, out)
         mapping[stem] = out
     return mapping
 

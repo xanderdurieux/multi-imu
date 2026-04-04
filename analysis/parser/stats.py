@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common import load_dataframe, recording_dir, recording_stage_dir
+from common.paths import list_csv_files, read_csv, recording_dir, recording_stage_dir
 
 
 def _interval_summary(interval_ms: pd.Series) -> dict[str, Any]:
@@ -189,7 +189,7 @@ def estimate_clock_drift(
 
 
 def compute_file_stats(csv_path: Path) -> dict[str, Any]:
-    df = load_dataframe(csv_path)
+    df = read_csv(csv_path)
     out: dict[str, Any] = {
         "num_samples": int(df.shape[0]),
         "timing": compute_stream_timing_stats(df, timestamp_col="timestamp"),
@@ -222,7 +222,7 @@ def compute_recording_stats(recording_name: str, stage: str = "parsed") -> Recor
         raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
 
     streams: dict[str, dict[str, Any]] = {}
-    for csv_path in sorted(stage_dir.glob("*.csv")):
+    for csv_path in list_csv_files(stage_dir):
         streams[csv_path.stem] = compute_file_stats(csv_path)
 
     return RecordingStats(
@@ -265,4 +265,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

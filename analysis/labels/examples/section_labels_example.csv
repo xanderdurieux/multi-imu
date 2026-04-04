@@ -1,5 +1,0 @@
-scope,recording_id,section_id,window_start_s,window_end_s,event_id,event_type,event_time_s,scenario_label,label_source,labeler,labeled_at_utc,label_confidence,label_notes,label_status,label_schema_version,suggestion_source,suggestion_rank
-section,2026-02-26_r1,2026-02-26_r1s1,,,,,,steady_state,manual,reviewer_a,2026-03-27T11:00:00Z,0.85,"mostly nominal cruise",confirmed,thesis_v1,,
-section,2026-02-26_r1,2026-02-26_r1s2,,,,,,mixed,manual,reviewer_a,2026-03-27T11:05:00Z,0.60,"contains both braking and rough surface",mixed,thesis_v1,,
-interval,2026-02-26_r1,2026-02-26_r1s2,12.0,15.5,,,,hard_braking,manual,reviewer_a,2026-03-27T11:07:00Z,0.90,"clear braking peak",confirmed,thesis_v1,,
-interval,2026-02-26_r1,2026-02-26_r1s2,15.5,19.0,,,,ambiguous,manual,reviewer_a,2026-03-27T11:08:00Z,0.40,"overlap of bump + turn",ambiguous,thesis_v1,,

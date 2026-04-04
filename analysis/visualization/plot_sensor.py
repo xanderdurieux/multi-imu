@@ -1,202 +1,163 @@
-"""Plot sensor data from a recording stage CSV."""
+"""Plot raw or processed IMU data for a single sensor.
+
+CLI usage::
+
+    python -m visualization.plot_sensor <recording>/<stage> <sensor> [--norm] [--acc]
+"""
 
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
-from typing import Optional
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import find_sensor_csv, load_dataframe, recording_stage_dir
-from .labels import SENSOR_COMPONENTS, SENSOR_LABELS
-from ._utils import mask_dropout_packets as _mask_dropout_packets
-from ._utils import mask_valid_plot_x
+from common.paths import read_csv, resolve_sensor_csv
+from visualization._utils import filter_valid_plot_xy, strict_vector_norm
+
+log = logging.getLogger(__name__)
+
+def _ts_seconds(df: pd.DataFrame) -> np.ndarray:
+    ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+    if ts.size > 0:
+        finite = ts[np.isfinite(ts)]
+        t0 = finite[0] if finite.size > 0 else 0.0
+        ts = (ts - t0) / 1000.0  # relative seconds
+    return ts
 
 
-def prepare_sensor_axes(num_series: int, num_columns: int = 1, *, sharex: bool = True):
-    """Create a grid of axes and normalize return type to a list."""
-    fig, axes = plt.subplots(
-        num_series,
-        num_columns,
-        figsize=(10 * num_columns, 3 * num_series),
-        sharex=sharex,
-    )
-
-    if num_series == 1 and num_columns == 1:
-        axes = [[axes]]
-    elif num_series == 1:
-        axes = [axes]
-    elif num_columns == 1:
-        axes = [[ax] for ax in axes]
-
-    return fig, axes
+def _prepare_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep plotting rows aligned on valid, monotonic timestamps."""
+    return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
 
-def sensor_norm(df: pd.DataFrame, sensor_type: str) -> np.ndarray:
-    """Compute vector norm for one sensor type."""
-    cols = SENSOR_COMPONENTS[sensor_type]
-    return np.sqrt(sum(df[col].values ** 2 for col in cols))
+def plot_sensor_data(
+    csv_path: Path,
+    *,
+    norm_only: bool = False,
+    acc_only: bool = False,
+    output_path: Path | None = None,
+) -> Path:
+    """Load a sensor CSV and save a plot.
 
+    Returns the path of the saved figure.
+    """
+    df = read_csv(csv_path)
+    for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = _prepare_sensor_df(df)
 
-def _plot_sensor_data(
-    ax: plt.Axes,
-    df: pd.DataFrame,
-    time_seconds: np.ndarray,
-    sensor_type: str,
-    norm: bool = False,
-) -> None:
-    """Plot sensor data on a single subplot."""
-    data = df[list(SENSOR_COMPONENTS[sensor_type])]
-    mask = data.notna().all(axis=1)
-    tx = time_seconds.to_numpy(dtype=float, copy=False)
-    mask = mask.to_numpy(dtype=bool, copy=False) & mask_valid_plot_x(tx)
+    ts = _ts_seconds(df)
 
-    if norm:
-        data = sensor_norm(data, sensor_type)
-        label = f"{sensor_type}_norm"
+    if output_path is None:
+        stem = csv_path.stem
+        if norm_only:
+            stem += "_norm"
+        if acc_only:
+            stem += "_acc"
+        output_path = csv_path.parent / f"{stem}.png"
+
+    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
+    gyro_cols = [c for c in ["gx", "gy", "gz"] if c in df.columns]
+    mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
+    has_mag = len(mag_cols) == 3
+
+    if norm_only:
+        fig, ax = plt.subplots(figsize=(12, 3))
+        if acc_cols:
+            acc_norm = strict_vector_norm(df, acc_cols)
+            x, y = filter_valid_plot_xy(ts, acc_norm)
+            ax.plot(x, y, lw=0.8, label="|acc|")
+        if not acc_only and gyro_cols:
+            gyro_norm = strict_vector_norm(df, gyro_cols)
+            x, y = filter_valid_plot_xy(ts, gyro_norm)
+            ax.plot(x, y, lw=0.8, label="|gyro|")
+        if not acc_only and has_mag:
+            mag_norm = strict_vector_norm(df, mag_cols)
+            x, y = filter_valid_plot_xy(ts, mag_norm)
+            ax.plot(x, y, lw=0.8, label="|mag|")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Norm")
+        ax.set_title(f"{csv_path.parent.name}/{csv_path.name} — norms")
+        ax.legend(loc="upper right", fontsize=7)
     else:
-        label = ", ".join(SENSOR_COMPONENTS[sensor_type])
+        n_rows = 1
+        if not acc_only:
+            if gyro_cols:
+                n_rows += 1
+            if has_mag:
+                n_rows += 1
+        fig, axes = plt.subplots(n_rows, 1, figsize=(12, 3 * n_rows), sharex=True)
+        if n_rows == 1:
+            axes = [axes]
 
-    dy = data.to_numpy(dtype=float, copy=False) if hasattr(data, "to_numpy") else np.asarray(data, dtype=float)
-    ax.plot(tx[mask], dy[mask], label=label)
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    ax.set_xlabel("Time [s]")
-    if mask.any():
-        ax.set_xlim(float(tx[mask].min()), float(tx[mask].max()))
-    ax.set_ylabel(SENSOR_LABELS[sensor_type][1])
-    ax.set_title(SENSOR_LABELS[sensor_type][0])
+        row = 0
+        if acc_cols:
+            for col in acc_cols:
+                y = df[col].to_numpy(dtype=float)
+                x_plot, y_plot = filter_valid_plot_xy(ts, y)
+                axes[row].plot(x_plot, y_plot, lw=0.7, label=col)
+            axes[row].set_ylabel("Acc (m/s²)")
+            axes[row].legend(loc="upper right", fontsize=7)
+            row += 1
+
+        if not acc_only and gyro_cols and row < n_rows:
+            for col in gyro_cols:
+                y = df[col].to_numpy(dtype=float)
+                x_plot, y_plot = filter_valid_plot_xy(ts, y)
+                axes[row].plot(x_plot, y_plot, lw=0.7, label=col)
+            axes[row].set_ylabel("Gyro (°/s or rad/s)")
+            axes[row].legend(loc="upper right", fontsize=7)
+            row += 1
+
+        if not acc_only and has_mag and row < n_rows:
+            mag_colors = {"mx": "#d62728", "my": "#2ca02c", "mz": "#1f77b4"}
+            for col in mag_cols:
+                y = df[col].to_numpy(dtype=float)
+                x_plot, y_plot = filter_valid_plot_xy(ts, y)
+                axes[row].plot(x_plot, y_plot, lw=0.7, label=col, color=mag_colors.get(col))
+            axes[row].set_ylabel("Mag (µT)")
+            axes[row].legend(loc="upper right", fontsize=7)
+            axes[row].grid(alpha=0.2, lw=0.4)
+
+        axes[-1].set_xlabel("Time (s)")
+        fig.suptitle(f"{csv_path.parent.name}/{csv_path.name}")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+    log.debug("Saved sensor plot → %s", output_path)
+    return output_path
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Plot sensor data from a recording stage CSV.")
-    parser.add_argument(
-        "source",
-        type=str,
-        help=(
-            "Either '<recording_name>/<stage>' (e.g. '2026-02-26_r5/parsed'), "
-            "'sections/<section_folder>' (e.g. 'sections/2026-02-26_r5s1'), "
-            "or a direct CSV path."
-        ),
-    )
-    parser.add_argument(
-        "sensor_name",
-        nargs="?",
-        default=None,
-        help="Sensor name when source is '<recording_name>/<stage>' (e.g. sporsa, arduino).",
-    )
-    parser.add_argument("--norm", action="store_true", help="Plot vector norms instead of axes components.")
-    parser.add_argument("--acc", action="store_true", help="Plot only the accelerometer data.")
-    parser.add_argument("--gyro", action="store_true", help="Plot only the gyroscope data.")
-    parser.add_argument("--mag", action="store_true", help="Plot only the magnetometer data.")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Directory where the PNG should be written when plotting from a direct CSV path.",
-    )
-    return parser
-
-
-def _resolve_source(
-    source: str,
-    sensor_name: str | None,
-    output_dir: Path | None,
-    parser: argparse.ArgumentParser,
-) -> tuple[Path, Path, str, str]:
-    """Resolve either a stage reference or a direct CSV path."""
-
-    csv_candidate = Path(source)
-    if csv_candidate.suffix.lower() == ".csv" or csv_candidate.is_file():
-        if not csv_candidate.exists():
-            parser.error(f"CSV path does not exist: {csv_candidate}")
-        csv_path = csv_candidate
-        stage_dir = output_dir or csv_path.parent
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        label = str(csv_path)
-        resolved_sensor_name = sensor_name or csv_path.stem
-        return csv_path, stage_dir, label, resolved_sensor_name
-
-    parts = source.split("/", 1)
-    if len(parts) != 2:
-        parser.error("source must be either '<recording_name>/<stage>' or a direct CSV path")
-    if sensor_name is None:
-        parser.error("sensor_name is required when source is '<recording_name>/<stage>'")
-
-    recording_name, stage = parts
-
-    # Sections live under the top-level data/sections/<recording_name>s<section_idx>/.
-    if stage.startswith("sections/"):
-        from common.paths import sections_root as _sections_root
-
-        sec_folder = stage.split("/", 1)[1]
-        stage_dir = _sections_root() / sec_folder
-        if not stage_dir.is_dir():
-            parser.error(f"Section directory not found: {stage_dir}")
-        csv_path = stage_dir / f"{sensor_name}.csv"
-        if not csv_path.exists():
-            print(f"[{recording_name}/{stage}] skipping {sensor_name}: missing {csv_path}")
-            raise SystemExit(0)
-        return csv_path, stage_dir, f"{recording_name} / {stage}", sensor_name
+def main(argv: list[str] | None = None) -> None:
+    import sys
+    argv = list(argv if argv is not None else sys.argv[1:])
+    parser = argparse.ArgumentParser(prog="python -m visualization.plot_sensor")
+    parser.add_argument("stage_ref", help="<recording>/<stage> or section folder name")
+    parser.add_argument("sensor_name", help="Sensor name (e.g. sporsa, arduino)")
+    parser.add_argument("--norm", action="store_true", help="Plot norms only")
+    parser.add_argument("--acc", action="store_true", help="Accelerometer only")
+    parser.add_argument("-o", "--output", help="Output PNG path (auto-derived if omitted)")
+    args = parser.parse_args(argv)
 
     try:
-        stage_dir = recording_stage_dir(recording_name, stage)
-        csv_path = find_sensor_csv(recording_name, stage, sensor_name)
-    except FileNotFoundError:
-        print(f"[{recording_name}/{stage}] skipping {sensor_name}: no CSV found")
-        raise SystemExit(0)
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    return csv_path, stage_dir, f"{recording_name} / {stage}", sensor_name
-
-
-def main(argv: Optional[list[str]] = None) -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args(argv)
-    csv_path, stage_dir, plot_label, sensor_name = _resolve_source(
-        source=args.source,
-        sensor_name=args.sensor_name,
-        output_dir=args.output_dir,
-        parser=parser,
-    )
-
-    df = _mask_dropout_packets(load_dataframe(csv_path))
-    if df.empty:
-        print(f"[{plot_label}] skipping {sensor_name}: CSV is empty")
+        csv_path = resolve_sensor_csv(args.stage_ref, args.sensor_name)
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning("Could not find CSV for %s/%s: %s", args.stage_ref, args.sensor_name, exc)
         return
-
-    time_seconds = (df["timestamp"] - df["timestamp"].iloc[0]) / 1000.0
-
-    sensor_types = [["acc", "gyro", "mag"]]
-    if args.acc:
-        sensor_types = [["acc"]]
-    if args.gyro:
-        sensor_types = [["gyro"]]
-    if args.mag:
-        sensor_types = [["mag"]]
-
-    for st in sensor_types:
-        fig, ax_grid = prepare_sensor_axes(len(st))
-
-        for i, sensor_type in enumerate(st):
-            _plot_sensor_data(ax_grid[i][0], df, time_seconds, sensor_type, args.norm)
-
-        fig.suptitle(f"{plot_label} — {sensor_name}")
-        fig.subplots_adjust(top=0.90)
-
-        filename = "".join([
-            csv_path.stem,
-            f"_{st[0]}" if len(st) == 1 else "",
-            "_norm" if args.norm else "",
-            ".png",
-        ])
-        fig.savefig(stage_dir / filename)
-        plt.close(fig)
-        print(f"[{plot_label}] {filename}")
+    out = Path(args.output) if args.output else None
+    try:
+        saved = plot_sensor_data(csv_path, norm_only=args.norm, acc_only=args.acc, output_path=out)
+        print(f"Saved → {saved}")
+    except Exception as exc:
+        log.error("Failed to plot %s: %s", csv_path, exc)
 
 
 if __name__ == "__main__":

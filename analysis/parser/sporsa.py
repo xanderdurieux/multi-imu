@@ -9,7 +9,7 @@ from typing import Optional
 import pandas as pd
 import re
 
-from common import CSV_COLUMNS, write_dataframe
+from common.paths import CSV_COLUMNS, write_csv
 
 ACCEL_SENS = {
     "4G": 0.122,
@@ -192,7 +192,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     df = parse_sporsa_log(args.source_txt)
-    write_dataframe(df, args.destination_csv)
+    write_csv(df, args.destination_csv)
 
 
 if __name__ == "__main__":
