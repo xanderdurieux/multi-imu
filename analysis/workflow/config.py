@@ -19,6 +19,7 @@ _KNOWN_STAGES = [
     "features",
     "exports",
     "evaluation",
+    "report",
 ]
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -389,6 +390,55 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             generated.append(out)
         except Exception as exc:
             log.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
+
+    # ---- per-class F1 ----
+    # Collect all per_class_report_<fs>_<model>.json files, group by feature set.
+    per_class_files = sorted(output_dir.glob("per_class_report_*.csv")) + sorted(
+        output_dir.glob("per_class_report_*.json")
+    )
+    # Build all_results and classes from saved reports
+    all_results_disk: dict[str, dict] = {}
+    for pc_path in per_class_files:
+        try:
+            stem = pc_path.stem  # per_class_report_<fs>_<model>
+            _, _, rest = stem.partition("per_class_report_")
+            data = json.loads(pc_path.read_text(encoding="utf-8"))
+            # rest = "<fs>_<model>" — split on last known model suffix
+            for model_key in ("random_forest", "gradient_boosting", "logistic_regression"):
+                suffix = f"_{model_key}"
+                if rest.endswith(suffix):
+                    fs_name = rest[: -len(suffix)]
+                    all_results_disk[f"{fs_name}__{model_key}"] = {"per_class": data}
+                    break
+        except Exception as exc:
+            log.warning("Failed to load per-class report %s: %s", pc_path.name, exc)
+
+    if all_results_disk:
+        # Derive class list from union of keys (exclude aggregate keys)
+        _aggregate_keys = {"accuracy", "macro avg", "weighted avg"}
+        classes_set: set[str] = set()
+        for v in all_results_disk.values():
+            classes_set.update(
+                k for k in v.get("per_class", {}) if k not in _aggregate_keys
+            )
+        classes_disk = sorted(classes_set)
+
+        feature_sets_disk = sorted({k.split("__")[0] for k in all_results_disk})
+        metrics_df_disk = pd.DataFrame(columns=["feature_set", "model"])
+        for fs_name in feature_sets_disk:
+            out = figures_dir / f"per_class_f1_{fs_name}.png"
+            try:
+                result = plot_per_class_f1(
+                    metrics_df_disk,
+                    all_results_disk,
+                    classes_disk,
+                    out,
+                    feature_set=fs_name,
+                )
+                if result:
+                    generated.append(result)
+            except Exception as exc:
+                log.warning("Failed to plot per-class F1 for %s: %s", fs_name, exc)
 
     log.info(
         "Evaluation figures: %d written to %s",

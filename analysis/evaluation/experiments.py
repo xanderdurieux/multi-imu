@@ -84,6 +84,7 @@ def _cv_evaluate(
     model: Any,
     n_splits: int = 5,
     seed: int = 42,
+    class_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run GroupKFold cross-validation and return aggregated metrics."""
     pipe = Pipeline(
@@ -111,7 +112,7 @@ def _cv_evaluate(
     # Gather per-class metrics via one full fold re-fit on all data
     pipe.fit(X, y)
     y_pred = pipe.predict(X)
-    report = classification_report(y, y_pred, output_dict=True, zero_division=0)
+    report = classification_report(y, y_pred, target_names=class_names, output_dict=True, zero_division=0)
     cm = confusion_matrix(y, y_pred)
 
     # Extract feature importances from the last estimator if available
@@ -267,6 +268,7 @@ def run_evaluation(
                     model=model,
                     n_splits=n_splits,
                     seed=seed,
+                    class_names=classes,
                 )
             except Exception as exc:
                 log.warning("Evaluation failed for %s: %s", key, exc)
@@ -292,6 +294,12 @@ def run_evaluation(
             )
             cm_df.to_csv(cm_path, index=True)
             log.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
+
+            # Write per-class report
+            per_class_path = output_dir / f"per_class_report_{fs_name}_{model_name}.json"
+            per_class_path.write_text(
+                json.dumps(result["per_class"], indent=2), encoding="utf-8"
+            )
 
             # Write feature importances
             if result["feature_importances"] is not None:

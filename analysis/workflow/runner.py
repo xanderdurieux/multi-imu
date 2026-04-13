@@ -265,6 +265,24 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1
 
+    elif stage == "report":
+        from reporting.pipeline import run_report
+        fused = exports_root() / "features_fused.csv"
+        if fused.exists():
+            try:
+                run_report(
+                    output_dir=data_root() / "report",
+                    features_path=fused,
+                    evaluation_dir=evaluation_root(),
+                )
+                result["ok"] += 1
+            except Exception as exc:
+                log.error("report failed: %s", exc)
+                result["failed"] += 1
+        else:
+            log.warning("features_fused.csv not found — skipping report")
+            result["skipped"] += 1
+
     return result
 
 
