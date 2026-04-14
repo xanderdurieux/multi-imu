@@ -939,7 +939,17 @@ def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) ->
     out_path = output_dir / "sync_calibration_anchors_overview.png"
     if df.empty or "recording_name" not in df.columns:
         return None
-    if "calibration_cal_n_windows" not in df.columns and "calibration_cal_fit_r2" not in df.columns:
+
+    # Accept both legacy and current column names.
+    n_win_col = next(
+        (c for c in ("multi_anchor_cal_n_windows", "calibration_cal_n_windows") if c in df.columns),
+        None,
+    )
+    r2_col = next(
+        (c for c in ("multi_anchor_cal_fit_r2", "calibration_cal_fit_r2") if c in df.columns),
+        None,
+    )
+    if n_win_col is None and r2_col is None:
         return None
 
     recordings = df["recording_name"].tolist()
@@ -947,28 +957,28 @@ def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) ->
     if n == 0:
         return None
 
-    n_windows = pd.to_numeric(df.get("calibration_cal_n_windows"), errors="coerce")
-    fit_r2 = pd.to_numeric(df.get("calibration_cal_fit_r2"), errors="coerce")
-    if (n_windows is None or n_windows.isna().all()) and (fit_r2 is None or fit_r2.isna().all()):
+    n_windows = pd.to_numeric(df[n_win_col], errors="coerce") if n_win_col else pd.Series([np.nan] * n)
+    fit_r2 = pd.to_numeric(df[r2_col], errors="coerce") if r2_col else pd.Series([np.nan] * n)
+    if n_windows.isna().all() and fit_r2.isna().all():
         return None
 
     x = np.arange(n)
     fig, axes = plt.subplots(2, 1, figsize=(max(8, n * 0.7 + 2), 6), sharex=True)
 
     ax = axes[0]
-    vals = n_windows.fillna(0.0).tolist() if n_windows is not None else [0.0] * n
+    vals = n_windows.fillna(0.0).tolist()
     ax.bar(x, vals, color="#2ca02c", edgecolor="white", linewidth=0.5, alpha=0.85)
     ax.set_ylabel("Count")
     ax.set_title("Calibration anchors used per recording")
     ax.grid(axis="y", alpha=0.3, lw=0.5)
 
     ax = axes[1]
-    vals = fit_r2.fillna(0.0).tolist() if fit_r2 is not None else [0.0] * n
+    vals = fit_r2.fillna(0.0).tolist()
     colors = ["#2ca02c" if v >= 0.2 else "#d62728" for v in vals]
     ax.bar(x, vals, color=colors, edgecolor="white", linewidth=0.5, alpha=0.85)
     ax.axhline(0.2, color="orange", linestyle="--", linewidth=0.9)
-    ax.set_ylabel("R²")
-    ax.set_title("Calibration all-anchor fit quality (R²)")
+    ax.set_ylabel("R\u00b2")
+    ax.set_title("Calibration all-anchor fit quality (R\u00b2)")
     ax.grid(axis="y", alpha=0.3, lw=0.5)
     ax.set_xticks(x)
     ax.set_xticklabels([_short_recording(r) for r in recordings], rotation=45, ha="right", fontsize=8)
@@ -1031,6 +1041,179 @@ def run_calibration_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     return generated
 
 
+def _session_from_row(name: str) -> str:
+    parts = name.rsplit("_", 1)
+    if len(parts) == 2 and parts[1][:1] == "r" and parts[1][1:].isdigit():
+        return parts[0]
+    return name
+
+
+def plot_sync_session_corr(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Bar chart of mean selected corr_offset_and_drift per session."""
+    out_path = output_dir / "sync_by_session_corr.png"
+    if df.empty or "corr_offset_and_drift" not in df.columns:
+        return None
+
+    df = df.copy()
+    if "session" not in df.columns:
+        df["session"] = df["recording_name"].map(_session_from_row)
+
+    sessions = sorted(df["session"].unique())
+    if len(sessions) < 1:
+        return None
+
+    fig, ax = plt.subplots(figsize=(max(6, len(sessions) * 1.5 + 2), 4))
+    for i, sess in enumerate(sessions):
+        sub = df[df["session"] == sess]
+        vals = pd.to_numeric(sub["corr_offset_and_drift"], errors="coerce").dropna()
+        if vals.empty:
+            continue
+        mean_v = float(vals.mean())
+        ax.bar(i, mean_v, color="#3498db", edgecolor="white", linewidth=0.5, alpha=0.85)
+        for j, (_, row) in enumerate(sub.iterrows()):
+            v = row.get("corr_offset_and_drift")
+            if pd.notna(v):
+                ax.plot(i, v, "o", color=_METHOD_COLORS.get(row.get("selected_method", ""), "#95a5a6"),
+                        ms=5, zorder=3)
+        ax.text(i, mean_v + 0.01, f"{mean_v:.3f}", ha="center", fontsize=8)
+
+    ax.set_xticks(range(len(sessions)))
+    ax.set_xticklabels(sessions, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Corr (offset+drift)")
+    ax.set_title("Sync correlation by session (bar = mean, dots = individual)")
+    ax.axhline(0.2, color="orange", lw=0.8, ls=":")
+    ax.grid(axis="y", alpha=0.3, lw=0.5)
+    fig.tight_layout()
+    return _save(fig, out_path)
+
+
+def plot_sync_method_heatmap(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Heatmap: rows = recordings, columns = methods, value = corr_offset_and_drift."""
+    out_path = output_dir / "sync_method_heatmap.png"
+    if df.empty or "recording_name" not in df.columns:
+        return None
+
+    corr_cols = [f"{m}_corr_offset_and_drift" for m in _ALL_SYNC_METHODS
+                 if f"{m}_corr_offset_and_drift" in df.columns]
+    if not corr_cols:
+        return None
+
+    recordings = df["recording_name"].tolist()
+    method_labels = [c.replace("_corr_offset_and_drift", "") for c in corr_cols]
+    mat = df[corr_cols].apply(pd.to_numeric, errors="coerce").values
+
+    fig, ax = plt.subplots(figsize=(max(6, len(corr_cols) * 1.8 + 2),
+                                    max(4, len(recordings) * 0.45 + 1.5)))
+    im = ax.imshow(mat, aspect="auto", cmap="RdYlGn", vmin=-0.2, vmax=1.0)
+    ax.set_xticks(range(len(method_labels)))
+    ax.set_xticklabels(method_labels, rotation=30, ha="right", fontsize=9)
+    ax.set_yticks(range(len(recordings)))
+    ax.set_yticklabels([_short_recording(r) for r in recordings], fontsize=8)
+
+    for ri in range(mat.shape[0]):
+        for ci in range(mat.shape[1]):
+            v = mat[ri, ci]
+            if np.isfinite(v):
+                ax.text(ci, ri, f"{v:.2f}", ha="center", va="center", fontsize=7,
+                        color="white" if v > 0.5 else "black")
+
+    # Highlight selected method per recording
+    if "selected_method" in df.columns:
+        for ri, sel in enumerate(df["selected_method"]):
+            for ci, ml in enumerate(method_labels):
+                if sel == ml:
+                    ax.add_patch(plt.Rectangle((ci - 0.5, ri - 0.5), 1, 1,
+                                               fill=False, edgecolor="black", lw=2))
+
+    plt.colorbar(im, ax=ax, label="Corr (offset+drift)", shrink=0.8)
+    ax.set_title("Sync method correlation heatmap (box = selected)")
+    fig.tight_layout()
+    return _save(fig, out_path)
+
+
+def plot_sync_session_strip(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Strip plot: one panel per session, x = recording suffix, y = correlation, color = method."""
+    out_path = output_dir / "sync_session_strip.png"
+    if df.empty or "corr_offset_and_drift" not in df.columns:
+        return None
+
+    df = df.copy()
+    if "session" not in df.columns:
+        df["session"] = df["recording_name"].map(_session_from_row)
+    if "recording_suffix" not in df.columns:
+        df["recording_suffix"] = df["recording_name"].apply(
+            lambda n: n.rsplit("_", 1)[-1] if "_" in n else n
+        )
+
+    sessions = sorted(df["session"].unique())
+    n_sess = len(sessions)
+    if n_sess < 1:
+        return None
+
+    fig, axes = plt.subplots(1, n_sess, figsize=(max(5, n_sess * 5), 4),
+                             sharey=True, squeeze=False)
+
+    for idx, sess in enumerate(sessions):
+        ax = axes[0][idx]
+        sub = df[df["session"] == sess].sort_values("recording_suffix")
+        x_labels = sub["recording_suffix"].tolist()
+        corr_vals = pd.to_numeric(sub["corr_offset_and_drift"], errors="coerce")
+        methods = sub["selected_method"].fillna("unknown").tolist() if "selected_method" in sub.columns else ["unknown"] * len(sub)
+        colors = [_METHOD_COLORS.get(m, "#95a5a6") for m in methods]
+        ax.scatter(range(len(x_labels)), corr_vals, c=colors, s=60, edgecolors="black",
+                   linewidths=0.5, zorder=3)
+        ax.set_xticks(range(len(x_labels)))
+        ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=8)
+        ax.axhline(0.2, color="orange", lw=0.8, ls=":")
+        ax.set_title(sess, fontsize=9)
+        ax.grid(axis="y", alpha=0.3, lw=0.5)
+        if idx == 0:
+            ax.set_ylabel("Corr (offset+drift)")
+
+    # Legend
+    handles = [plt.Line2D([0], [0], marker="o", color="w",
+                           markerfacecolor=c, ms=8, label=m)
+               for m, c in _METHOD_COLORS.items()]
+    fig.legend(handles=handles, loc="upper center", ncol=4, fontsize=8,
+               bbox_to_anchor=(0.5, 1.0))
+    fig.suptitle("Sync quality by session (color = selected method)", fontsize=11, y=1.04)
+    fig.tight_layout()
+    return _save(fig, out_path)
+
+
+def plot_sync_session_drift(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Per-session drift overview: dots per recording colored by method."""
+    out_path = output_dir / "sync_by_session_drift.png"
+    if df.empty or "drift_ppm" not in df.columns:
+        return None
+
+    df = df.copy()
+    if "session" not in df.columns:
+        df["session"] = df["recording_name"].map(_session_from_row)
+
+    sessions = sorted(df["session"].unique())
+    fig, ax = plt.subplots(figsize=(max(6, len(sessions) * 1.5 + 2), 4))
+    for i, sess in enumerate(sessions):
+        sub = df[df["session"] == sess]
+        for _, row in sub.iterrows():
+            v = row.get("drift_ppm")
+            if pd.notna(v):
+                method = row.get("selected_method", "unknown")
+                ax.plot(i, v, "o", color=_METHOD_COLORS.get(method, "#95a5a6"),
+                        ms=7, zorder=3, markeredgecolor="black", markeredgewidth=0.4)
+
+    ax.axhline(0, color="black", lw=0.5)
+    ax.axhline(400, color="gray", ls="--", lw=0.7, label="\u00b1400 ppm")
+    ax.axhline(-400, color="gray", ls="--", lw=0.7)
+    ax.set_xticks(range(len(sessions)))
+    ax.set_xticklabels(sessions, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Selected drift (ppm)")
+    ax.set_title("Sync drift by session")
+    ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3, lw=0.5)
+    fig.tight_layout()
+    return _save(fig, out_path)
+
+
 def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     if df.empty:
         log.warning("Sync params DataFrame is empty; skipping sync EDA")
@@ -1038,14 +1221,21 @@ def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     figures_dir = Path(output_dir) / "figures" / "sync"
     figures_dir.mkdir(parents=True, exist_ok=True)
     generated: list[Path] = []
-    for result in (
-        plot_sync_method_selection(df, figures_dir),
-        plot_sync_method_availability(df, figures_dir),
-        plot_sync_correlation_overview(df, figures_dir),
-        plot_sync_drift_overview(df, figures_dir),
-        plot_sync_calibration_anchor_overview(df, figures_dir),
-    ):
+
+    def _add(result):
         if result is not None:
             generated.append(result)
+
+    _add(plot_sync_method_selection(df, figures_dir))
+    _add(plot_sync_method_availability(df, figures_dir))
+    _add(plot_sync_correlation_overview(df, figures_dir))
+    _add(plot_sync_drift_overview(df, figures_dir))
+    _add(plot_sync_calibration_anchor_overview(df, figures_dir))
+    _add(plot_sync_offset_overview(df, figures_dir))
+    _add(plot_sync_session_corr(df, figures_dir))
+    _add(plot_sync_method_heatmap(df, figures_dir))
+    _add(plot_sync_session_strip(df, figures_dir))
+    _add(plot_sync_session_drift(df, figures_dir))
+
     log.info("Sync EDA complete: %d figures", len(generated))
     return generated

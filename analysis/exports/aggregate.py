@@ -213,9 +213,22 @@ def aggregate_sync_params(
     return df
 
 
+def _session_and_suffix(name: str) -> tuple[str, str]:
+    """Split ``'2026-02-26_r4'`` into session ``'2026-02-26'`` and suffix ``'r4'``."""
+    parts = name.rsplit("_", 1)
+    if len(parts) == 2 and parts[1][:1] == "r" and parts[1][1:].isdigit():
+        return parts[0], parts[1]
+    return name, ""
+
+
 def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
     """Build one row of sync metadata for a recording."""
-    row: dict = {"recording_name": recording_name}
+    session, suffix = _session_and_suffix(recording_name)
+    row: dict = {
+        "recording_name": recording_name,
+        "session": session,
+        "recording_suffix": suffix,
+    }
 
     # Prefer all_methods.json (written by selection step).
     all_methods_path = synced_dir / "all_methods.json"
