@@ -1,4 +1,4 @@
-"""High-level sync orchestration, method selection, and CLI entrypoints."""
+"""Recording-level sync I/O, selection, and CLI entrypoint."""
 
 from __future__ import annotations
 
@@ -8,37 +8,47 @@ import logging
 import shutil
 import sys
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from common import recordings_root
-from common.paths import project_relative_path, recording_stage_dir
+from common.paths import (
+    find_sensor_csv,
+    project_relative_path,
+    recording_stage_dir,
+    write_csv,
+)
 
-from .methods import (
+from .model import SyncModel, apply_sync_model, save_sync_model
+from .orchestrate import (
     METHOD_LABELS,
     METHOD_STAGES,
     SYNC_METHODS,
+    SyncSelectionResult,
+    compare_sync_models,
     method_label,
     method_stage,
-    synchronize_recording,
-    synchronize_recording_adaptive,
-    synchronize_recording_from_calibration,
-    synchronize_recording_online,
-    synchronize_recording_sda,
+    print_comparison,
+    print_selection_result,
+    select_best_sync_method,
 )
+from .quality import compute_sync_correlations
+from .stream_io import load_stream, resample_stream
 
 log = logging.getLogger(__name__)
 
 _STAGE_IN = "parsed"
-ALL_METHODS: list[str] = ["calibration", "adaptive", "online", "lida", "sda"]
-SyncMethodName = Literal["sda", "lida", "calibration", "online", "adaptive"]
+ALL_METHODS: list[str] = list(SYNC_METHODS)
+
+
+# ---------------------------------------------------------------------------
+# Result containers
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class MethodResult:
-    """Outcome of running one sync method on one recording."""
-
     method: str
     ok: bool
     error: Optional[str] = None
@@ -46,11 +56,9 @@ class MethodResult:
 
 @dataclass
 class RecordingResult:
-    """Outcome of running all requested methods on one recording."""
-
     recording_name: str
     method_results: list[MethodResult] = field(default_factory=list)
-    selection: Optional["SyncSelectionResult"] = None
+    selection: Optional[SyncSelectionResult] = None
     selection_error: Optional[str] = None
 
     @property
@@ -62,234 +70,90 @@ class RecordingResult:
         return [r.method for r in self.method_results if not r.ok]
 
 
-@dataclass(frozen=True)
-class SyncMethodQuality:
-    """Per-method quality summary extracted from ``sync_info.json``."""
-
-    method: SyncMethodName
-    stage: str
-    available: bool
-    corr_offset_and_drift: Optional[float]
-    drift_ppm: Optional[float]
-    drift_source: Optional[str]
-    calibration_span_s: Optional[float]
-    calibration_open_score: Optional[float]
-    calibration_close_score: Optional[float]
-    calibration_n_windows: Optional[int]
-    calibration_fit_r2: Optional[float]
-    calibration_anchors: Optional[list[dict[str, Any]]]
+# ---------------------------------------------------------------------------
+# Single-method execution helpers
+# ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class SyncSelectionResult:
-    """Final selection result for one recording."""
-
-    recording_name: str
-    method: SyncMethodName
-    stage: str
-    qualities: dict[str, SyncMethodQuality]
-
-    @property
-    def metrics(self) -> dict[str, Any]:
-        def _q(q: SyncMethodQuality) -> dict[str, Any]:
-            return {
-                "stage": q.stage,
-                "available": q.available,
-                "corr_offset_and_drift": q.corr_offset_and_drift,
-                "drift_ppm": q.drift_ppm,
-                "drift_source": q.drift_source,
-                "calibration_span_s": q.calibration_span_s,
-                "calibration_open_score": q.calibration_open_score,
-                "calibration_close_score": q.calibration_close_score,
-                "calibration_n_windows": q.calibration_n_windows,
-                "calibration_fit_r2": q.calibration_fit_r2,
-                "calibration_anchors": q.calibration_anchors,
-            }
-
-        return {
-            "recording": self.recording_name,
-            "selected_method": self.method,
-            "selected_stage": self.stage,
-            **{m: _q(q) for m, q in self.qualities.items()},
-        }
+def _drop_alignment_columns(df):
+    drop = [c for c in ("timestamp_orig", "timestamp_aligned", "timestamp_received")
+            if c in df.columns]
+    return df.drop(columns=drop) if drop else df
 
 
-_METHOD_RUNNERS = {
-    "sda": lambda rec, stage: synchronize_recording_sda(rec, stage),
-    "lida": lambda rec, stage: synchronize_recording(rec, stage),
-    "calibration": lambda rec, stage: synchronize_recording_from_calibration(rec, stage),
-    "online": lambda rec, stage: synchronize_recording_online(rec, stage),
-    "adaptive": lambda rec, stage: synchronize_recording_adaptive(rec, stage),
-}
-
-CHOSEN_SYNC_METHODS: tuple[str, ...] = SYNC_METHODS
-
-
-def _load_sync_info(recording_name: str, stage: str) -> Optional[dict]:
-    path = recording_stage_dir(recording_name, stage) / "sync_info.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def compare_sync_models(recording_name: str) -> dict[str, Any]:
-    """Load ``sync_info.json`` from all available method directories."""
-    result: dict[str, Any] = {"recording": recording_name}
-    for method, stage in METHOD_STAGES.items():
-        result[method] = _load_sync_info(recording_name, stage)
-    return result
-
-
-def _fmt(value: Optional[float], fmt: str, suffix: str = "") -> str:
-    return "N/A" if value is None else f"{value:{fmt}}{suffix}"
-
-
-def _corr_pair(info: Optional[dict]) -> tuple[str, str]:
-    if info is None:
-        return "N/A", "N/A"
-    corr = info.get("correlation", {}) or {}
-    return _fmt(corr.get("offset_only"), ".4f"), _fmt(corr.get("offset_and_drift"), ".4f")
-
-
-def print_comparison(result: dict[str, Any]) -> None:
-    """Pretty-print a comparison result for all four methods."""
-    rec = result["recording"]
-    col_w = 14
-
-    log.info("sync comparison for %s", rec)
-
-    header = f"  {'Metric':<34}"
-    for method in ALL_METHODS:
-        header += f" {method_label(method):>{col_w}}"
-    log.info(header)
-    log.info("  %s", "─" * 68)
-
-    def _row(label: str, values: list[str]) -> None:
-        line = f"  {label:<34}"
-        for value in values:
-            line += f" {value:>{col_w}}"
-        log.info(line)
-
-    _row("Offset (s)", [
-        _fmt(result[m]["offset_seconds"] if result[m] else None, "18.3f")
-        for m in ALL_METHODS
-    ])
-    _row("Drift (ppm)", [
-        _fmt((result[m]["drift_seconds_per_second"] * 1e6) if result[m] else None, ".1f")
-        for m in ALL_METHODS
-    ])
-
-    corr_pairs = [_corr_pair(result[m]) for m in ALL_METHODS]
-    _row("Corr (offset only)", [pair[0] for pair in corr_pairs])
-    _row("Corr (offset + drift)", [pair[1] for pair in corr_pairs])
-
-    cal_info = result.get("calibration")
-    if cal_info and "calibration" in cal_info:
-        cal_block = cal_info["calibration"]
-        padding = [""] * (len(ALL_METHODS) - 1)
-        _row("Cal span (s)", padding + [_fmt(cal_block.get("calibration_span_s"), ".1f")])
-        _row("Cal score open / close", padding + [
-            f"{_fmt(cal_block.get('opening', {}).get('score'), '.3f')} / "
-            f"{_fmt(cal_block.get('closing', {}).get('score'), '.3f')}"
-        ])
-
-    log.info("%s", "─" * 70)
-
-
-def _extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
-    stage = method_stage(method)
-    if info is None:
-        return SyncMethodQuality(
-            method=method,
-            stage=stage,
-            available=False,
-            corr_offset_and_drift=None,
-            drift_ppm=None,
-            drift_source=None,
-            calibration_span_s=None,
-            calibration_open_score=None,
-            calibration_close_score=None,
-            calibration_n_windows=None,
-            calibration_fit_r2=None,
-            calibration_anchors=None,
-        )
-
-    corr = (info.get("correlation") or {}).get("offset_and_drift")
-    drift = info.get("drift_seconds_per_second")
-    cal_block = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
-    return SyncMethodQuality(
-        method=method,
-        stage=stage,
-        available=True,
-        corr_offset_and_drift=corr,
-        drift_ppm=(drift * 1e6) if drift is not None else None,
-        drift_source=info.get("drift_source"),
-        calibration_span_s=cal_block.get("calibration_span_s") if cal_block else None,
-        calibration_open_score=cal_block.get("opening", {}).get("score") if cal_block else None,
-        calibration_close_score=cal_block.get("closing", {}).get("score") if cal_block else None,
-        calibration_n_windows=cal_block.get("n_windows_used") if cal_block else None,
-        calibration_fit_r2=cal_block.get("fit_r2") if cal_block else None,
-        calibration_anchors=cal_block.get("anchors") if cal_block else None,
-    )
-
-
-def _calibration_passes_quality(
-    q: SyncMethodQuality,
+def _run_method(
+    recording_name: str,
+    stage_in: str,
+    method: str,
     *,
-    min_cal_span_s: float = 60.0,
-    min_cal_score: float = 0.5,
-    min_corr: float = 0.2,
-    max_drift_ppm: float = 5_000.0,
-) -> bool:
-    if not q.available:
-        return False
-    if q.calibration_span_s is None or q.calibration_span_s < min_cal_span_s:
-        return False
-    if (q.calibration_open_score or 0.0) < min_cal_score:
-        return False
-    if q.drift_source != "duration_ratio" and (q.calibration_close_score or 0.0) < min_cal_score:
-        return False
-    if q.corr_offset_and_drift is None or q.corr_offset_and_drift < min_corr:
-        return False
-    if q.drift_ppm is not None and abs(q.drift_ppm) > max_drift_ppm:
-        return False
-    return True
-
-
-def select_best_sync_method(recording_name: str) -> SyncSelectionResult:
-    """Select the best sync method for a recording."""
-    comparison = compare_sync_models(recording_name)
-    qualities = {method: _extract_quality(method, comparison[method]) for method in ALL_METHODS}
-    available = [method for method in ALL_METHODS if qualities[method].available]
-    if not available:
-        raise RuntimeError(
-            f"No sync_info.json found in any stage for recording '{recording_name}'. Run a sync method first."
-        )
-
-    cal_q = qualities["calibration"]
-    if _calibration_passes_quality(cal_q):
-        chosen = "calibration"
-    else:
-        best_corr = -1.0
-        chosen = available[0]
-        for method in ALL_METHODS:
-            if method not in available:
-                continue
-            corr = qualities[method].corr_offset_and_drift or -1.0
-            if corr > best_corr:
-                best_corr = corr
-                chosen = method
-
-    return SyncSelectionResult(
-        recording_name=recording_name,
-        method=chosen,
-        stage=method_stage(chosen),
-        qualities=qualities,
+    reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
+) -> tuple[Path, Path, Path]:
+    """Run a single sync strategy and write outputs to its stage directory."""
+    from .strategies import (
+        estimate_multi_anchor,
+        estimate_one_anchor_adaptive,
+        estimate_one_anchor_prior,
+        estimate_signal_only,
     )
+
+    ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
+    tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
+    out_dir = recording_stage_dir(recording_name, method_stage(method))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(
+        "sync %s/%s: ref=%s tgt=%s",
+        recording_name, method_stage(method), ref_csv.name, tgt_csv.name,
+    )
+
+    ref_df = load_stream(ref_csv)
+    tgt_df = load_stream(tgt_csv)
+    if ref_df.empty or tgt_df.empty:
+        raise ValueError("Reference and target streams must both be non-empty.")
+
+    strategy = {
+        "multi_anchor": estimate_multi_anchor,
+        "one_anchor_adaptive": estimate_one_anchor_adaptive,
+        "one_anchor_prior": estimate_one_anchor_prior,
+        "signal_only": estimate_signal_only,
+    }[method]
+
+    model, meta = strategy(
+        ref_df, tgt_df,
+        reference_name=str(ref_csv),
+        target_name=str(tgt_csv),
+    )
+
+    aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
+
+    # Build sync_info.json payload.
+    payload = asdict(model)
+    payload.update(meta)
+    payload["correlation"] = compute_sync_correlations(
+        ref_df, tgt_df, model, sample_rate_hz=model.sample_rate_hz,
+    )
+
+    # Write outputs.
+    ref_out = out_dir / f"{reference_sensor}.csv"
+    tgt_out = out_dir / f"{target_sensor}.csv"
+    sync_json = out_dir / "sync_info.json"
+
+    shutil.copy2(ref_csv, ref_out)
+    write_csv(_drop_alignment_columns(aligned_df), tgt_out)
+    sync_json.write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    return ref_out, tgt_out, sync_json
+
+
+# ---------------------------------------------------------------------------
+# Selection and flattening
+# ---------------------------------------------------------------------------
 
 
 def prune_method_stage_directories(recording_name: str) -> None:
-    """Remove all method-specific output directories after flattening ``synced/``."""
+    """Remove all method-specific output directories after flattening."""
     for method in SYNC_METHODS:
         path = recording_stage_dir(recording_name, method_stage(method))
         if path.is_dir():
@@ -304,65 +168,57 @@ def apply_selection(
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
 ) -> Path:
-    """Copy the selected result into flat ``synced/`` and remove method subdirectories."""
+    """Copy the selected method's outputs into flat ``synced/`` and prune."""
     src_dir = recording_stage_dir(recording_name, result.stage)
     out_dir = recording_stage_dir(recording_name, "synced")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for filename in (f"{reference_sensor}.csv", f"{target_sensor}.csv", "sync_info.json"):
+    for filename in (
+        f"{reference_sensor}.csv",
+        f"{target_sensor}.csv",
+        "sync_info.json",
+    ):
         src = src_dir / filename
         if src.exists():
             shutil.copy2(src, out_dir / filename)
 
     all_methods_path = out_dir / "all_methods.json"
-    all_methods_path.write_text(json.dumps(result.metrics, indent=2), encoding="utf-8")
+    all_methods_path.write_text(
+        json.dumps(result.metrics, indent=2), encoding="utf-8"
+    )
 
     log.info(
         "sync %s/synced: selected method=%s (stage=%s)",
-        recording_name,
-        result.method,
-        result.stage,
+        recording_name, result.method, result.stage,
     )
-    log.info(f"{project_relative_path(out_dir / f"{reference_sensor}.csv")}")
-    log.info(f"{project_relative_path(out_dir / f"{target_sensor}.csv")}")
-    log.info(f"{project_relative_path(out_dir / "sync_info.json")}")
-    log.info(f"{project_relative_path(all_methods_path)}")
-
     prune_method_stage_directories(recording_name)
     return out_dir
 
 
-def print_selection_result(result: SyncSelectionResult) -> None:
-    """Print a short summary of the selected method and per-method metrics."""
-    log.info("Recording  : %s", result.recording_name)
-    log.info("Selected   : %s (stage: %s)", result.method, result.stage)
-    for method in ALL_METHODS:
-        q = result.qualities[method]
-        if not q.available:
-            log.info("  %s  unavailable", f"{method_label(method):<14}")
-            continue
-        corr = _fmt(q.corr_offset_and_drift, ".4f")
-        drift = _fmt(q.drift_ppm, ".1f")
-        marker = " <- selected" if method == result.method else ""
-        log.info("  %-14s  corr=%s  drift=%s ppm%s", method_label(method), corr, drift, marker)
+# ---------------------------------------------------------------------------
+# Public orchestration API
+# ---------------------------------------------------------------------------
 
 
 def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
-    """Run all four sync methods for a recording, then select and flatten the best result."""
+    """Run all sync methods, select the best, and flatten into synced/."""
     result = RecordingResult(recording_name=recording_name)
     log.info("sync start: %s", recording_name)
 
     for method in SYNC_METHODS:
-        runner = _METHOD_RUNNERS[method]
         log.info("sync %s: running %s", recording_name, method_label(method))
         try:
-            runner(recording_name, _STAGE_IN)
+            _run_method(recording_name, _STAGE_IN, method)
             result.method_results.append(MethodResult(method=method, ok=True))
             log.info("sync %s: %s done", recording_name, method_label(method))
         except Exception as exc:
-            result.method_results.append(MethodResult(method=method, ok=False, error=str(exc)))
-            log.warning("sync %s: %s failed: %s", recording_name, method_label(method), exc)
-            log.debug("Traceback for %s/%s:\n%s", recording_name, method, traceback.format_exc())
+            result.method_results.append(
+                MethodResult(method=method, ok=False, error=str(exc))
+            )
+            log.warning(
+                "sync %s: %s failed: %s", recording_name, method_label(method), exc
+            )
+            log.debug(traceback.format_exc())
 
     if not result.succeeded:
         log.warning("sync %s: no method succeeded; skipping selection", recording_name)
@@ -373,7 +229,10 @@ def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
         print_comparison(comparison)
         selection = select_best_sync_method(recording_name)
         result.selection = selection
-        log.info("sync %s: selected %s (stage=%s)", recording_name, selection.method, selection.stage)
+        log.info(
+            "sync %s: selected %s (stage=%s)",
+            recording_name, selection.method, selection.stage,
+        )
         apply_selection(recording_name, selection)
     except Exception as exc:
         result.selection_error = str(exc)
@@ -389,16 +248,22 @@ def synchronize_recording_chosen_method(
     stage_in: str = _STAGE_IN,
     quiet: bool = False,
 ) -> SyncSelectionResult:
-    """Run a single sync method, then flatten its output into ``synced/``."""
-    if method not in _METHOD_RUNNERS:
-        raise ValueError(f"Unknown sync method {method!r}; expected one of {CHOSEN_SYNC_METHODS}")
-
+    """Run a single sync method, then flatten its output into synced/."""
+    if method not in METHOD_STAGES:
+        raise ValueError(
+            f"Unknown sync method {method!r}; expected one of {SYNC_METHODS}"
+        )
     if not quiet:
-        log.info("sync start: %s (single method=%s)", recording_name, method_label(method))
+        log.info(
+            "sync start: %s (single method=%s)",
+            recording_name, method_label(method),
+        )
 
-    _METHOD_RUNNERS[method](recording_name, stage_in)
+    _run_method(recording_name, stage_in, method)
     comparison = compare_sync_models(recording_name)
-    qualities = {m: _extract_quality(m, comparison[m]) for m in ALL_METHODS}
+
+    from .orchestrate import extract_quality
+    qualities = {m: extract_quality(m, comparison[m]) for m in SYNC_METHODS}
     result = SyncSelectionResult(
         recording_name=recording_name,
         method=method,
@@ -410,60 +275,122 @@ def synchronize_recording_chosen_method(
 
 
 def synchronize_session(session_name: str) -> list[RecordingResult]:
-    """Run synchronization for every ``session_name_*`` recording."""
+    """Run synchronization for every recording in a session."""
     root = recordings_root()
     recordings = sorted(
-        d.name for d in root.iterdir() if d.is_dir() and d.name.startswith(f"{session_name}_")
+        d.name
+        for d in root.iterdir()
+        if d.is_dir() and d.name.startswith(f"{session_name}_")
     )
     if not recordings:
-        log.warning("No recordings found matching prefix '%s_'.", session_name)
+        log.warning("No recordings matching prefix '%s_'.", session_name)
         return []
 
-    log.info("sync session %s: %d recording(s) found", session_name, len(recordings))
+    log.info("sync session %s: %d recording(s)", session_name, len(recordings))
     results: list[RecordingResult] = []
     for rec in recordings:
         results.append(synchronize_recording_all_methods(rec))
-    _print_session_summary(session_name, results)
+
+    log.info("sync session summary: %s", session_name)
+    for r in results:
+        ok = ", ".join(method_label(m) for m in r.succeeded) or "none"
+        sel = f"-> {r.selection.method}" if r.selection else "no selection"
+        log.info("  %-22s  ok=[%s]  %s", r.recording_name, ok, sel)
     return results
 
 
-def _print_session_summary(session_name: str, results: list[RecordingResult]) -> None:
-    log.info("sync session summary: %s", session_name)
-    for result in results:
-        ok_str = ", ".join(method_label(m) for m in result.succeeded) or "none"
-        fail_str = ", ".join(method_label(m) for m in result.failed)
-        sel_str = f"-> {result.selection.method}" if result.selection else "no selection"
-        line = f"  {result.recording_name:<22}  ok=[{ok_str}]  {sel_str}"
-        if fail_str:
-            line += f"  failed=[{fail_str}]"
-        log.info(line)
+# ---------------------------------------------------------------------------
+# Backward-compatible callable for split_sections.py
+# ---------------------------------------------------------------------------
+
+
+def synchronize_from_calibration(
+    reference_csv: Path | str,
+    target_csv: Path | str,
+    *,
+    output_dir: Path | str,
+    sample_rate_hz: float = 100.0,
+    coarse_max_lag_s: float = 120.0,
+    cal_search_s: float = 5.0,
+    **kwargs,
+) -> tuple[Path, Path, Path | None]:
+    """Calibration-based sync writing outputs to output_dir.
+
+    Used by ``parser.split_sections`` for per-section synchronization.
+    """
+    from .strategies import estimate_multi_anchor
+
+    ref_path = Path(reference_csv)
+    tgt_path = Path(target_csv)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ref_df = load_stream(ref_path)
+    tgt_df = load_stream(tgt_path)
+    if ref_df.empty or tgt_df.empty:
+        raise ValueError("Reference and target must be non-empty.")
+
+    model, meta = estimate_multi_anchor(
+        ref_df, tgt_df,
+        reference_name=str(ref_path),
+        target_name=str(tgt_path),
+        sample_rate_hz=sample_rate_hz,
+        cal_search_s=cal_search_s,
+    )
+
+    payload = asdict(model)
+    payload.update(meta)
+    payload["correlation"] = compute_sync_correlations(
+        ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz,
+    )
+
+    sync_json_path = out_dir / "sync_info.json"
+    sync_json_path.write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+
+    aligned_df = _drop_alignment_columns(
+        apply_sync_model(tgt_df, model, replace_timestamp=True)
+    )
+    synced_csv_path = out_dir / f"{tgt_path.stem}_synced.csv"
+    write_csv(aligned_df, synced_csv_path)
+
+    return sync_json_path, synced_csv_path, None
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entrypoint for ``python -m sync``."""
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(
         prog="python -m sync",
-        description=(
-            "Run all four sync methods on parsed CSVs, pick the best, and copy the selected "
-            "result into synced/."
-        ),
+        description="Run synchronization on parsed recordings.",
     )
     parser.add_argument(
         "name",
-        help="Recording (e.g. 2026-02-26_r5) or session date with --all (e.g. 2026-02-26).",
+        help="Recording name (e.g. 2026-02-26_r5) or session date with --all.",
     )
     parser.add_argument(
         "--all",
         action="store_true",
         dest="all_recordings",
-        help="Process every recording whose folder name starts with NAME + '_'.",
+        help="Process every recording whose folder starts with NAME + '_'.",
     )
-
+    parser.add_argument(
+        "--method",
+        choices=list(SYNC_METHODS),
+        default=None,
+        help="Run only this method (default: run all, pick best).",
+    )
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if args.all_recordings:
         synchronize_session(args.name)
+    elif args.method:
+        synchronize_recording_chosen_method(args.name, args.method)
     else:
         synchronize_recording_all_methods(args.name)

@@ -23,7 +23,7 @@ def plot_calibration_segments_from_detection(
     df: pd.DataFrame,
     *,
     sample_rate_hz: float = 100.0,
-    static_min_s: float = 2.0,
+    static_min_s: float = 2.25,
     static_threshold: float = 1.5,
     peak_min_height: float = 2.5,
     peak_min_count: int = 5,

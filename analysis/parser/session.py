@@ -167,14 +167,16 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
 
             # Use slightly more permissive defaults for the diagnostic plots so
             # that short or early calibration sequences (e.g. at the very start
-            # of the recording) are still visualised.
+            # of the recording) are still visualised.  peak_min_count matches the
+            # shared detector (3): the Arduino stream often yields only four clear
+            # tap peaks in the opening cluster while SPORSA shows five.
             _, info_df, _ = plot_calibration_segments_from_detection(
                 df_sensor,
                 sample_rate_hz=100.0,
-                static_min_s=2.0,
+                static_min_s=2.25,
                 static_threshold=1.5,
                 peak_min_height=2.5,
-                peak_min_count=5,
+                peak_min_count=3,
                 peak_max_count=20,
                 peak_max_gap_s=3.0,
                 static_gap_max_s=8.0,

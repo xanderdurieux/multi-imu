@@ -38,20 +38,18 @@ log = logging.getLogger(__name__)
 _SENSORS = ("sporsa", "arduino")
 _SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 _METHOD_COLORS = {
-    "calibration": "#2ca02c",
-    "lida":        "#1f77b4",
-    "sda":         "#ff7f0e",
-    "online":      "#9467bd",
-    "adaptive":    "#8c564b",
+    "multi_anchor":          "#2ca02c",
+    "one_anchor_adaptive":   "#8c564b",
+    "one_anchor_prior":      "#9467bd",
+    "signal_only":           "#1f77b4",
 }
 _METHOD_LABELS = {
-    "calibration": "Multi-anchor protocol",
-    "lida":        "Signal-only",
-    "sda":         "Signal-only (no drift)",
-    "online":      "One-anchor prior",
-    "adaptive":    "One-anchor adaptive",
+    "multi_anchor":          "Multi-anchor protocol",
+    "one_anchor_adaptive":   "One-anchor adaptive",
+    "one_anchor_prior":      "One-anchor prior",
+    "signal_only":           "Signal-only",
 }
-_ALL_METHODS = ["calibration", "adaptive", "online", "lida", "sda"]
+_ALL_METHODS = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +308,7 @@ def plot_sync_methods_comparison(
 
     # --- Calibration anchors (all refined windows when available) ---
     ax = axes[1][0]
-    cal = data.get("calibration") or {}
+    cal = data.get("multi_anchor") or {}
     if cal.get("available"):
         span_s = cal.get("calibration_span_s")
         n_windows = cal.get("calibration_n_windows")
@@ -505,7 +503,7 @@ def plot_sync_detail(
     if has_cal:
         opening = cal_block.get("opening") or {}
         closing = cal_block.get("closing") or {}
-        span_s = cal_block.get("calibration_span_s")
+        span_s = cal_block.get("anchor_span_s") or cal_block.get("calibration_span_s")
 
         anchors = cal_block.get("anchors")
         anchors = anchors if isinstance(anchors, list) and anchors else []
@@ -529,7 +527,7 @@ def plot_sync_detail(
         ax.set_xticks(bx2)
         ax.set_xticklabels(anchor_names)
         ax.set_ylabel("Anchor score")
-        n_windows = cal_block.get("n_windows_used")
+        n_windows = cal_block.get("n_anchors") or cal_block.get("n_windows_used")
         fit_r2 = cal_block.get("fit_r2")
         title = f"Calibration anchors  (span: {span_s:.1f} s)" if span_s else "Calibration anchors"
         extras: list[str] = []

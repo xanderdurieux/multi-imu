@@ -229,7 +229,7 @@ def find_calibration_segments(
     df: pd.DataFrame,
     *,
     sample_rate_hz: float = 100.0,
-    static_min_s: float = 3.0,
+    static_min_s: float = 2.25,
     static_threshold: float = 1.5,
     peak_min_height: float = 3.0,
     peak_min_count: int = 3,
@@ -250,6 +250,11 @@ def find_calibration_segments(
        ``|acc_norm - g|`` exceeds ``peak_min_height`` (m/s²), with
        consecutive peaks no farther apart than ``peak_max_gap_s`` seconds.
     3. Followed by another run of ``static_min_s`` seconds.
+
+    The default ``static_min_s`` (2.25 s) sits below the nominal ~5 s plateaus
+    so noisy BLE streams and shorter post-tap stillness before the Arduino is
+    moved to the helmet still produce contiguous static runs, without changing
+    SPORSA segment counts on thesis recordings.
 
     The flanking static regions must also lie within ``static_gap_max_s``
     seconds of the first/last peak, which prevents exercise-activity clusters

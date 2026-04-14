@@ -24,13 +24,12 @@ _LABEL_CMAP = "tab10"
 _SENSORS = ("sporsa", "arduino")
 _SENSOR_COLORS = {"sporsa": "#2980b9", "arduino": "#e67e22"}
 _QUALITY_COLORS = {"good": "#2ecc71", "marginal": "#f39c12", "poor": "#e74c3c", "": "#95a5a6"}
-_ALL_SYNC_METHODS = ["sda", "lida", "calibration", "online", "adaptive"]
+_ALL_SYNC_METHODS = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
 _METHOD_COLORS = {
-    "sda": "#3498db",
-    "lida": "#9b59b6",
-    "calibration": "#2ecc71",
-    "online": "#e67e22",
-    "adaptive": "#e74c3c",
+    "multi_anchor": "#2ecc71",
+    "one_anchor_adaptive": "#e74c3c",
+    "one_anchor_prior": "#e67e22",
+    "signal_only": "#3498db",
 }
 
 _META_COLS = frozenset({

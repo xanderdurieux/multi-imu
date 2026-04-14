@@ -16,7 +16,7 @@ from common.paths import (
 
 log = logging.getLogger(__name__)
 
-_ALL_SYNC_METHODS = ["sda", "lida", "calibration", "online", "adaptive"]
+_ALL_SYNC_METHODS = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
 
 
 # ---------------------------------------------------------------------------

@@ -76,7 +76,7 @@ def split_recording(
     *,
     reference_sensor: str = "sporsa",
     sample_rate_hz: float = 100.0,
-    static_min_s: float = 3.0,
+    static_min_s: float = 2.25,
     static_threshold: float = 1.5,
     peak_min_height: float = 3.0,
     peak_min_count: int = 3,
@@ -263,7 +263,7 @@ def sync_sections(
     plot:
         If ``True``, regenerate sensor and comparison plots after syncing.
     """
-    from sync.methods import synchronize_from_calibration
+    from sync.pipeline import synchronize_from_calibration
 
     from common.paths import iter_sections_for_recording
 
@@ -354,8 +354,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--static-min-s",
         type=float,
-        default=3.0,
-        help="Minimum duration of flanking static regions in seconds (default: 3.0).",
+        default=2.25,
+        help="Minimum duration of flanking static regions in seconds (default: 2.25).",
     )
     parser.add_argument(
         "--static-threshold",

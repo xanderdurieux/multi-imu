@@ -48,19 +48,17 @@ _QUALITY_COLORS = {
 }
 
 _SYNC_METHOD_COLORS = {
-    "calibration": "#2ca02c",
-    "lida":        "#1f77b4",
-    "sda":         "#ff7f0e",
-    "online":      "#9467bd",
-    "adaptive":    "#8c564b",
-    "unknown":     "#95a5a6",
+    "multi_anchor":          "#2ca02c",
+    "one_anchor_adaptive":   "#8c564b",
+    "one_anchor_prior":      "#9467bd",
+    "signal_only":           "#1f77b4",
+    "unknown":               "#95a5a6",
 }
 _SYNC_METHOD_LABELS = {
-    "calibration": "Calibration",
-    "lida":        "LIDA",
-    "sda":         "SDA",
-    "online":      "Online",
-    "adaptive":    "Adaptive",
+    "multi_anchor":          "Multi-anchor",
+    "one_anchor_adaptive":   "Adaptive",
+    "one_anchor_prior":      "Prior",
+    "signal_only":           "Signal-only",
 }
 
 _ORIENTATION_METHOD_COLORS = {
@@ -389,7 +387,7 @@ def plot_sync_method_selection(sync_df: pd.DataFrame, output_path: Path) -> Opti
 
 def plot_sync_correlation_comparison(sync_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
     """Grouped bar: cross-correlation score per available method per recording."""
-    methods = ["calibration", "lida", "sda", "online", "adaptive"]
+    methods = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
     corr_cols = {m: f"{m}_corr_offset_and_drift" for m in methods}
     available_methods = [m for m in methods if corr_cols[m] in sync_df.columns]
 
