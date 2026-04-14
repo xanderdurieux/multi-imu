@@ -40,7 +40,7 @@ def load_recording_interval_rows_for_transfer(
 ) -> list[LabelRow]:
     """Load recording-level label rows for section transfer.
 
-    Reads from the canonical path ``data/labels/labels_intervals_<recording>.csv``.
+    Reads from the canonical path ``data/_labels/labels_intervals_<recording>.csv``.
     Returns an empty list if the file does not exist or contains no rows.
     """
     path = recording_labels_csv(recording_name)
@@ -130,7 +130,7 @@ def write_section_labels_from_recording_intervals(
 
 
 def transfer_labels_to_sections(recording_name: str) -> None:
-    """Transfer recording-level labels from ``data/labels/`` to all existing sections.
+    """Transfer recording-level labels from ``data/_labels/`` to all existing sections.
 
     This is a convenience function for the common workflow where the event
     labeler is used at **recording** level (section_id left empty) and the
@@ -185,7 +185,7 @@ def transfer_labels_to_sections(recording_name: str) -> None:
 
     if not intervals:
         log.warning(
-            "No recording-level labels found, expected file: data/labels/labels_intervals_%s.csv",
+            "No recording-level labels found, expected file: data/_labels/labels_intervals_%s.csv",
             recording_name,
         )
         return
@@ -243,7 +243,7 @@ def main(argv: list[str] | None = None) -> None:
         prog="python -m labels.section_transfer",
         description=(
             "Transfer recording-level interval labels to all sections of a recording. "
-            "Labels are read from data/labels/labels_intervals_<recording>.csv "
+            "Labels are read from data/_labels/labels_intervals_<recording>.csv "
             "and written (clipped) to data/sections/<recording>s<n>/labels/labels.csv."
         ),
     )

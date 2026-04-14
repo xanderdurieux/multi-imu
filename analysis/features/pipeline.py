@@ -214,16 +214,25 @@ def extract_features_for_section(
     # Load calibration quality metadata.
     # ------------------------------------------------------------------
     cal_json = _load_calibration_json(cal_dir / "calibration.json")
-    # Schema v2: quality nested under "quality.overall"; alignment under "alignment.<sensor>"
-    calibration_quality = str(
-        cal_json.get("quality", {}).get("overall", "good")
-    )
-    # sync_confidence: try several plausible keys.
-    sync_confidence = float(
-        cal_json.get("sync_confidence",
-            cal_json.get("alignment", {}).get("sporsa", {}).get("yaw_confidence", 1.0)
-        )
-    )
+
+    # Schema v2: quality nested under "quality.overall"
+    calibration_quality = str(cal_json.get("quality", {}).get("overall", "good"))
+
+    align = cal_json.get("alignment", {})
+    align_sporsa = align.get("sporsa", {})
+    align_arduino = align.get("arduino", {})
+
+    # yaw_confidence: how reliably the sensor's heading can be determined
+    # (0 = completely unreliable, 1 = perfectly determined).  Both sensors'
+    # values are extracted independently; the quality scorer uses min() to
+    # bound the cross-sensor feature quality by the weaker sensor.
+    yaw_conf_sporsa = float(align_sporsa.get("yaw_confidence", 1.0))
+    yaw_conf_arduino = float(align_arduino.get("yaw_confidence", 1.0))
+
+    # sync_confidence kept for backward compatibility with existing CSV columns.
+    # It was previously read as sporsa yaw_confidence from a different path;
+    # the explicit extraction above replaces the old fragile fallback chain.
+    sync_confidence = yaw_conf_sporsa
 
     # ------------------------------------------------------------------
     # Build sliding windows.
@@ -298,6 +307,8 @@ def extract_features_for_section(
                 sample_rate_hz=sample_rate_hz,
                 calibration_quality=calibration_quality,
                 sync_confidence=sync_confidence,
+                yaw_conf_sporsa=yaw_conf_sporsa,
+                yaw_conf_arduino=yaw_conf_arduino,
                 events_df=events_df if not events_df.empty else None,
                 labels_df=labels_df if not labels_df.empty else None,
             )

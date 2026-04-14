@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from common.paths import iter_sections_for_recording, read_csv, write_csv
+from common.paths import iter_sections_for_recording, project_relative_path, read_csv, write_csv
 from .core import (
     OpeningSequence,
     SensorIntrinsics,
@@ -113,8 +113,9 @@ def calibrate_section(
     static_cal: dict[str, Any] | None = None
     resolved_static = static_calibration_path
     if resolved_static is None:
-        from common.paths import data_root
-        default = data_root() / "calibrations" / "arduino_imu_calibration.json"
+        from common.paths import calibrations_root
+
+        default = calibrations_root() / "arduino_imu_calibration.json"
         if default.exists():
             resolved_static = default
 

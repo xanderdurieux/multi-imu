@@ -20,6 +20,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from common.signals import acc_norm_from_imu_df
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -114,6 +116,69 @@ def _get_col(df: pd.DataFrame, col: str) -> np.ndarray:
     if df is None or df.empty or col not in df.columns:
         return np.array([], dtype=float)
     return df[col].to_numpy(dtype=float)
+
+
+def _window_valid_ratio_imu(
+    window_signals: pd.DataFrame | None,
+    window_calibrated: pd.DataFrame | None,
+    *,
+    signal_col: str = "acc_norm",
+) -> float:
+    """Fraction of samples with finite acceleration norm in the window.
+
+    Uses derived ``signal_col`` when present; if that slice is empty or
+    entirely non-finite, falls back to ``|acc|`` from calibrated ax/ay/az.
+
+    Without this fallback, timestamps misaligned between calibrated and derived
+    CSVs (or a missing derived slice) incorrectly yield *zero* validity even
+    when the calibrated stream has hundreds of good samples — which was
+    collapsing almost all windows to ``overall_quality_label='poor'``.
+    """
+    arr = _get_col(window_signals, signal_col)
+    if len(arr) > 0:
+        r = float(np.sum(np.isfinite(arr)) / len(arr))
+        if r > 0.0:
+            return float(np.clip(r, 0.0, 1.0))
+
+    if (
+        window_calibrated is not None
+        and not window_calibrated.empty
+        and all(c in window_calibrated.columns for c in ("ax", "ay", "az"))
+    ):
+        try:
+            norms = acc_norm_from_imu_df(window_calibrated)
+            if len(norms) == 0:
+                return 0.0
+            return float(np.clip(np.sum(np.isfinite(norms)) / len(norms), 0.0, 1.0))
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _cross_window_valid_ratio(window_cross: pd.DataFrame | None) -> float:
+    """Mean finite-data rate across core cross-sensor columns (0–1).
+
+    When both IMUs contribute to fusion, cross features should have usable
+    samples in the same window; pervasive NaNs indicate failed alignment or
+    missing overlap for that interval.
+    """
+    if window_cross is None or window_cross.empty:
+        return 0.0
+    cols = [
+        c
+        for c in (
+            "acc_correlation",
+            "gyro_diff_norm",
+            "acc_diff_norm",
+            "disagree_score",
+            "acc_ratio",
+        )
+        if c in window_cross.columns
+    ]
+    if not cols:
+        return 1.0
+    arr = window_cross[cols].to_numpy(dtype=float)
+    return float(np.mean(np.isfinite(arr)))
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +396,10 @@ def _event_features(
 # Label features
 # ---------------------------------------------------------------------------
 
-# Priority order for resolving simultaneous overlapping labels.
-# Higher index = higher priority (last entry wins when multiple labels overlap).
+# Priority order for resolving simultaneous overlapping fine-grained labels.
+# Higher index = higher priority. This is used *only* to break ties when two
+# annotations cover the same window equally; it does NOT define the class
+# hierarchy used in training (see _COARSE_MAP for that).
 _LABEL_PRIORITY: list[str] = [
     "calibration_sequence",
     "helmet_move",
@@ -355,6 +422,53 @@ _LABEL_PRIORITY: list[str] = [
 
 _LABEL_PRIORITY_RANK: dict[str, int] = {lbl: i for i, lbl in enumerate(_LABEL_PRIORITY)}
 
+# ---------------------------------------------------------------------------
+# Coarse 4-class taxonomy for the main thesis experiment.
+#
+# Trade-offs vs. using raw fine-grained labels:
+#   Fine-grained (17 classes)
+#     + Maximum semantic granularity.
+#     - Many classes have very few windows (fall, sprint_standing), making
+#       per-class F1 unreliable and confusion matrices noisy.
+#     - Pipe-separated annotations ("riding|cornering") produce composite
+#       strings that are not in any class schema.
+#   Coarse (4 classes)  ← default for main experiment
+#     + Sufficient samples per class for stable cross-validated metrics.
+#     + Semantically interpretable (non_riding / steady / active / incident).
+#     - Loses intra-class distinctions (cornering vs. braking both → active).
+#   Binary (incident / normal)
+#     + Maximum class balance and clearest safety interpretation.
+#     + Directly answers "can the system detect safety-critical events?".
+#     - "non_riding" windows must still be filtered at the dataset level.
+#     - Loses distinctions between riding modes.
+# ---------------------------------------------------------------------------
+_COARSE_MAP: dict[str, str] = {
+    # Windows with no meaningful riding signal; typically filtered before training.
+    "calibration_sequence": "non_riding",
+    "helmet_move": "non_riding",
+    "grounded": "non_riding",
+    # Low-demand, steady-state riding.
+    "riding": "steady_riding",
+    "riding_standing": "steady_riding",
+    "forest": "steady_riding",
+    "uneven_road": "steady_riding",
+    # Moderate-demand intentional maneuvers.
+    "head_movement": "active_riding",
+    "shoulder_check": "active_riding",
+    "accelerating": "active_riding",
+    "cornering": "active_riding",
+    "braking": "active_riding",
+    "sprinting": "active_riding",
+    "sprint_standing": "active_riding",
+    # Safety-critical / high-consequence events.
+    "hard_braking": "incident",
+    "swerving": "incident",
+    "fall": "incident",
+}
+
+_INCIDENT_LABELS: frozenset[str] = frozenset({"hard_braking", "swerving", "fall"})
+_NON_RIDING_LABELS: frozenset[str] = frozenset({"calibration_sequence", "helmet_move", "grounded"})
+
 
 def _label_feature(
     labels_df: pd.DataFrame | None,
@@ -363,18 +477,23 @@ def _label_feature(
     *,
     containment_threshold: float = 0.5,
 ) -> str:
-    """Return the single highest-priority scenario_label for the window, or 'unlabeled'.
+    """Return a single fine-grained label for the window (no multi-label strings).
 
-    Labeling strategy:
-    1. Compute the containment ratio (overlap / window duration) for every label
-       that touches the window.
-    2. Keep labels whose containment ratio >= *containment_threshold* (the label
-       covers at least half the window). Using window duration ensures long
-       scenario labels are always captured.
-    3. If no label meets the threshold, fall back to all overlapping labels.
-    4. From the candidate labels, return the single highest-priority label
-       according to ``_LABEL_PRIORITY``. Unknown labels fall back to the one
-       with the greatest absolute overlap.
+    Labeling strategy (thesis default)
+    ----------------------------------
+    1. Find all annotation rows overlapping [window_start_ms, window_end_ms].
+    2. Compute containment = overlap_ms / window_duration_ms; keep rows with
+       containment >= *containment_threshold*, else fall back to all overlaps.
+    3. **Pipe-split** compound strings (``"riding|cornering"``) into tokens;
+       each token inherits its source row's overlap_ms.
+    4. Choose the token with **largest overlap_ms**; break ties with
+       ``_LABEL_PRIORITY_RANK`` (higher index wins).  Unknown tokens use rank -1.
+
+    **Why overlap-first:** pure priority ranking can assign a rare short tag
+    over a dominant long ``riding`` span. Overlap-first matches the window's
+    primary semantic content; priority resolves genuine ties (e.g. equal
+    partial overlaps). ``scenario_label_coarse`` / ``scenario_label_binary``
+    remain available for aggregated experiments.
     """
     if labels_df is None or labels_df.empty:
         return "unlabeled"
@@ -401,7 +520,6 @@ def _label_feature(
     well_contained = overlapping[containment >= containment_threshold]
     if well_contained.empty:
         well_contained = overlapping
-        overlap_ms = overlap_ms.loc[well_contained.index]
 
     def _row_label(row: pd.Series) -> str:
         if "scenario_label" in row.index and pd.notna(row["scenario_label"]) and str(row["scenario_label"]).strip():
@@ -410,46 +528,137 @@ def _label_feature(
             return str(row["label"])
         return ""
 
+    # Split pipe-separated compound annotations into individual tokens.
+    # Each token inherits the full overlap_ms of its source row so that
+    # priority ranking is not distorted by partial credit.
     candidates: list[tuple[str, float]] = []
-    for (idx, row), ov in zip(well_contained.iterrows(), overlap_ms.loc[well_contained.index]):
-        lbl = _row_label(row)
-        if lbl:
-            candidates.append((lbl, float(ov)))
+    for idx, row in well_contained.iterrows():
+        ov = float(overlap_ms.loc[idx])
+        raw = _row_label(row)
+        if not raw:
+            continue
+        for token in raw.split("|"):
+            token = token.strip()
+            if token:
+                candidates.append((token, ov))
 
     if not candidates:
         return "unlabeled"
 
-    # Pick the highest-priority known label; for unknowns use largest overlap.
-    known = [(lbl, ov) for lbl, ov in candidates if lbl in _LABEL_PRIORITY_RANK]
-    if known:
-        return max(known, key=lambda t: _LABEL_PRIORITY_RANK[t[0]])[0]
-    return max(candidates, key=lambda t: t[1])[0]
+    def _rank(lbl: str) -> int:
+        return _LABEL_PRIORITY_RANK.get(lbl, -1)
+
+    return max(candidates, key=lambda t: (t[1], _rank(t[0])))[0]
+
+
+def _to_coarse_label(fine_label: str) -> str:
+    """Map a fine-grained label to one of four coarse thesis classes.
+
+    Returns ``'unlabeled'`` for unlabeled windows and ``'unknown'`` for any
+    label not in ``_COARSE_MAP`` (e.g. future annotations).
+    """
+    if fine_label == "unlabeled":
+        return "unlabeled"
+    return _COARSE_MAP.get(fine_label, "unknown")
+
+
+def _to_binary_label(fine_label: str) -> str:
+    """Map a fine-grained label to a binary incident / normal target.
+
+    ``non_riding`` windows are kept as a distinct value so that the caller
+    (or the dataset filter in ``run_evaluation``) can exclude them explicitly
+    rather than silently collapsing them into 'normal'.
+
+    Classes
+    -------
+    incident    hard_braking, swerving, fall
+    normal      all riding labels that are not safety-critical
+    non_riding  calibration_sequence, helmet_move, grounded
+    unlabeled   no annotation covers this window
+    """
+    if fine_label == "unlabeled":
+        return "unlabeled"
+    if fine_label in _NON_RIDING_LABELS:
+        return "non_riding"
+    if fine_label in _INCIDENT_LABELS:
+        return "incident"
+    return "normal"
 
 
 # ---------------------------------------------------------------------------
 # Quality scoring
 # ---------------------------------------------------------------------------
 
+# Calibration quality → numeric score.
+# Three distinct levels — "marginal" is meaningfully penalised relative to
+# "good" rather than being collapsed into the same value (old binary scheme).
+_CAL_QUALITY_SCORES: dict[str, float] = {
+    "good": 1.0,
+    "marginal": 0.65,
+    "poor": 0.0,
+}
+
 def _quality_features(
     valid_ratio_sporsa: float,
+    valid_ratio_arduino: float,
     calibration_quality: str,
+    yaw_conf_sporsa: float,
+    yaw_conf_arduino: float,
+    cross_valid_ratio: float,
 ) -> dict[str, Any]:
-    cal_ok = 1.0 if calibration_quality != "poor" else 0.0
-    vr = valid_ratio_sporsa if np.isfinite(valid_ratio_sporsa) else 0.0
-    score = 0.8 * (1.0 if vr > 0.9 else vr) + 0.2 * cal_ok
+    """Multi-IMU quality score with a dedicated cross-sensor data-usability term.
 
-    if score >= 0.8:
-        label = "good"
-        tier = "A"
-    elif score >= 0.5:
-        label = "marginal"
-        tier = "B"
+    **Dual-stream** (bike and rider both have samples in the window): weighted
+    sum of bike validity, rider validity, alignment, calibration, and cross-row
+    finite rate (see module docstring in ``extract_window_features``).
+
+    **Single-stream**: cross term omitted; ``quality_cross`` stored as 1.0 (N/A).
+    """
+    q_bike = float(np.clip(valid_ratio_sporsa, 0.0, 1.0)) if np.isfinite(valid_ratio_sporsa) else 0.0
+    q_rider = float(np.clip(valid_ratio_arduino, 0.0, 1.0)) if np.isfinite(valid_ratio_arduino) else 0.0
+    q_cal = _CAL_QUALITY_SCORES.get(calibration_quality, 0.5)
+
+    yc_s = float(np.clip(yaw_conf_sporsa, 0.0, 1.0)) if np.isfinite(yaw_conf_sporsa) else 0.5
+    yc_a = float(np.clip(yaw_conf_arduino, 0.0, 1.0)) if np.isfinite(yaw_conf_arduino) else 0.5
+
+    q_align = min(yc_s, yc_a) if q_rider > 0.0 else yc_s
+
+    dual_stream = q_bike > 1e-6 and q_rider > 1e-6
+    q_cross = float(np.clip(cross_valid_ratio, 0.0, 1.0)) if dual_stream else 1.0
+
+    if dual_stream:
+        score = (
+            0.22 * q_bike
+            + 0.22 * q_rider
+            + 0.18 * q_align
+            + 0.18 * q_cal
+            + 0.20 * q_cross
+        )
+        q_cross_out = q_cross
+    elif q_bike > 1e-6:
+        score = 0.45 * q_bike + 0.30 * q_align + 0.25 * q_cal
+        q_cross_out = 1.0
+    elif q_rider > 1e-6:
+        score = 0.45 * q_rider + 0.30 * q_align + 0.25 * q_cal
+        q_cross_out = 1.0
     else:
-        label = "poor"
-        tier = "C"
+        score = 0.0
+        q_cross_out = 1.0
+
+    if score >= 0.72:
+        label, tier = "good", "A"
+    elif score >= 0.42:
+        label, tier = "marginal", "B"
+    else:
+        label, tier = "poor", "C"
 
     return {
-        "overall_quality_score": round(float(score), 4),
+        "quality_bike": round(q_bike, 4),
+        "quality_rider": round(q_rider, 4),
+        "quality_alignment": round(q_align, 4),
+        "quality_calibration": round(q_cal, 4),
+        "quality_cross": round(q_cross_out, 4),
+        "overall_quality_score": round(score, 4),
         "overall_quality_label": label,
         "quality_tier": tier,
     }
@@ -480,6 +689,8 @@ def extract_window_features(
     sample_rate_hz: float = 100.0,
     calibration_quality: str = "good",
     sync_confidence: float = 1.0,
+    yaw_conf_sporsa: float = 1.0,
+    yaw_conf_arduino: float = 1.0,
     events_df: pd.DataFrame | None = None,
     labels_df: pd.DataFrame | None = None,
 ) -> dict[str, float | str | int]:
@@ -514,7 +725,19 @@ def extract_window_features(
     calibration_quality:
         Overall calibration quality string from calibration.json.
     sync_confidence:
-        Synchronisation confidence (0–1) from calibration.json.
+        Sporsa yaw confidence (0–1) stored for backward compatibility.
+    yaw_conf_sporsa:
+        Sporsa orientation alignment confidence from
+        ``calibration.json → alignment.sporsa.yaw_confidence``.
+        Defaults to 1.0 (maximum) so existing call sites without this
+        argument are not penalised.
+    yaw_conf_arduino:
+        Arduino orientation alignment confidence from
+        ``calibration.json → alignment.arduino.yaw_confidence``.
+        Defaults to 1.0.  Together with ``yaw_conf_sporsa`` this enters the
+        ``q_align`` component of the quality score as
+        ``min(yaw_conf_sporsa, yaw_conf_arduino)`` when the rider sensor is
+        present.
     events_df:
         Full events DataFrame (will be filtered to window).
     labels_df:
@@ -542,20 +765,35 @@ def extract_window_features(
     feats["window_n_samples_sporsa"] = n_sporsa
     feats["window_n_samples_arduino"] = n_arduino
 
-    # Valid ratio for sporsa: fraction of non-NaN acc_norm in signals.
-    sporsa_acc_norm = _get_col(window_sporsa_signals, "acc_norm")
-    if len(sporsa_acc_norm) > 0:
-        valid_ratio_sporsa = float(np.sum(np.isfinite(sporsa_acc_norm)) / len(sporsa_acc_norm))
-    else:
-        valid_ratio_sporsa = 0.0
+    cross_valid_ratio = _cross_window_valid_ratio(window_cross)
+
+    valid_ratio_sporsa = _window_valid_ratio_imu(
+        window_sporsa_signals,
+        window_sporsa,
+    )
     feats["window_valid_ratio_sporsa"] = valid_ratio_sporsa
+
+    valid_ratio_arduino = _window_valid_ratio_imu(
+        window_arduino_signals,
+        window_arduino,
+    )
+    feats["window_valid_ratio_arduino"] = valid_ratio_arduino
 
     # ------------------------------------------------------------------
     # 2. Quality metadata
     # ------------------------------------------------------------------
     feats["calibration_quality"] = str(calibration_quality)
     feats["sync_confidence"] = float(sync_confidence)
-    feats.update(_quality_features(valid_ratio_sporsa, calibration_quality))
+    feats.update(
+        _quality_features(
+            valid_ratio_sporsa,
+            valid_ratio_arduino,
+            calibration_quality,
+            yaw_conf_sporsa,
+            yaw_conf_arduino,
+            cross_valid_ratio,
+        )
+    )
 
     # ------------------------------------------------------------------
     # 3. Basic stats — per sensor, per signal
@@ -596,8 +834,17 @@ def extract_window_features(
     feats.update(_event_features(events_df, window_start_ms, window_end_ms))
 
     # ------------------------------------------------------------------
-    # 8. Label
+    # 8. Labels — three parallel representations of the same annotation.
+    #
+    #   scenario_label        fine-grained (17 classes) — for inspection / audit
+    #   scenario_label_coarse 4-class taxonomy          — recommended main target
+    #   scenario_label_binary incident / normal          — binary safety target
+    #
+    # Use label_col in run_evaluation to select which column to train on.
     # ------------------------------------------------------------------
-    feats["scenario_label"] = _label_feature(labels_df, window_start_ms, window_end_ms)
+    fine = _label_feature(labels_df, window_start_ms, window_end_ms)
+    feats["scenario_label"] = fine
+    feats["scenario_label_coarse"] = _to_coarse_label(fine)
+    feats["scenario_label_binary"] = _to_binary_label(fine)
 
     return feats

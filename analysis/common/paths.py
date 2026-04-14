@@ -88,7 +88,7 @@ def data_root() -> Path:
 
 def sessions_root() -> Path:
     """Return the directory containing raw session input folders."""
-    return data_root() / "sessions"
+    return data_root() / "_sessions"
 
 
 def recordings_root() -> Path:
@@ -103,7 +103,7 @@ def sections_root() -> Path:
 
 def labels_root() -> Path:
     """Return the directory that holds repo-level recording label CSVs."""
-    return data_root() / "labels"
+    return data_root() / "_labels"
 
 
 def exports_root() -> Path:
@@ -118,7 +118,12 @@ def evaluation_root() -> Path:
 
 def configs_root() -> Path:
     """Return the directory containing configuration files."""
-    return analysis_root() / "configs"
+    return analysis_root() / "_configs"
+
+
+def calibrations_root() -> Path:
+    """Return the directory containing calibration assets (JSON, raw logs)."""
+    return data_root() / "_calibrations"
 
 
 def project_relative_path(path: Path | str) -> str:
@@ -284,7 +289,7 @@ def section_sensor_csv(section_dir: Path | str, sensor_name: str) -> Path:
 def recording_labels_csv(recording_name: str) -> Path:
     """Return the canonical label CSV path for a recording.
 
-    Canonical location: ``data/labels/labels_intervals_<slug>.csv``.
+    Canonical location: ``data/_labels/labels_intervals_<slug>.csv``.
     The file may not exist yet (e.g. before labeling is done).
     """
     return labels_root() / f"labels_intervals_{recording_name}.csv"
@@ -305,7 +310,7 @@ def section_labels_csv(section_dir: Path | str) -> Path:
 
 def default_workflow_config_path() -> Path:
     """Return the path to the default workflow config file."""
-    return data_root() / "configs" / "workflow.default.json"
+    return data_root() / "_configs" / "workflow.default.json"
 
 
 def read_json_file(path: Path | str) -> dict:

@@ -71,7 +71,7 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
 
     Input layout::
 
-        data/sessions/<session_name>/{arduino,sporsa}/*.txt
+        data/_sessions/<session_name>/{arduino,sporsa}/*.txt
 
     Output layout (one folder per recording number)::
 
@@ -85,7 +85,7 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
 
     Additionally, a session-wide summary JSON (no file paths) is written to::
 
-        data/sessions/<session_name>/session_stats.json
+        data/_sessions/<session_name>/session_stats.json
 
     This aggregates per-recording parsed durations, section statistics, and
     calibration-segment summaries for each sensor.
@@ -302,7 +302,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "session_name",
-        help="Date folder under data/sessions/ (e.g. 2026-02-26).",
+        help="Date folder under data/_sessions/ (e.g. 2026-02-26).",
     )
     parser.add_argument(
         "--no-plot",

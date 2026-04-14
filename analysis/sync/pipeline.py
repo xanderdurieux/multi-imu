@@ -31,7 +31,7 @@ from .methods import (
 log = logging.getLogger(__name__)
 
 _STAGE_IN = "parsed"
-ALL_METHODS: list[str] = ["calibration", "lida", "sda", "online", "adaptive"]
+ALL_METHODS: list[str] = ["calibration", "adaptive", "online", "lida", "sda"]
 SyncMethodName = Literal["sda", "lida", "calibration", "online", "adaptive"]
 
 

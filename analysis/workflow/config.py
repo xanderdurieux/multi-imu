@@ -18,8 +18,10 @@ _KNOWN_STAGES = [
     "events",
     "features",
     "exports",
+    "dataset_summary",   # compact thesis-ready dataset audit (reads features_fused.csv)
     "evaluation",
     "report",
+    "thesis_bundle",   # assemble final thesis figures/tables into report/thesis_bundle/
 ]
 
 
@@ -53,6 +55,7 @@ class WorkflowConfig:
     force: bool = False
     skip_exports: bool = False
     evaluation_seed: int = 42
+    evaluation_label_col: str = "scenario_label_coarse"
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
 

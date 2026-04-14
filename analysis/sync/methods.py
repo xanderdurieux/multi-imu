@@ -65,14 +65,12 @@ METHOD_STAGES: dict[str, str] = {
     "adaptive": "synced/adaptive",
 }
 METHOD_LABELS: dict[str, str] = {
-    "sda": "SDA only",
-    "lida": "SDA + LIDA",
-    "calibration": "Calibration",
-    "online": "Online",
-    "adaptive": "Adaptive",
+    "sda": "Signal-only (no drift)",
+    "lida": "Signal-only",
+    "calibration": "Multi-anchor protocol",
+    "online": "One-anchor prior",
+    "adaptive": "One-anchor adaptive",
 }
-DRIFT_CHAR_JSON = Path(__file__).parent.parent / "data" / "drift_characterisation.json"
-
 
 def method_stage(method: str) -> str:
     """Return the output stage for a sync method."""
@@ -912,27 +910,11 @@ def synchronize_recording_from_calibration(
     return ref_out, tgt_out, sync_json_out
 
 
-def load_characterised_drift(json_path: Path = DRIFT_CHAR_JSON) -> float:
-    """Load the median drift rate (ppm) from offline characterisation."""
-    if not json_path.exists():
-        log.info("Drift characterisation file not found (%s). Using default %.0f ppm.", json_path, DEFAULT_DRIFT_PPM)
-        return DEFAULT_DRIFT_PPM
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        for key in ("cal_span_ge_60s", "lida"):
-            block = data.get(key)
-            if block and block.get("median_ppm") is not None:
-                return float(block["median_ppm"])
-    except Exception as exc:
-        log.warning("Could not load drift characterisation: %s. Using default.", exc)
-    return DEFAULT_DRIFT_PPM
-
-
 def estimate_sync_from_opening_anchor(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
-    drift_ppm: float | None = None,
+    drift_ppm: float = DEFAULT_DRIFT_PPM,
     sample_rate_hz: float = 100.0,
     peak_min_height: float = 3.0,
     peak_min_count: int = 3,
@@ -943,8 +925,6 @@ def estimate_sync_from_opening_anchor(
     target_name: str = "",
 ) -> SyncModel:
     """Estimate sync from the opening calibration anchor and known drift."""
-    if drift_ppm is None:
-        drift_ppm = load_characterised_drift()
     drift_s_per_s = drift_ppm * 1e-6
 
     ref_cals = find_calibration_segments(
@@ -1009,7 +989,7 @@ def synchronize_recording_online(
     *,
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-    drift_ppm: float | None = None,
+    drift_ppm: float = DEFAULT_DRIFT_PPM,
     sample_rate_hz: float = 100.0,
 ) -> tuple[Path, Path, Path]:
     """Synchronize a recording using one opening calibration anchor plus characterised drift."""
@@ -1019,8 +999,6 @@ def synchronize_recording_online(
 
     ref_df = load_stream(ref_csv)
     tgt_df = load_stream(tgt_csv)
-    if drift_ppm is None:
-        drift_ppm = load_characterised_drift()
 
     model = estimate_sync_from_opening_anchor(
         ref_df,
@@ -1037,10 +1015,7 @@ def synchronize_recording_online(
         ref_df=ref_df,
         tgt_df=tgt_df,
         sample_rate_hz=sample_rate_hz,
-        extra={
-            "drift_ppm_source": "pre_characterised",
-            "drift_ppm_applied": drift_ppm,
-        },
+        extra={"drift_source": "prior_ppm", "drift_ppm_prior": float(drift_ppm)},
     )
     return _write_recording_outputs(
         recording_name=recording_name,

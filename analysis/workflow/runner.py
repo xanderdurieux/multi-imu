@@ -244,6 +244,30 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             log.error("exports failed: %s", exc)
             result["failed"] += 1
 
+    elif stage == "dataset_summary":
+        # Reads: data/exports/features_fused.csv
+        # Writes: data/report/tables/ and data/report/figures/dataset/
+        # Position: after "exports", before "evaluation".  Safe to re-run at
+        # any time — all outputs are deterministically derived from the CSV.
+        from reporting.dataset_summary import run_dataset_summary
+        fused = exports_root() / "features_fused.csv"
+        out = data_root() / "report"
+        if fused.exists():
+            try:
+                run_dataset_summary(
+                    fused,
+                    output_dir=out,
+                    min_quality=cfg.min_quality_label,
+                    no_plots=cfg.no_plots,
+                )
+                result["ok"] += 1
+            except Exception as exc:
+                log.error("dataset_summary failed: %s", exc)
+                result["failed"] += 1
+        else:
+            log.warning("features_fused.csv not found — skipping dataset_summary")
+            result["skipped"] += 1
+
     elif stage == "evaluation":
         from evaluation.experiments import run_evaluation
         fused = exports_root() / "features_fused.csv"
@@ -253,6 +277,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 run_evaluation(
                     fused,
                     output_dir=out,
+                    label_col=cfg.evaluation_label_col,
                     seed=cfg.evaluation_seed,
                     min_quality=cfg.min_quality_label,
                     no_plots=cfg.no_plots,
@@ -274,6 +299,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     output_dir=data_root() / "report",
                     features_path=fused,
                     evaluation_dir=evaluation_root(),
+                    no_plots=cfg.no_plots,
                 )
                 result["ok"] += 1
             except Exception as exc:
@@ -281,6 +307,26 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 result["failed"] += 1
         else:
             log.warning("features_fused.csv not found — skipping report")
+            result["skipped"] += 1
+
+    elif stage == "thesis_bundle":
+        from reporting.thesis_bundle import run_thesis_bundle
+        fused = exports_root() / "features_fused.csv"
+        if fused.exists():
+            try:
+                run_thesis_bundle(
+                    output_dir=data_root() / "report" / "thesis_bundle",
+                    features_path=fused,
+                    evaluation_dir=evaluation_root(),
+                    exports_dir=exports_root(),
+                    report_dir=data_root() / "report",
+                )
+                result["ok"] += 1
+            except Exception as exc:
+                log.error("thesis_bundle failed: %s", exc)
+                result["failed"] += 1
+        else:
+            log.warning("features_fused.csv not found — skipping thesis_bundle")
             result["skipped"] += 1
 
     return result

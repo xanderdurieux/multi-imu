@@ -31,6 +31,17 @@ _MODEL_COLORS: dict[str, str] = {
     "logistic_regression": "#e74c3c",
 }
 
+# Matches _FS_DISPLAY in experiments.py — kept local to avoid cross-module import.
+_FS_DISPLAY: dict[str, str] = {
+    "bike": "Bike only",
+    "rider": "Rider only",
+    "fused_no_cross": "Fused\n(no cross)",
+    "fused": "Fused",
+}
+
+# Canonical x-axis order for comparison figures (simple → complex).
+_FS_ORDER: list[str] = ["bike", "rider", "fused_no_cross", "fused"]
+
 # Color coding for feature groups in importance plots
 _GROUP_COLORS: dict[str, str] = {
     "bike_": "#3498db",
@@ -181,42 +192,64 @@ def plot_model_comparison(
 ) -> Path:
     """Grouped bar chart comparing accuracy and macro-F1 across feature sets and models.
 
+    Feature sets are shown in canonical ablation order (bike → rider →
+    fused_no_cross → fused) so the figure reads left-to-right as increasing
+    complexity.  Error bars show the across-fold standard deviation when
+    ``accuracy_std`` / ``macro_f1_std`` columns are present.
+
     Parameters
     ----------
     metrics_df:
-        DataFrame with columns ``feature_set``, ``model``, ``accuracy``, ``macro_f1``.
+        DataFrame with columns ``feature_set``, ``model``, ``accuracy``,
+        ``macro_f1``, and optionally ``accuracy_std``, ``macro_f1_std``.
     """
     if metrics_df.empty:
         log.warning("Empty metrics DataFrame; skipping model comparison plot")
         return output_path
 
-    feature_sets = sorted(metrics_df["feature_set"].unique())
-    models = metrics_df["model"].unique().tolist()
+    # Sort feature sets in canonical ablation order; unknowns go last.
+    present_fs = metrics_df["feature_set"].unique().tolist()
+    feature_sets = [fs for fs in _FS_ORDER if fs in present_fs] + sorted(
+        fs for fs in present_fs if fs not in _FS_ORDER
+    )
+    models = list(dict.fromkeys(metrics_df["model"].tolist()))  # preserve insertion order
     n_models = len(models)
 
     x = np.arange(len(feature_sets))
     width = 0.20
     offsets = np.linspace(-(n_models - 1) / 2, (n_models - 1) / 2, n_models) * width
 
+    has_std = "accuracy_std" in metrics_df.columns and "macro_f1_std" in metrics_df.columns
+
     fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=False)
 
-    for ax, (metric_col, ylabel) in zip(
+    for ax, (metric_col, std_col, ylabel) in zip(
         axes,
-        [("accuracy", "Accuracy"), ("macro_f1", "Macro-F1")],
+        [
+            ("accuracy", "accuracy_std", "Accuracy"),
+            ("macro_f1", "macro_f1_std", "Macro-F1"),
+        ],
     ):
         for model, offset in zip(models, offsets):
-            vals = []
+            vals, errs = [], []
             for fs in feature_sets:
                 row = metrics_df[
                     (metrics_df["feature_set"] == fs) & (metrics_df["model"] == model)
                 ]
-                vals.append(float(row[metric_col].iloc[0]) if not row.empty else 0.0)
+                if row.empty:
+                    vals.append(0.0)
+                    errs.append(0.0)
+                else:
+                    vals.append(float(row[metric_col].iloc[0]))
+                    errs.append(float(row[std_col].iloc[0]) if has_std else 0.0)
 
             color = _MODEL_COLORS.get(model, "#7f8c8d")
             bars = ax.bar(
                 x + offset,
                 vals,
                 width,
+                yerr=errs if has_std else None,
+                error_kw={"elinewidth": 1.0, "capsize": 2.5, "ecolor": "#555"},
                 label=_MODEL_DISPLAY.get(model, model),
                 color=color,
                 alpha=0.85,
@@ -227,17 +260,18 @@ def plot_model_comparison(
                 if v > 0:
                     ax.text(
                         bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 0.008,
+                        bar.get_height() + (max(errs) if has_std else 0) + 0.012,
                         f"{v:.2f}",
                         ha="center",
                         va="bottom",
-                        fontsize=6.5,
+                        fontsize=6,
                     )
 
+        x_labels = [_FS_DISPLAY.get(fs, fs.replace("_", " ").title()) for fs in feature_sets]
         ax.set_xticks(x)
-        ax.set_xticklabels([fs.capitalize() for fs in feature_sets], fontsize=9)
+        ax.set_xticklabels(x_labels, fontsize=8)
         ax.set_ylabel(ylabel)
-        ax.set_ylim(0, 1.15)
+        ax.set_ylim(0, 1.18)
         ax.set_title(ylabel)
         ax.grid(axis="y", alpha=0.3, lw=0.5)
         ax.spines["top"].set_visible(False)

@@ -5,7 +5,7 @@ Exported CSVs include both these relative seconds and feature-compatible
 absolute ``start_ms`` / ``end_ms`` timestamps.
 
 GPS is clipped to the IMU span plus a few seconds, loaded from
-``data/sessions/<session>/*gps*.csv``. The map sits beside the time stack; charts use the browser width (no horizontal
+``data/_sessions/<session>/*gps*.csv``. The map sits beside the time stack; charts use the browser width (no horizontal
 scrollbar on the plot strip). Hover on any sensor panel highlights the same time
 (unified hover + crosshair) and moves a marker on the map.
 

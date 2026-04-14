@@ -105,10 +105,12 @@ def _write_report_md(
         "## Figures",
         "",
         "### Dataset Overview (`figures/dataset/`)",
-        "- `class_distribution.png` — window count per scenario class",
+        "- `class_distribution.png` — window count per fine-grained scenario class",
         "- `quality_breakdown.png` — quality tiers per recording",
         "- `session_timeline.png` — windows coloured by scenario label over time",
         "- `recording_summary_table.png` — per-recording statistics",
+        "- `label_scheme_comparison.png` — fine / coarse / binary class counts side by side",
+        "- `exclusion_funnel.png` — step-by-step window exclusion waterfall",
         "",
         "### Signal Examples (`figures/signals/`)",
         f"- {n_signal_plots} figures: `signal_example_<scenario>.png` and `cross_sensor_<scenario>.png`",
@@ -137,9 +139,15 @@ def _write_report_md(
         f"- {n_eval_figures} figures copied from evaluation stage",
         "",
         "## Tables (`tables/`)",
-        "- `class_counts.csv` — window counts per class",
+        "- `class_counts.csv` — window counts per fine-grained class",
         "- `recording_stats.csv` — per-recording statistics",
         "- `quality_counts.csv` — quality tier distribution",
+        "- `section_inventory.csv` — per-section window/label/quality/duration counts",
+        "- `label_scheme_counts.csv` — counts for fine / coarse / binary schemes (long format)",
+        "- `exclusion_funnel.csv` — step-by-step window exclusion audit trail",
+        "",
+        "## Dataset summary (`dataset_summary.json`)",
+        "- Compact machine-readable overview: recordings, sections, windows, label counts, exclusion steps",
         "",
     ]
 
@@ -156,6 +164,7 @@ def run_report(
     evaluation_dir: Optional[Path] = None,
     context_s: float = 5.0,
     scenarios: Optional[list[str]] = None,
+    no_plots: bool = False,
 ) -> dict:
     """Generate all thesis reporting artefacts.
 
@@ -220,6 +229,21 @@ def run_report(
     log.info("Generating dataset tables …")
     from reporting.dataset_stats import generate_dataset_tables
     generate_dataset_tables(df, output_dir)
+
+    # ------------------------------------------------------------------
+    # 2b. Compact dataset summary (section inventory, label scheme counts,
+    #     exclusion funnel, dataset_summary.json, and two new figures)
+    # ------------------------------------------------------------------
+    log.info("Generating dataset summary …")
+    from reporting.dataset_summary import run_dataset_summary
+    try:
+        run_dataset_summary(
+            features_path,
+            output_dir=output_dir,
+            no_plots=no_plots,
+        )
+    except Exception as exc:
+        log.warning("Dataset summary failed: %s", exc)
 
     # ------------------------------------------------------------------
     # 3. Dataset overview figures

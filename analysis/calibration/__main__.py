@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> None:
         help=(
             "Path to a static hardware calibration JSON file for the Arduino "
             "sensor (accelerometer bias/scale + gyroscope bias).  When omitted "
-            "the pipeline looks for data/calibrations/arduino_imu_calibration.json."
+            "the pipeline looks for data/_calibrations/arduino_imu_calibration.json."
         ),
     )
     args = parser.parse_args(argv)

@@ -10,10 +10,16 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.model_selection import GroupKFold, cross_validate
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+)
+from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
@@ -24,16 +30,31 @@ log = logging.getLogger(__name__)
 _QUALITY_ORDER = ["poor", "marginal", "good"]
 
 _META_COLS = {
+    # Window identifiers
     "section_id",
     "window_idx",
     "window_start_ms",
     "window_end_ms",
     "window_duration_s",
+    # Labels
     "scenario_label",
+    "scenario_label_coarse",
+    "scenario_label_binary",
+    # Quality summary (section- and window-level)
     "overall_quality_label",
+    "overall_quality_score",
     "quality_tier",
     "calibration_quality",
     "sync_confidence",
+    # Per-component quality scores (from revised multi-IMU quality scheme)
+    "quality_bike",
+    "quality_rider",
+    "quality_alignment",
+    "quality_calibration",
+    "quality_cross",
+    # Per-sensor signal validity ratios
+    "window_valid_ratio_sporsa",
+    "window_valid_ratio_arduino",
 }
 
 _MODEL_REGISTRY: dict[str, Any] = {
@@ -48,6 +69,17 @@ _MODEL_DISPLAY: dict[str, str] = {
     "logistic_regression": "Logistic Regression",
 }
 
+# Human-readable names for each feature set.
+_FS_DISPLAY: dict[str, str] = {
+    "bike": "Bike only",
+    "rider": "Rider only",
+    "fused_no_cross": "Fused (no cross)",
+    "fused": "Fused",
+}
+
+# Canonical display order for comparison tables (simple → complex).
+_FS_ORDER: list[str] = ["bike", "rider", "fused_no_cross", "fused"]
+
 
 def _select_feature_cols(df: pd.DataFrame, prefixes: list[str]) -> list[str]:
     """Return columns matching any of the given prefixes, excluding metadata cols."""
@@ -61,10 +93,21 @@ def _select_feature_cols(df: pd.DataFrame, prefixes: list[str]) -> list[str]:
 
 
 def _auto_detect_feature_sets(df: pd.DataFrame) -> dict[str, list[str]]:
-    """Return default feature set → prefix mapping based on available columns."""
+    """Return default feature set → prefix mapping based on available columns.
+
+    Four sets form a 2×2 ablation:
+      bike             unimodal, frame sensor only
+      rider            unimodal, body sensor only
+      fused_no_cross   bimodal, no cross-sensor features (baseline fusion)
+      fused            bimodal, full feature set including cross-sensor features
+
+    Comparing fused vs fused_no_cross directly quantifies the added value of
+    the cross-sensor alignment and disagreement features.
+    """
     return {
         "bike": ["bike_", "sporsa_"],
         "rider": ["rider_", "arduino_"],
+        "fused_no_cross": ["bike_", "sporsa_", "rider_", "arduino_"],
         "fused": ["bike_", "sporsa_", "rider_", "arduino_", "cross_"],
     }
 
@@ -86,48 +129,79 @@ def _cv_evaluate(
     seed: int = 42,
     class_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run GroupKFold cross-validation and return aggregated metrics."""
-    pipe = Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            ("clf", model),
-        ]
-    )
+    """Run GroupKFold CV; ALL metrics are derived from out-of-fold predictions.
 
+    Each fold trains on groups unseen by the validation set.  OOF predictions
+    are concatenated across folds so that the final confusion matrix and
+    per-class classification report reflect held-out performance only — no
+    in-sample evaluation anywhere.
+
+    Returns
+    -------
+    dict with keys:
+        accuracy, accuracy_std       – mean / std of per-fold accuracy
+        macro_f1, macro_f1_std       – mean / std of per-fold macro-F1
+        fold_accuracies, fold_f1s    – per-fold scores (length = n_splits)
+        per_class                    – classification_report on OOF predictions
+        confusion_matrix             – confusion matrix on OOF predictions
+        feature_importances          – mean importances across folds, or None
+    """
     cv = GroupKFold(n_splits=n_splits)
-    cv_results = cross_validate(
-        pipe,
-        X,
-        y,
-        groups=groups,
-        cv=cv,
-        scoring=["accuracy", "f1_macro"],
-        return_train_score=False,
-        return_estimator=True,
+
+    # Pre-allocate OOF arrays — every sample is a validation sample exactly once.
+    oof_pred = np.empty(len(y), dtype=y.dtype)
+
+    fold_accuracies: list[float] = []
+    fold_f1s: list[float] = []
+    fold_importances: list[np.ndarray] = []
+
+    for train_idx, val_idx in cv.split(X, y, groups):
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+
+        # clone() creates a fresh, unfitted copy with identical hyperparameters —
+        # required so each fold starts from scratch and shares no state.
+        pipe = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("clf", clone(model)),
+            ]
+        )
+        pipe.fit(X_train, y_train)
+        y_hat = pipe.predict(X_val)
+
+        oof_pred[val_idx] = y_hat
+
+        fold_accuracies.append(float(accuracy_score(y_val, y_hat)))
+        fold_f1s.append(float(f1_score(y_val, y_hat, average="macro", zero_division=0)))
+
+        clf = pipe.named_steps["clf"]
+        if hasattr(clf, "feature_importances_"):
+            fold_importances.append(clf.feature_importances_.copy())
+
+    # --- OOF aggregate metrics -------------------------------------------------
+    # classification_report and confusion_matrix are computed on the stacked OOF
+    # predictions, which cover all samples exactly once under GroupKFold.
+    report = classification_report(
+        y, oof_pred, target_names=class_names, output_dict=True, zero_division=0
     )
+    cm = confusion_matrix(y, oof_pred)
 
-    accuracy = float(np.mean(cv_results["test_accuracy"]))
-    macro_f1 = float(np.mean(cv_results["test_f1_macro"]))
-
-    # Gather per-class metrics via one full fold re-fit on all data
-    pipe.fit(X, y)
-    y_pred = pipe.predict(X)
-    report = classification_report(y, y_pred, target_names=class_names, output_dict=True, zero_division=0)
-    cm = confusion_matrix(y, y_pred)
-
-    # Extract feature importances from the last estimator if available
-    clf = pipe.named_steps["clf"]
-    importances: dict[str, float] | None = None
-    if hasattr(clf, "feature_importances_"):
-        importances = clf.feature_importances_.tolist()
+    # Mean feature importances across folds (None for models that lack them).
+    importances: list[float] | None = None
+    if fold_importances:
+        importances = np.mean(fold_importances, axis=0).tolist()
 
     return {
-        "accuracy": accuracy,
-        "macro_f1": macro_f1,
+        "accuracy": float(np.mean(fold_accuracies)),
+        "accuracy_std": float(np.std(fold_accuracies, ddof=1)),
+        "macro_f1": float(np.mean(fold_f1s)),
+        "macro_f1_std": float(np.std(fold_f1s, ddof=1)),
+        "fold_accuracies": [round(v, 4) for v in fold_accuracies],
+        "fold_f1s": [round(v, 4) for v in fold_f1s],
         "per_class": report,
         "confusion_matrix": cm.tolist(),
         "feature_importances": importances,
-        "fitted_pipeline": pipe,
     }
 
 
@@ -279,13 +353,17 @@ def run_evaluation(
             metrics_rows.append(
                 {
                     "feature_set": fs_name,
+                    "n_features": len(feat_cols),
                     "model": model_name,
                     "accuracy": round(result["accuracy"], 4),
+                    "accuracy_std": round(result["accuracy_std"], 4),
                     "macro_f1": round(result["macro_f1"], 4),
+                    "macro_f1_std": round(result["macro_f1_std"], 4),
                 }
             )
 
-            # Write confusion matrix — use to_csv directly to preserve class-label index
+            # Write confusion matrix — rows = true class, cols = predicted class.
+            # Built from OOF predictions; label index preserved for readability.
             cm_path = output_dir / f"confusion_matrix_{fs_name}_{model_name}.csv"
             cm_df = pd.DataFrame(
                 result["confusion_matrix"],
@@ -295,13 +373,25 @@ def run_evaluation(
             cm_df.to_csv(cm_path, index=True)
             log.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
 
-            # Write per-class report
+            # Write per-class report (OOF-based)
             per_class_path = output_dir / f"per_class_report_{fs_name}_{model_name}.json"
             per_class_path.write_text(
                 json.dumps(result["per_class"], indent=2), encoding="utf-8"
             )
 
-            # Write feature importances
+            # Write fold-wise scores so variance is inspectable
+            fold_path = output_dir / f"fold_scores_{fs_name}_{model_name}.csv"
+            fold_df = pd.DataFrame(
+                {
+                    "fold": range(1, n_splits + 1),
+                    "accuracy": result["fold_accuracies"],
+                    "macro_f1": result["fold_f1s"],
+                }
+            )
+            write_csv(fold_df, fold_path)
+            log.debug("Wrote fold scores to %s", project_relative_path(fold_path))
+
+            # Write feature importances (mean across folds)
             if result["feature_importances"] is not None:
                 fi_path = output_dir / f"feature_importance_{model_name}_{fs_name}.csv"
                 fi_df = pd.DataFrame(
@@ -317,7 +407,11 @@ def run_evaluation(
     # 5. Write metrics table
     # ------------------------------------------------------------------
     if metrics_rows:
-        metrics_df = pd.DataFrame(metrics_rows)
+        metrics_rows = sorted(
+            metrics_rows,
+            key=lambda r: (-r["macro_f1"], r["macro_f1_std"], -r["accuracy"]),
+        )
+        metrics_df = pd.DataFrame(metrics_rows).reset_index(drop=True)
         metrics_path = output_dir / "metrics_table.csv"
         write_csv(metrics_df, metrics_path)
         log.info("Wrote metrics table to %s", project_relative_path(metrics_path))
@@ -325,22 +419,28 @@ def run_evaluation(
     # ------------------------------------------------------------------
     # 6. Build evaluation summary
     # ------------------------------------------------------------------
+    # Rank by macro-F1 (more informative than accuracy for imbalanced classes).
     best_key = max(
         all_results,
-        key=lambda k: all_results[k]["accuracy"],
+        key=lambda k: all_results[k]["macro_f1"],
         default=None,
     )
 
     summary: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
+        "label_col": label_col,
         "n_windows": int(len(df)),
         "n_classes": len(classes),
         "classes": classes,
         "results": {
             k: {
                 "accuracy": round(v["accuracy"], 4),
+                "accuracy_std": round(v["accuracy_std"], 4),
                 "macro_f1": round(v["macro_f1"], 4),
+                "macro_f1_std": round(v["macro_f1_std"], 4),
+                "fold_accuracies": v["fold_accuracies"],
+                "fold_f1s": v["fold_f1s"],
             }
             for k, v in all_results.items()
         },
@@ -360,6 +460,7 @@ def run_evaluation(
         best_key=best_key,
         all_results=all_results,
         label_display=_MODEL_DISPLAY,
+        fs_display=_FS_DISPLAY,
     )
 
     # ------------------------------------------------------------------
@@ -386,6 +487,52 @@ def run_evaluation(
     return summary
 
 
+def _ordered_feature_sets(metrics_rows: list[dict]) -> list[str]:
+    """Return feature sets in canonical order (simple → complex), unknowns last."""
+    present = {r["feature_set"] for r in metrics_rows}
+    ordered = [fs for fs in _FS_ORDER if fs in present]
+    extras = sorted(fs for fs in present if fs not in _FS_ORDER)
+    return ordered + extras
+
+
+def _pivot_table_lines(
+    metrics_rows: list[dict],
+    metric: str,
+    std_metric: str,
+    ordered_fs: list[str],
+    label_display: dict[str, str],
+    fs_display: dict[str, str],
+) -> list[str]:
+    """Build markdown lines for a model × feature-set pivot table.
+
+    Rows = models (in _MODEL_REGISTRY insertion order).
+    Columns = feature sets (canonical order from _FS_ORDER).
+    Cells = ``mean% ± std%``.
+    """
+    # Column headers
+    fs_headers = " | ".join(fs_display.get(fs, fs) for fs in ordered_fs)
+    sep = "|---" * (len(ordered_fs) + 1) + "|"
+    lines = [f"| Model | {fs_headers} |", sep]
+
+    # One row per model
+    for model_name in _MODEL_REGISTRY:
+        mdl = label_display.get(model_name, model_name)
+        cells: list[str] = []
+        for fs in ordered_fs:
+            row = next(
+                (r for r in metrics_rows if r["feature_set"] == fs and r["model"] == model_name),
+                None,
+            )
+            if row:
+                mean_pct = row[metric] * 100
+                std_pct = row[std_metric] * 100
+                cells.append(f"{mean_pct:.1f} ± {std_pct:.1f}")
+            else:
+                cells.append("—")
+        lines.append(f"| {mdl} | " + " | ".join(cells) + " |")
+    return lines
+
+
 def _write_thesis_summary(
     output_dir: Path,
     summary: dict,
@@ -393,8 +540,11 @@ def _write_thesis_summary(
     best_key: str | None,
     all_results: dict,
     label_display: dict[str, str],
+    fs_display: dict[str, str],
 ) -> None:
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ordered_fs = _ordered_feature_sets(metrics_rows)
+
     lines = [
         "# Evaluation Summary",
         "",
@@ -402,28 +552,107 @@ def _write_thesis_summary(
         f"**Seed:** {summary['seed']}  "
         f"**Windows:** {summary['n_windows']}",
         "",
-        "## Results by Feature Set",
+        "> All metrics are out-of-fold (OOF) estimates from GroupKFold CV.",
+        "> Mean ± std are percentages computed over individual folds (ddof=1).",
         "",
-        "| Feature Set | Model | Accuracy | Macro-F1 |",
-        "|---|---|---|---|",
+        "## Full Results",
+        "",
+        "| Feature Set | n | Model | Accuracy | Macro-F1 |",
+        "|---|---|---|---|---|",
     ]
 
-    for row in metrics_rows:
-        fs = row["feature_set"].capitalize()
+    for row in sorted(
+        metrics_rows,
+        key=lambda r: (
+            _FS_ORDER.index(r["feature_set"]) if r["feature_set"] in _FS_ORDER else 99,
+            list(_MODEL_REGISTRY).index(r["model"]) if r["model"] in _MODEL_REGISTRY else 99,
+        ),
+    ):
+        fs_label = fs_display.get(row["feature_set"], row["feature_set"])
+        n_feat = row.get("n_features", "—")
         mdl = label_display.get(row["model"], row["model"])
-        acc = f"{row['accuracy'] * 100:.1f}%"
-        f1 = f"{row['macro_f1'] * 100:.1f}%"
-        lines.append(f"| {fs} | {mdl} | {acc} | {f1} |")
+        acc = f"{row['accuracy'] * 100:.1f} ± {row['accuracy_std'] * 100:.1f}%"
+        f1 = f"{row['macro_f1'] * 100:.1f} ± {row['macro_f1_std'] * 100:.1f}%"
+        lines.append(f"| {fs_label} | {n_feat} | {mdl} | {acc} | {f1} |")
 
-    lines += ["", "## Key Findings"]
+    # ------------------------------------------------------------------
+    # Pivot table 1: macro-F1 (models × feature sets)
+    # ------------------------------------------------------------------
+    lines += [
+        "",
+        "## Macro-F1 Comparison — mean ± std % (models × feature sets)",
+        "",
+    ]
+    lines += _pivot_table_lines(
+        metrics_rows, "macro_f1", "macro_f1_std", ordered_fs, label_display, fs_display
+    )
+
+    # ------------------------------------------------------------------
+    # Pivot table 2: accuracy (models × feature sets)
+    # ------------------------------------------------------------------
+    lines += [
+        "",
+        "## Accuracy Comparison — mean ± std % (models × feature sets)",
+        "",
+    ]
+    lines += _pivot_table_lines(
+        metrics_rows, "accuracy", "accuracy_std", ordered_fs, label_display, fs_display
+    )
+
+    # ------------------------------------------------------------------
+    # Key findings
+    # ------------------------------------------------------------------
+    lines += ["", "## Key Findings", ""]
 
     if best_key and best_key in all_results:
-        acc_pct = all_results[best_key]["accuracy"] * 100
+        f1_pct = all_results[best_key]["macro_f1"] * 100
+        f1_std_pct = all_results[best_key]["macro_f1_std"] * 100
         fs_part, _, mdl_part = best_key.partition("__")
-        mdl_display = label_display.get(mdl_part, mdl_part)
+        mdl_disp = label_display.get(mdl_part, mdl_part)
+        fs_disp = fs_display.get(fs_part, fs_part)
         lines.append(
-            f"- Best performing: {fs_part} + {mdl_display} ({acc_pct:.1f}% accuracy)"
+            f"- **Best:** {fs_disp} + {mdl_disp} — "
+            f"macro-F1 {f1_pct:.1f} ± {f1_std_pct:.1f}%"
         )
+
+        # Cross-sensor contribution: fused vs fused_no_cross for same best model.
+        # This quantifies whether the cross-sensor alignment/disagreement features
+        # add predictive value beyond naive sensor fusion.
+        if mdl_part:
+            fused_key = f"fused__{mdl_part}"
+            no_cross_key = f"fused_no_cross__{mdl_part}"
+            if fused_key in all_results and no_cross_key in all_results:
+                delta_f1 = (
+                    all_results[fused_key]["macro_f1"]
+                    - all_results[no_cross_key]["macro_f1"]
+                ) * 100
+                sign = "+" if delta_f1 >= 0 else ""
+                lines.append(
+                    f"- **Cross-sensor contribution** (fused vs fused_no_cross, {mdl_disp}): "
+                    f"{sign}{delta_f1:.1f} pp macro-F1"
+                )
+
+            # Sensor contribution: fused_no_cross vs best single-sensor set.
+            bike_key = f"bike__{mdl_part}"
+            rider_key = f"rider__{mdl_part}"
+            if no_cross_key in all_results and bike_key in all_results and rider_key in all_results:
+                best_single_f1 = max(
+                    all_results[bike_key]["macro_f1"],
+                    all_results[rider_key]["macro_f1"],
+                )
+                best_single_name = (
+                    "Bike only"
+                    if all_results[bike_key]["macro_f1"] >= all_results[rider_key]["macro_f1"]
+                    else "Rider only"
+                )
+                delta_fusion = (
+                    all_results[no_cross_key]["macro_f1"] - best_single_f1
+                ) * 100
+                sign = "+" if delta_fusion >= 0 else ""
+                lines.append(
+                    f"- **Sensor fusion gain** (fused_no_cross vs {best_single_name}, {mdl_disp}): "
+                    f"{sign}{delta_fusion:.1f} pp macro-F1"
+                )
     else:
         lines.append("- No results available.")
 

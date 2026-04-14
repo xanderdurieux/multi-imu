@@ -45,13 +45,13 @@ _METHOD_COLORS = {
     "adaptive":    "#8c564b",
 }
 _METHOD_LABELS = {
-    "calibration": "Calibration",
-    "lida":        "SDA + LIDA",
-    "sda":         "SDA only",
-    "online":      "Online",
-    "adaptive":    "Adaptive",
+    "calibration": "Multi-anchor protocol",
+    "lida":        "Signal-only",
+    "sda":         "Signal-only (no drift)",
+    "online":      "One-anchor prior",
+    "adaptive":    "One-anchor adaptive",
 }
-_ALL_METHODS = ["calibration", "lida", "sda", "online", "adaptive"]
+_ALL_METHODS = ["calibration", "adaptive", "online", "lida", "sda"]
 
 
 # ---------------------------------------------------------------------------

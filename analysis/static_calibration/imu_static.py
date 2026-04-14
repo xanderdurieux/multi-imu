@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.paths import write_csv
+from common.paths import data_root, write_csv
 from parser.arduino import parse_arduino_log
 
 GRAVITY = 9.81
@@ -33,9 +33,9 @@ _FACE_TO_PARSED_STEM: dict[str, str] = {
 
 
 def calibration_data_dir() -> Path:
-    """Directory for static calibration assets: ``analysis/data/calibrations``."""
+    """Directory for static calibration assets: ``<data_root>/_calibrations``."""
 
-    return Path(__file__).resolve().parents[1] / "data" / "calibrations"
+    return data_root() / "_calibrations"
 
 
 def default_calibration_raw_logs() -> list[Path]:

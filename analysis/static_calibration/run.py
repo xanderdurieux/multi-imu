@@ -38,7 +38,7 @@ def run_calibration_pipeline(
     paths = list(raw_log_paths) if raw_log_paths is not None else default_calibration_raw_logs()
     if not paths:
         raise FileNotFoundError(
-            "No calibration logs found. Place *.txt under data/calibrations/raw/ or pass raw_log_paths."
+            "No calibration logs found. Place *.txt under data/_calibrations/raw/ or pass raw_log_paths."
         )
 
     root = calibration_data_dir()
