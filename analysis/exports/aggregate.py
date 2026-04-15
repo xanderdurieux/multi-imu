@@ -13,10 +13,44 @@ from common.paths import (
     recordings_root,
     sections_root,
 )
+from sync.sync_info_format import flatten_sync_info_dict
 
 log = logging.getLogger(__name__)
 
 _ALL_SYNC_METHODS = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
+
+
+def _sync_method_row_from_all_methods(data: dict, method: str) -> dict:
+    """Normalize one method entry from ``all_methods.json`` (v1 flat or v2 nested)."""
+    if "methods" in data:
+        m = (data.get("methods") or {}).get(method) or {}
+        if not m:
+            return {}
+        est = m.get("estimate") or {}
+        scores = m.get("scores") or {}
+        return {
+            "available": m.get("available", False),
+            "offset_seconds": est.get("offset_seconds"),
+            "corr_offset_and_drift": scores.get("corr_offset_and_drift"),
+            "drift_ppm": est.get("drift_ppm"),
+            "drift_source": est.get("drift_source", ""),
+            "calibration_span_s": None,
+            "calibration_n_windows": None,
+            "calibration_fit_r2": scores.get("calibration_fit_r2"),
+            "calibration_anchors": None,
+        }
+    m = data.get(method, {}) or {}
+    return {
+        "available": bool(m.get("available", False)),
+        "offset_seconds": m.get("offset_seconds"),
+        "corr_offset_and_drift": m.get("corr_offset_and_drift"),
+        "drift_ppm": m.get("drift_ppm"),
+        "drift_source": m.get("drift_source", ""),
+        "calibration_span_s": m.get("calibration_span_s"),
+        "calibration_n_windows": m.get("calibration_n_windows"),
+        "calibration_fit_r2": m.get("calibration_fit_r2"),
+        "calibration_anchors": m.get("calibration_anchors"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -244,23 +278,52 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         row["selected_method"] = data.get("selected_method", "")
         row["selected_stage"] = data.get("selected_stage", "")
 
+        shared_cal = (
+            (data.get("shared") or {}).get("calibration")
+            if isinstance(data.get("shared"), dict)
+            else None
+        )
         for method in _ALL_SYNC_METHODS:
-            m = data.get(method, {}) or {}
+            m = _sync_method_row_from_all_methods(data, method)
             row[f"{method}_available"] = bool(m.get("available", False))
             row[f"{method}_offset_seconds"] = m.get("offset_seconds")
             row[f"{method}_corr_offset_and_drift"] = m.get("corr_offset_and_drift")
             row[f"{method}_drift_ppm"] = m.get("drift_ppm")
             row[f"{method}_drift_source"] = m.get("drift_source", "")
-            row[f"{method}_cal_span_s"] = m.get("calibration_span_s")
-            row[f"{method}_cal_n_windows"] = m.get("calibration_n_windows")
-            row[f"{method}_cal_fit_r2"] = m.get("calibration_fit_r2")
-            anchors = m.get("calibration_anchors")
-            row[f"{method}_cal_has_anchors"] = bool(isinstance(anchors, list) and len(anchors) > 0)
+            if method == "signal_only":
+                row[f"{method}_cal_span_s"] = m.get("calibration_span_s")
+                row[f"{method}_cal_n_windows"] = m.get("calibration_n_windows")
+                row[f"{method}_cal_fit_r2"] = m.get("calibration_fit_r2")
+                anchors = m.get("calibration_anchors")
+            else:
+                row[f"{method}_cal_span_s"] = (
+                    shared_cal.get("anchor_span_s")
+                    if isinstance(shared_cal, dict)
+                    else m.get("calibration_span_s")
+                )
+                row[f"{method}_cal_n_windows"] = (
+                    shared_cal.get("n_anchors")
+                    if isinstance(shared_cal, dict)
+                    else m.get("calibration_n_windows")
+                )
+                row[f"{method}_cal_fit_r2"] = m.get("calibration_fit_r2")
+                anchors = (
+                    shared_cal.get("anchors")
+                    if isinstance(shared_cal, dict)
+                    else m.get("calibration_anchors")
+                )
+            row[f"{method}_cal_has_anchors"] = bool(
+                isinstance(anchors, list) and len(anchors) > 0
+            ) if method != "signal_only" else bool(
+                isinstance(m.get("calibration_anchors"), list)
+                and len(m.get("calibration_anchors") or []) > 0
+            )
 
     # Also pull the selected method's offset / correlation from sync_info.json.
     if sync_info_path.exists():
         try:
-            info = json.loads(sync_info_path.read_text(encoding="utf-8"))
+            raw_info = json.loads(sync_info_path.read_text(encoding="utf-8"))
+            info = flatten_sync_info_dict(raw_info) or {}
         except Exception as exc:
             log.warning("Failed to read %s: %s", project_relative_path(sync_info_path), exc)
             info = {}

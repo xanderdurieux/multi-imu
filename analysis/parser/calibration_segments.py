@@ -24,7 +24,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from common.signals import acc_norm_from_imu_df, find_peaks_simple, smooth_moving_average
+from common.signals import find_peaks_simple, smooth_moving_average
 
 
 @dataclass(frozen=True)
@@ -276,7 +276,7 @@ def find_calibration_segments(
     and otherwise dominates the quality ranking.  ``None`` (default) means no
     upper limit.
     """
-    norm = acc_norm_from_imu_df(df)
+    norm = df["acc_norm"].to_numpy(dtype=float)
     if len(norm) == 0:
         return []
 

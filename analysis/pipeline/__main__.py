@@ -32,11 +32,11 @@ from visualization.stage_plots import plot_section_pipeline_stage
 
 def _section_dir(name: str) -> Path:
     try:
-        recording_name, section_idx = parse_section_folder_name(name)
+        parse_section_folder_name(name)
     except ValueError:
         print(f"Invalid section name: {name}", file=sys.stderr)
         sys.exit(1)
-    d = section_dir(recording_name, section_idx)
+    d = section_dir(name)
     if not d.exists():
         print(f"Section not found: {d}", file=sys.stderr)
         sys.exit(1)

@@ -79,7 +79,7 @@ There is no `core.py` / `methods.py`; older docs referred to a previous layout.
 
 ## End-to-end flow
 
-1. **Inputs:** `data/recordings/<recording>/parsed/sporsa.csv` and `arduino.csv` (or paths resolved via `common.paths.find_sensor_csv`).
+1. **Inputs:** `data/recordings/<recording>/parsed/sporsa.csv` and `arduino.csv` (or paths from `sensor_csv("<recording>/<stage>", "<sensor>")`).
 2. **Per method:** load streams → run one `estimate_*` → apply model to target → write `synced/<stage>/{sporsa,arduino}.csv` + `sync_info.json`.
 3. **Selection:** read each stage’s `sync_info.json`, apply [Selection policy](#selection-policy), copy winner into flat `data/recordings/<recording>/synced/`, write `all_methods.json`, delete per-method subfolders.
 

@@ -7,7 +7,10 @@ import re
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+
+from common.signals import vector_norm
 
 
 # ---------------------------------------------------------------------------
@@ -19,13 +22,20 @@ CSV_COLUMNS: list[str] = [
     "ax",
     "ay",
     "az",
+    "acc_norm",
     "gx",
     "gy",
     "gz",
+    "gyro_norm",
     "mx",
     "my",
     "mz",
+    "mag_norm",
 ]
+
+_ACC_AXIS_COLS = ("ax", "ay", "az")
+_GYRO_AXIS_COLS = ("gx", "gy", "gz")
+_MAG_AXIS_COLS = ("mx", "my", "mz")
 
 _IMU_VALUE_COLUMNS = [col for col in CSV_COLUMNS if col != "timestamp"]
 
@@ -48,6 +58,13 @@ def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for col in CSV_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
+    if all(c in out.columns for c in _ACC_AXIS_COLS):
+        out["acc_norm"] = vector_norm(out, _ACC_AXIS_COLS)
+    if all(c in out.columns for c in _GYRO_AXIS_COLS):
+        out["gyro_norm"] = vector_norm(out, _GYRO_AXIS_COLS)
+    if all(c in out.columns for c in _MAG_AXIS_COLS):
+        out["mag_norm"] = vector_norm(out, _MAG_AXIS_COLS)
+      
     return out
 
 
@@ -86,6 +103,21 @@ def data_root() -> Path:
     return analysis_root() / "data"
 
 
+def calibrations_root() -> Path:
+    """Return the directory containing calibration assets (JSON, raw logs)."""
+    return data_root() / "_calibrations"
+
+
+def configs_root() -> Path:
+    """Return the directory containing configuration files."""
+    return data_root() / "_configs"
+
+
+def labels_root() -> Path:
+    """Return the directory that holds repo-level recording label CSVs."""
+    return data_root() / "_labels"
+
+
 def sessions_root() -> Path:
     """Return the directory containing raw session input folders."""
     return data_root() / "_sessions"
@@ -101,11 +133,6 @@ def sections_root() -> Path:
     return data_root() / "sections"
 
 
-def labels_root() -> Path:
-    """Return the directory that holds repo-level recording label CSVs."""
-    return data_root() / "_labels"
-
-
 def exports_root() -> Path:
     """Return the directory containing exported dataset artifacts."""
     return data_root() / "exports"
@@ -114,16 +141,6 @@ def exports_root() -> Path:
 def evaluation_root() -> Path:
     """Return the directory containing evaluation artifacts."""
     return data_root() / "evaluation"
-
-
-def configs_root() -> Path:
-    """Return the directory containing configuration files."""
-    return analysis_root() / "_configs"
-
-
-def calibrations_root() -> Path:
-    """Return the directory containing calibration assets (JSON, raw logs)."""
-    return data_root() / "_calibrations"
 
 
 def project_relative_path(path: Path | str) -> str:
@@ -144,9 +161,17 @@ def session_input_dir(session_name: str) -> Path:
 def recording_dir(recording_name: str) -> Path:
     """Return path to the root directory of a recording.
 
-    Recording folder naming is ``<session>_r<idx>``.
+    Recording folder naming is ``<session_name>_r<recording_idx>``.
     """
     return recordings_root() / recording_name
+
+
+def section_dir(section_name: str) -> Path:
+    """Return path to the root directory of a section.
+
+    Section folder naming is ``<recording_name>s<section_idx>``.
+    """
+    return sections_root() / section_name
 
 
 def recording_stage_dir(recording_name: str, stage: str) -> Path:
@@ -157,15 +182,12 @@ def recording_stage_dir(recording_name: str, stage: str) -> Path:
     return recording_dir(recording_name) / stage
 
 
-def section_dir(recording_name: str, section_idx: int) -> Path:
-    """Return the directory for one section.
+def section_stage_dir(section_name: str, stage: str) -> Path:
+    """Return path to a stage directory within a section.
 
-    Section folder naming is ``<recording_name>s<section_idx>``.
-
-    Example:
-        recording_name='2026-02-26_r2', section_idx=1 -> ``data/sections/2026-02-26_r2s1/``
+    Example stages: ``calibrated``, ``orientation``, ``derived``, ``features``, ``events``.
     """
-    return sections_root() / f"{recording_name}s{section_idx}"
+    return section_dir(section_name) / stage
 
 
 def parse_section_folder_name(section_folder_name: str) -> tuple[str, int]:
@@ -202,43 +224,35 @@ def iter_sections_for_recording(recording_name: str) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 def resolve_data_dir(target: str | Path) -> Path:
-    """Resolve a directory reference inside the project data tree.
+    """Resolve a recording or section name (with optional stage) to an absolute directory path.
 
-    Accepted references are:
-    - an existing directory path
-    - ``<recording>/<stage>`` for recording stage directories
-    - ``<recording>s<section_idx>`` for section directories
+    Accepted string forms:
+    - ``<recording_name>``               → recording root directory
+    - ``<recording_name>/<stage>``       → recording stage directory
+    - ``<section_name>``                 → section root directory
+    - ``<section_name>/<stage>``         → section stage directory
+
+    A ``Path`` object may be passed for programmatic callers that already hold
+    a concrete directory — it is validated and returned as-is.
     """
     if isinstance(target, Path):
-        path = target.expanduser()
-        if path.is_dir():
-            return path.resolve()
-        raise FileNotFoundError(f"Directory not found: {path}")
+        if target.is_dir():
+            return target.resolve()
+        raise FileNotFoundError(f"Directory not found: {target}")
 
-    ref = str(target).strip().rstrip("/").replace("\\", "/")
-    if not ref:
+    name, sep, stage = str(target).strip().rstrip("/").partition("/")
+    if not name:
         raise FileNotFoundError("Empty data directory reference.")
 
-    direct = Path(ref).expanduser()
-    if direct.is_dir():
-        return direct.resolve()
-
-    parts = ref.split("/", 1)
-    if len(parts) == 2:
-        stage_path = recording_stage_dir(parts[0], parts[1])
-        if stage_path.is_dir():
-            return stage_path.resolve()
-
     try:
-        parse_section_folder_name(ref)
+        parse_section_folder_name(name)
+        path = section_stage_dir(name, stage) if sep else section_dir(name)
     except ValueError:
-        pass
-    else:
-        section_path = sections_root() / ref
-        if section_path.is_dir():
-            return section_path.resolve()
+        path = recording_stage_dir(name, stage) if sep else recording_dir(name)
 
-    raise FileNotFoundError(f"Could not resolve data directory reference: {target!r}")
+    if not path.is_dir():
+        raise FileNotFoundError(f"Directory not found: {path}")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -253,33 +267,16 @@ def list_csv_files(directory: Path | str) -> list[Path]:
     return sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
 
 
-def find_csv_in_dir(directory: Path | str, name_token: str) -> Path:
-    """Find ``<name_token>.csv`` directly inside *directory*."""
-    path = Path(directory)
-    if not path.is_dir():
-        raise FileNotFoundError(f"Directory not found: {path}")
-    csv_path = path / f"{name_token}.csv"
+def sensor_csv(ref: str, sensor_name: str) -> Path:
+    """Return ``<sensor_name>.csv`` inside the resolved directory.
+
+    *ref* is any string accepted by ``resolve_data_dir``.
+    """
+    directory = resolve_data_dir(ref)
+    csv_path = directory / f"{sensor_name}.csv"
     if not csv_path.is_file():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
     return csv_path
-
-
-def resolve_sensor_csv(stage_ref: str | Path, sensor_name: str) -> Path:
-    """Resolve a stage reference and find the matching sensor CSV inside it."""
-    return find_csv_in_dir(resolve_data_dir(stage_ref), sensor_name)
-
-
-def find_sensor_csv(recording_name: str, stage: str, sensor_name: str) -> Path:
-    """Find a single sensor CSV within a recording stage directory."""
-    return find_csv_in_dir(recording_stage_dir(recording_name, stage), sensor_name)
-
-
-def section_sensor_csv(section_dir: Path | str, sensor_name: str) -> Path:
-    """Return the canonical sensor CSV path for a section."""
-    path = Path(section_dir) / f"{sensor_name}.csv"
-    if not path.is_file():
-        raise FileNotFoundError(f"Section sensor CSV not found: {path}")
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -287,21 +284,13 @@ def section_sensor_csv(section_dir: Path | str, sensor_name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def recording_labels_csv(recording_name: str) -> Path:
-    """Return the canonical label CSV path for a recording.
-
-    Canonical location: ``data/_labels/labels_intervals_<slug>.csv``.
-    The file may not exist yet (e.g. before labeling is done).
-    """
+    """Return the label CSV path for a recording."""
     return labels_root() / f"labels_intervals_{recording_name}.csv"
 
 
-def section_labels_csv(section_dir: Path | str) -> Path:
-    """Return the canonical label CSV path for a section directory.
-
-    Canonical location: ``<section_dir>/labels/labels.csv``.
-    The file may not exist yet (e.g. before label transfer is run).
-    """
-    return Path(section_dir) / "labels" / "labels.csv"
+def section_labels_csv(sec_dir: Path | str) -> Path:
+    """Return the label CSV path for a section."""
+    return Path(sec_dir) / "labels" / "labels.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +299,7 @@ def section_labels_csv(section_dir: Path | str) -> Path:
 
 def default_workflow_config_path() -> Path:
     """Return the path to the default workflow config file."""
-    return data_root() / "_configs" / "workflow.default.json"
+    return configs_root() / "workflow.default.json"
 
 
 def read_json_file(path: Path | str) -> dict:

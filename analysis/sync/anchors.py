@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.signals import acc_norm_from_imu_df, find_peaks_simple, smooth_moving_average
+from common.signals import find_peaks_simple, smooth_moving_average
 from parser.calibration_segments import CalibrationSegment, find_calibration_segments
 
 from .activity import build_alignment_series, SIGNAL_MODE_ACC_NORM_DIFF
@@ -117,7 +117,7 @@ def coarse_offset_from_opening_calibration(
     search_end_ms = ts[0] + search_first_s * 1000.0
     n_search = int(np.sum(ts <= search_end_ms))
 
-    norm = acc_norm_from_imu_df(tgt_df_clean)
+    norm = tgt_df_clean["acc_norm"].to_numpy(dtype=float)
     g = float(np.nanmedian(norm))
     smooth_win = max(3, int(actual_sr * 0.1))
     dyn_smooth = np.abs(smooth_moving_average(norm[:n_search], smooth_win) - g)

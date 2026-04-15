@@ -49,6 +49,7 @@ import pandas as pd
 from scipy.signal import correlate
 
 from common.paths import project_relative_path, read_csv, recording_stage_dir
+from sync.sync_info_format import flatten_sync_info_dict
 from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
@@ -89,6 +90,43 @@ def _load_json(path: Path) -> dict | None:
     except Exception as exc:
         log.warning("Could not read %s: %s", path, exc)
         return None
+
+
+def _load_sync_info_json(path: Path) -> dict | None:
+    raw = _load_json(path)
+    if raw is None:
+        return None
+    return flatten_sync_info_dict(raw)
+
+
+def _unwrap_method_row(m: dict) -> dict:
+    """Merge nested ``estimate`` / ``scores`` into legacy flat keys for plot code."""
+    if not m or ("estimate" not in m and "scores" not in m):
+        return m
+    est = m.get("estimate") or {}
+    scores = m.get("scores") or {}
+    merged = dict(m)
+    merged["offset_seconds"] = est.get("offset_seconds")
+    merged["drift_seconds_per_second"] = est.get("drift_seconds_per_second")
+    merged["drift_ppm"] = est.get("drift_ppm")
+    merged["drift_source"] = est.get("drift_source")
+    merged["corr_offset_and_drift"] = scores.get("corr_offset_and_drift")
+    merged["calibration_fit_r2"] = scores.get("calibration_fit_r2")
+    return merged
+
+
+def _coerce_all_methods_plot_payload(data: dict) -> dict:
+    """Expose ``all_methods.json`` v2 ``methods`` map with legacy top-level keys."""
+    if "methods" not in data:
+        return data
+    out: dict = {
+        "selected_method": data.get("selected_method", ""),
+        "selected_stage": data.get("selected_stage", ""),
+    }
+    for m, row in (data.get("methods") or {}).items():
+        if isinstance(row, dict):
+            out[m] = _unwrap_method_row(row)
+    return out
 
 
 def _load_sensor_df(stage_dir: Path, sensor: str) -> pd.DataFrame | None:
@@ -242,10 +280,16 @@ def _method_row_drift_s_per_s(m: dict) -> float:
 
 def _measured_anchor_points_from_method_row(
     m: dict,
+    *,
+    shared_calibration: dict | None = None,
 ) -> list[tuple[float, float, str]]:
     """``(t_tgt_s, offset_s, tag)`` from calibration anchors and adaptive opening."""
     pts: list[tuple[float, float, str]] = []
-    cal = m.get("calibration_anchors")
+    cal = None
+    if isinstance(shared_calibration, dict):
+        cal = shared_calibration.get("anchors")
+    if not isinstance(cal, list) or not cal:
+        cal = m.get("calibration_anchors")
     if isinstance(cal, list) and cal:
         for i, a in enumerate(cal):
             if not isinstance(a, dict):
@@ -308,6 +352,7 @@ def _plot_method_offset_delta_horizontal(
     footnote: str | None = None,
 ) -> bool:
     """Draw horizontal bars: Δ offset vs selected method (\u00b5s). Returns False if no data."""
+    data = _coerce_all_methods_plot_payload(data)
     methods = [m for m in _ALL_METHODS if isinstance(data.get(m), dict)]
     if not methods:
         return False
@@ -488,8 +533,14 @@ def plot_sync_methods_comparison(
     if output_path is None:
         output_path = synced_dir / "methods_comparison.png"
 
-    selected = data.get("selected_method", "")
-    methods = [m for m in _ALL_METHODS if data.get(m) is not None]
+    shared_cal = (
+        (data.get("shared") or {}).get("calibration")
+        if isinstance(data.get("shared"), dict)
+        else None
+    )
+    data_plot = _coerce_all_methods_plot_payload(data)
+    selected = data_plot.get("selected_method", "")
+    methods = [m for m in _ALL_METHODS if data_plot.get(m) is not None]
     if not methods:
         return None
 
@@ -530,7 +581,7 @@ def plot_sync_methods_comparison(
     def _annotate_offset_under_bars(ax, xs) -> None:
         trans = blended_transform_factory(ax.transData, ax.transAxes)
         for xi, m in zip(xs, methods):
-            md = data[m] or {}
+            md = data_plot[m] or {}
             off = md.get("offset_seconds")
             if off is None or not md.get("available"):
                 lbl = ""
@@ -544,7 +595,7 @@ def plot_sync_methods_comparison(
                         fontsize=7, color="#444444")
 
     # Correlation (offset + drift)
-    corr_vals = np.array([data[m].get("corr_offset_and_drift") or np.nan for m in methods])
+    corr_vals = np.array([data_plot[m].get("corr_offset_and_drift") or np.nan for m in methods])
     ax = ax_corr
     ax.bar(bar_x, corr_vals, color=colors, edgecolor=edge_colors,
            linewidth=lw_edges, width=bar_w, alpha=0.85)
@@ -558,7 +609,7 @@ def plot_sync_methods_comparison(
     ax.margins(y=0.22)
 
     # |drift| (ppm)
-    drift_vals = np.array([abs(data[m].get("drift_ppm") or 0.0) for m in methods])
+    drift_vals = np.array([abs(data_plot[m].get("drift_ppm") or 0.0) for m in methods])
     ax = ax_drift
     ax.bar(bar_x, drift_vals, color=colors, edgecolor=edge_colors,
            linewidth=lw_edges, width=bar_w, alpha=0.85)
@@ -578,11 +629,16 @@ def plot_sync_methods_comparison(
     metric_labels = ["corr", "|drift| ppm", "fit R\u00b2", "n anchors"]
     mat = np.full((len(metric_keys), n_methods), np.nan)
     for j, m in enumerate(methods):
-        md = data[m]
+        md = data_plot[m]
         mat[0, j] = md.get("corr_offset_and_drift") or np.nan
         mat[1, j] = abs(md.get("drift_ppm") or np.nan)
         mat[2, j] = md.get("calibration_fit_r2") or np.nan
-        mat[3, j] = md.get("calibration_n_windows") or np.nan
+        if m == "signal_only":
+            mat[3, j] = np.nan
+        elif isinstance(shared_cal, dict) and shared_cal.get("n_anchors") is not None:
+            mat[3, j] = shared_cal["n_anchors"]
+        else:
+            mat[3, j] = md.get("calibration_n_windows") or np.nan
     # Row-normalize to [0, 1] for display
     mat_norm = np.full_like(mat, np.nan)
     for row_i in range(mat.shape[0]):
@@ -612,7 +668,7 @@ def plot_sync_methods_comparison(
     col_headers = ["Method", "Corr", "Drift (ppm)", "Offset", "Avail.", "Sel."]
     rows = []
     for m in methods:
-        md = data[m]
+        md = data_plot[m]
         corr = md.get("corr_offset_and_drift")
         drift = md.get("drift_ppm")
         off_raw = md.get("offset_seconds")
@@ -643,7 +699,7 @@ def plot_sync_methods_comparison(
 
     if not _plot_method_offset_delta_horizontal(
         ax_off,
-        data,
+        data_plot,
         footnote=(
             "\u0394 vs selected (\u2605) method, in \u00b5s. "
             "\u201cabs\u201d = absolute clock offset for that method."
@@ -677,7 +733,8 @@ def plot_sync_method_offsets(
     if output_path is None:
         output_path = synced_dir / "method_offsets.png"
 
-    selected = data.get("selected_method", "")
+    data_plot = _coerce_all_methods_plot_payload(data)
+    selected = data_plot.get("selected_method", "")
     fig, ax = plt.subplots(figsize=(12, 4.8))
     fig.suptitle(
         f"{synced_dir.parent.name} \u2014 clock offset comparison  "
@@ -686,7 +743,7 @@ def plot_sync_method_offsets(
     )
     if not _plot_method_offset_delta_horizontal(
         ax,
-        data,
+        data_plot,
         footnote=(
             "\u0394 vs selected method. Values after \u201cabs\u201d use auto scale (ms / \u00b5s / ns)."
         ),
@@ -708,8 +765,9 @@ def plot_sync_model_dashboard(
     output_path: Path | None = None,
 ) -> Path | None:
     """Grid: offset, drift ppm, correlations, anchor summary. ``synced/model_dashboard.png``"""
-    info = _load_json(synced_dir / "sync_info.json")
-    allm = _load_json(synced_dir / "all_methods.json")
+    info = _load_sync_info_json(synced_dir / "sync_info.json")
+    allm_raw = _load_json(synced_dir / "all_methods.json")
+    allm = _coerce_all_methods_plot_payload(allm_raw) if allm_raw else None
     if info is None:
         return None
     if output_path is None:
@@ -763,7 +821,7 @@ def plot_sync_model_dashboard(
     ax = fig.add_subplot(gs[0, 2])
     if allm:
         avail = [m for m in _ALL_METHODS if allm.get(m)]
-        d_vals = [abs(allm[m].get("drift_ppm") or 0) for m in avail]
+        d_vals = [abs((allm[m] or {}).get("drift_ppm") or 0) for m in avail]
         cols = [_METHOD_COLORS.get(m, "gray") for m in avail]
         ax.barh(range(len(avail)), d_vals, color=cols, alpha=0.85)
         ax.axvline(400, color="orange", lw=1.0, ls=":", label="~400 ppm")
@@ -834,7 +892,7 @@ def plot_sync_model_dashboard(
     if allm:
         if not _plot_method_offset_delta_horizontal(
             ax_off,
-            allm,
+            allm_raw or allm,
             footnote="\u0394 vs selected (\u2605) method; \u201cabs\u201d = absolute offset.",
         ):
             ax_off.axis("off")
@@ -1075,7 +1133,7 @@ def plot_sync_anchor_timeline(
     output_path: Path | None = None,
 ) -> Path | None:
     """``synced/anchor_timeline.png`` — full SPORSA |acc| with anchor times marked."""
-    info = _load_json(synced_dir / "sync_info.json")
+    info = _load_sync_info_json(synced_dir / "sync_info.json")
     if info is None:
         return None
     markers = _anchor_markers_from_sync_info(info)
@@ -1136,7 +1194,7 @@ def plot_sync_anchor_offsets(
     output_path: Path | None = None,
 ) -> Path | None:
     """``synced/anchor_offsets.png`` — scatter of per-anchor offset vs target time."""
-    info = _load_json(synced_dir / "sync_info.json")
+    info = _load_sync_info_json(synced_dir / "sync_info.json")
     if info is None:
         return None
     cal = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
@@ -1196,15 +1254,23 @@ def plot_sync_anchor_model_fit(
     if output_path is None:
         output_path = synced_dir / "anchor_model_fit.png"
 
-    selected = data.get("selected_method", "")
-    methods = [m for m in _ALL_METHODS if isinstance(data.get(m), dict)]
+    shared = data.get("shared") if isinstance(data.get("shared"), dict) else {}
+    shared_cal = shared.get("calibration") if isinstance(shared.get("calibration"), dict) else None
+    data_plot = _coerce_all_methods_plot_payload(data)
+    selected = data_plot.get("selected_method", "")
+    methods = [m for m in _ALL_METHODS if isinstance(data_plot.get(m), dict)]
     if not methods:
         return None
 
     bounds = _arduino_abs_time_range_s(synced_dir)
     t0_fallback = float(bounds[0]) if bounds else None
+    if shared.get("target_time_origin_seconds") is not None:
+        try:
+            t0_fallback = float(shared["target_time_origin_seconds"])
+        except (TypeError, ValueError):
+            pass
     for m in methods:
-        md = data[m] or {}
+        md = data_plot[m] or {}
         if md.get("available") and md.get("target_time_origin_seconds") is not None:
             try:
                 t0_fallback = float(md["target_time_origin_seconds"])
@@ -1220,10 +1286,12 @@ def plot_sync_anchor_model_fit(
         t_lo, t_hi = bounds[0], bounds[1]
     anchor_ts: list[float] = []
     for m in methods:
-        md = data[m] or {}
+        md = data_plot[m] or {}
         if not md.get("available"):
             continue
-        for t, _o, _tag in _measured_anchor_points_from_method_row(md):
+        for t, _o, _tag in _measured_anchor_points_from_method_row(
+            md, shared_calibration=shared_cal,
+        ):
             anchor_ts.append(t)
     if anchor_ts:
         t_lo = min(t_lo, min(anchor_ts))
@@ -1238,7 +1306,7 @@ def plot_sync_anchor_model_fit(
     y_vals: list[float] = []
 
     for m in methods:
-        md = data[m] or {}
+        md = data_plot[m] or {}
         if not md.get("available"):
             continue
         b = md.get("offset_seconds")
@@ -1267,7 +1335,9 @@ def plot_sync_anchor_model_fit(
         any_line = True
         y_vals.extend([float(np.nanmin(y_line)), float(np.nanmax(y_line))])
 
-        pts = _measured_anchor_points_from_method_row(md)
+        pts = _measured_anchor_points_from_method_row(
+            md, shared_calibration=shared_cal,
+        )
         for t_a, o_a, tag in pts:
             ax.scatter(
                 [t_a], [o_a], s=72, marker=mk, color=col,

@@ -60,11 +60,11 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(1)
     elif args.section_name:
         try:
-            recording_name, section_idx = parse_section_folder_name(args.section_name)
-            section_path = section_dir(recording_name, section_idx)
+            parse_section_folder_name(args.section_name)
         except ValueError:
             print(f"Invalid section name: {args.section_name}", file=sys.stderr)
             sys.exit(1)
+        section_path = section_dir(args.section_name)
         if not section_path.exists():
             print(f"Section not found: {project_relative_path(section_path)}", file=sys.stderr)
             sys.exit(1)

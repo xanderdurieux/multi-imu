@@ -10,6 +10,7 @@ import pandas as pd
 import re
 
 from common.paths import CSV_COLUMNS, write_csv
+from common.signals import add_imu_norms
 
 ACCEL_SENS = {
     "4G": 0.122,
@@ -173,7 +174,7 @@ def parse_sporsa_log(txt_path: Path) -> pd.DataFrame:
     for col in CSV_COLUMNS[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    return df
+    return add_imu_norms(df)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

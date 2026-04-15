@@ -19,14 +19,13 @@ from typing import Any
 import pandas as pd
 
 from common.paths import (
-    recording_stage_dir,
     iter_sections_for_recording,
     parse_section_folder_name,
     project_relative_path,
     read_csv,
     recording_labels_csv,
-    section_sensor_csv,
     section_labels_csv,
+    sensor_csv,
 )
 from .parser import LabelRow, load_labels, write_labels
 
@@ -153,24 +152,20 @@ def transfer_labels_to_sections(recording_name: str) -> None:
         log.warning("No sections found for recording '%s'.", recording_name)
         return
 
-    # Find the best existing recording stage directory and read the origin timestamp.
-    stage_dir = recording_stage_dir(recording_name, "synced")
+    # Read origin timestamp from synced stage if present, else first section.
     recording_origin_ms: float | None = None
+    try:
+        df_ref = read_csv(sensor_csv(f"{recording_name}/synced", "sporsa"))
+        ts = pd.to_numeric(df_ref["timestamp"], errors="coerce").dropna()
+        if not ts.empty:
+            recording_origin_ms = float(ts.iloc[0])
+    except Exception:
+        pass
 
-    if stage_dir is not None:
-        try:
-            df_ref = read_csv(section_sensor_csv(stage_dir, "sporsa"))
-            ts = pd.to_numeric(df_ref["timestamp"], errors="coerce").dropna()
-            if not ts.empty:
-                recording_origin_ms = float(ts.iloc[0])
-        except Exception:
-            pass
-
-    # Fall back to the first section's first timestamp if no stage data is found.
     if recording_origin_ms is None:
         for sec_dir in section_dirs:
             try:
-                df_ref = read_csv(section_sensor_csv(sec_dir, "sporsa"))
+                df_ref = read_csv(sensor_csv(sec_dir.name, "sporsa"))
                 ts = pd.to_numeric(df_ref["timestamp"], errors="coerce").dropna()
                 if not ts.empty:
                     recording_origin_ms = float(ts.iloc[0])
@@ -197,7 +192,7 @@ def transfer_labels_to_sections(recording_name: str) -> None:
 
     for sec_dir in section_dirs:
         try:
-            sporsa_path = section_sensor_csv(sec_dir, "sporsa")
+            sporsa_path = sensor_csv(sec_dir.name, "sporsa")
         except FileNotFoundError:
             log.warning("No sporsa.csv found in %s — skipping.", sec_dir.name)
             continue

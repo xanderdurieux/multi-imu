@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common.paths import find_sensor_csv, read_csv, section_dir, write_csv
+from common.paths import read_csv, section_dir, sensor_csv, write_csv
 from parser.calibration_segments import CalibrationSegment, find_calibration_segments
 from labels.section_transfer import (
     load_recording_interval_rows_for_transfer,
@@ -71,7 +71,7 @@ def _plot_section(section_path: Path, sensors: list[str]) -> None:
 
 def split_recording(
     recording_name: str,
-    stage: str = "synced_cal",
+    stage: str = "synced",
     sensors: list[str] | None = None,
     *,
     reference_sensor: str = "sporsa",
@@ -123,7 +123,7 @@ def split_recording(
         sensors = [reference_sensor] + sensors
 
     # Load reference sensor and detect calibration segments.
-    ref_csv = find_sensor_csv(recording_name, stage, reference_sensor)
+    ref_csv = sensor_csv(f"{recording_name}/{stage}", reference_sensor)
     ref_df = read_csv(ref_csv)
     ref_df = ref_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
@@ -142,7 +142,7 @@ def split_recording(
     sensor_dfs: dict[str, pd.DataFrame] = {}
     for sensor in sensors:
         try:
-            csv_path = find_sensor_csv(recording_name, stage, sensor)
+            csv_path = sensor_csv(f"{recording_name}/{stage}", sensor)
         except FileNotFoundError:
             log.warning("Sensor '%s' not found in %s/%s — skipping", sensor, recording_name, stage)
             continue
@@ -170,7 +170,7 @@ def split_recording(
         ts_start: float,
         ts_end: float,
     ) -> list[Path]:
-        section_path = section_dir(recording_name, section_idx)
+        section_path = section_dir(f"{recording_name}s{section_idx}")
         section_path.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []
         for sensor, df in sensor_slices.items():

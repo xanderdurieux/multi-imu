@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 
 from parser.calibration_segments import CalibrationSegment, find_calibration_segments
+from common.signals import add_imu_norms
 
 log = logging.getLogger(__name__)
 
@@ -717,4 +718,5 @@ def apply_calibration(
         out["gy_world"] = gyro_world[:, 1]
         out["gz_world"] = gyro_world[:, 2]
 
-    return out
+    # Axis values changed — recompute norms to stay consistent.
+    return add_imu_norms(out)

@@ -20,8 +20,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.signals import acc_norm_from_imu_df
-
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -146,7 +144,7 @@ def _window_valid_ratio_imu(
         and all(c in window_calibrated.columns for c in ("ax", "ay", "az"))
     ):
         try:
-            norms = acc_norm_from_imu_df(window_calibrated)
+            norms = window_calibrated["acc_norm"].to_numpy(dtype=float)
             if len(norms) == 0:
                 return 0.0
             return float(np.clip(np.sum(np.isfinite(norms)) / len(norms), 0.0, 1.0))

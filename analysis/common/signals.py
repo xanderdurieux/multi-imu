@@ -2,14 +2,39 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import pandas as pd
 
 
-def acc_norm_from_imu_df(df: pd.DataFrame) -> np.ndarray:
-    """Euclidean norm of ax, ay, az per row (NaNs treated via nansum)."""
-    acc = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-    return np.sqrt(np.nansum(acc**2, axis=1))
+def vector_norm(df: pd.DataFrame, columns: Sequence[str]) -> np.ndarray:
+    """Euclidean norm of the given columns per row."""
+    data = df[list(columns)].to_numpy(dtype=float)
+    nan_mask = np.isnan(data).any(axis=1)
+    norms = np.sqrt(np.nansum(data**2, axis=1))
+    norms[nan_mask] = np.nan
+    return norms
+
+
+def add_imu_norms(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of *df* with ``acc_norm`` and ``gyro_norm`` columns added.
+
+    Both columns are computed from the raw axis columns that must already be
+    present: ``ax/ay/az`` for ``acc_norm`` and ``gx/gy/gz`` for ``gyro_norm``.
+    NaNs in individual axes are treated as zero when summing squares so that a
+    partial row (e.g. when only one sensor type arrived for that timestamp) still
+    gets a meaningful partial norm rather than a full NaN.
+
+    This is the canonical norm calculation shared across all pipeline stages.
+    Calling it at parse time means the result is stored in the CSV and later
+    stages can read it directly instead of recomputing.
+    """
+    out = df.copy()
+    out["acc_norm"] = vector_norm(out, ["ax", "ay", "az"])
+    out["gyro_norm"] = vector_norm(out, ["gx", "gy", "gz"])
+    out["mag_norm"] = vector_norm(out, ["mx", "my", "mz"])
+    return out
 
 
 def smooth_moving_average(signal: np.ndarray, window: int) -> np.ndarray:

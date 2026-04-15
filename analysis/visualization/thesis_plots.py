@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, recording_stage_dir
+from sync.sync_info_format import flatten_sync_info_dict
 from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
@@ -362,7 +363,9 @@ def plot_sync_example_result(
         if df is None:
             raise FileNotFoundError(f"Missing sensor CSV: {name}")
 
-    info = json.loads(sync_json.read_text(encoding="utf-8"))
+    info = flatten_sync_info_dict(
+        json.loads(sync_json.read_text(encoding="utf-8"))
+    ) or {}
     offset_s = float(info.get("offset_seconds", 0.0))
     drift_sps = float(info.get("drift_seconds_per_second", 0.0))
     cal_block = info.get("calibration") if isinstance(info.get("calibration"), dict) else None

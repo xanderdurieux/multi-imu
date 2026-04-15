@@ -14,9 +14,9 @@ from typing import Any, Optional
 
 from common import recordings_root
 from common.paths import (
-    find_sensor_csv,
     project_relative_path,
     recording_stage_dir,
+    sensor_csv,
     write_csv,
 )
 
@@ -33,6 +33,7 @@ from .orchestrate import (
 )
 from .quality import compute_sync_correlations
 from .stream_io import load_stream
+from .sync_info_format import build_sync_info_dict
 
 log = logging.getLogger(__name__)
 
@@ -94,8 +95,8 @@ def _run_method(
         estimate_signal_only,
     )
 
-    ref_csv = find_sensor_csv(recording_name, stage_in, reference_sensor)
-    tgt_csv = find_sensor_csv(recording_name, stage_in, target_sensor)
+    ref_csv = sensor_csv(f"{recording_name}/{stage_in}", reference_sensor)
+    tgt_csv = sensor_csv(f"{recording_name}/{stage_in}", target_sensor)
     out_dir = recording_stage_dir(recording_name, method_stage(method))
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -124,11 +125,13 @@ def _run_method(
 
     aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
 
-    # Build sync_info.json payload.
-    payload = asdict(model)
-    payload.update(meta)
-    payload["correlation"] = compute_sync_correlations(
+    correlation = compute_sync_correlations(
         ref_df, tgt_df, model, sample_rate_hz=model.sample_rate_hz,
+    )
+    payload = build_sync_info_dict(
+        model=asdict(model),
+        meta=meta,
+        correlation=correlation,
     )
 
     # Write outputs.
@@ -266,6 +269,7 @@ def synchronize_recording_chosen_method(
         method=method,
         stage=method_stage(method),
         qualities=qualities,
+        comparison=comparison,
     )
     _apply_selection(recording_name, result)
     return result
@@ -335,10 +339,13 @@ def synchronize_from_calibration(
         sda_fallback_max_lag_s=coarse_max_lag_s,
     )
 
-    payload = asdict(model)
-    payload.update(meta)
-    payload["correlation"] = compute_sync_correlations(
+    correlation = compute_sync_correlations(
         ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz,
+    )
+    payload = build_sync_info_dict(
+        model=asdict(model),
+        meta=meta,
+        correlation=correlation,
     )
 
     sync_json_path = out_dir / "sync_info.json"

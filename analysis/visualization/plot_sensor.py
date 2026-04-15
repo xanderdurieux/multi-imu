@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import read_csv, resolve_sensor_csv
+from common.paths import read_csv, sensor_csv
 from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     try:
-        csv_path = resolve_sensor_csv(args.stage_ref, args.sensor_name)
+        csv_path = sensor_csv(args.stage_ref, args.sensor_name)
     except (FileNotFoundError, ValueError) as exc:
         log.warning("Could not find CSV for %s/%s: %s", args.stage_ref, args.sensor_name, exc)
         return

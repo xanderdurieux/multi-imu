@@ -13,6 +13,7 @@ from typing import Dict, Optional
 import pandas as pd
 
 from common.paths import CSV_COLUMNS, write_csv
+from common.signals import add_imu_norms
 
 GRAVITY = 9.81
 
@@ -165,7 +166,7 @@ def parse_arduino_log(txt_path: Path) -> pd.DataFrame:
     if "timestamp_received" in df.columns:
         df["timestamp_received"] = pd.to_numeric(df["timestamp_received"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    return df
+    return add_imu_norms(df)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
