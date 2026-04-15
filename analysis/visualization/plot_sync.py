@@ -6,22 +6,22 @@ plot_sync_overlay
     Before-vs-after comparison: parsed (unsynced) and synced sensor signals.
 plot_sync_methods_comparison
     Bar charts comparing all sync method metrics from ``all_methods.json``.
-plot_sync_detail
-    Offset/drift summary and calibration anchor visualization from ``sync_info.json``.
+plot_sync_method_offsets
+    \u0394-offset vs selected method (\u00b5s) with human-readable absolute values.
 plot_sync_model_dashboard
     Grid of key model parameters, correlation gauges, and anchor detail.
 plot_sync_zoom_alignment
-    Multi-panel zoomed overlay at opening, mid-recording, and closing.
-plot_sync_clock_correction
-    Clock correction curve (delta_ms) and drift-only term vs Arduino time.
+    Multi-panel zoomed overlay (synced signals only) at opening, mid, and late.
 plot_sync_roll_corr_global
     Rolling Pearson *r* between SPORSA and synced Arduino |acc| over time.
 plot_sync_scatter_zoom
-    |acc| scatter in a mid-recording window for aligned and unaligned signals.
+    Per-sample |acc| vs |acc| in a mid window (alignment sanity check).
 plot_sync_anchor_offsets
     Per-anchor offset vs target time, sized/colored by score, with drift fit.
-plot_sync_difference_profile
-    Resampled |acc|_ref - |acc|_tgt residual over the full session.
+plot_sync_anchor_timeline
+    Full-session |acc| with calibration / opening anchor times marked.
+plot_sync_anchor_model_fit
+    Per-method linear clock model vs measured anchor offsets (from ``all_methods.json``).
 plot_sync_stage
     Master entry point — calls all of the above for a recording's synced dir.
 
@@ -43,6 +43,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.transforms import blended_transform_factory
 import numpy as np
 import pandas as pd
 from scipy.signal import correlate
@@ -68,6 +69,12 @@ _METHOD_LABELS = {
 }
 _ALL_METHODS = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
 _TARGET_HZ = 20.0
+_METHOD_MARKERS = {
+    "multi_anchor":          "o",
+    "one_anchor_adaptive":   "s",
+    "one_anchor_prior":      "D",
+    "signal_only":           "^",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +176,215 @@ def _rolling_pearson(a: np.ndarray, b: np.ndarray, window: int) -> np.ndarray:
             continue
         out[i] = np.corrcoef(x, y)[0, 1]
     return out
+
+
+def _anchor_time(a: dict) -> float:
+    """Prefer ``t_ref_s`` (reference-axis) when present; fall back to ``t_tgt_s``."""
+    return float(a.get("t_ref_s") or a.get("t_tgt_s", 0.0))
+
+
+def _anchor_markers_from_sync_info(info: dict) -> list[tuple[float, str, float | None]]:
+    """Return ``(t_ref_s, label, score)`` for sync calibration / opening markers.
+
+    Uses reference-side anchor time when available so markers align with
+    the SPORSA |acc| trace; falls back to ``t_tgt_s`` for older metadata.
+    """
+    out: list[tuple[float, str, float | None]] = []
+    cal = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
+    if cal:
+        anchors = cal.get("anchors") or []
+        if anchors:
+            for i, a in enumerate(anchors):
+                out.append((_anchor_time(a), f"A{i + 1}", a.get("score")))
+        else:
+            opening = cal.get("opening") or {}
+            closing = cal.get("closing") or {}
+            if opening:
+                out.append((_anchor_time(opening), "Opening", opening.get("score")))
+            if closing:
+                out.append((_anchor_time(closing), "Closing", closing.get("score")))
+    if not out:
+        adap = info.get("adaptive") if isinstance(info.get("adaptive"), dict) else None
+        if adap:
+            oa = adap.get("opening_anchor") or {}
+            if oa:
+                out.append((_anchor_time(oa), "Opening", oa.get("score")))
+    return out
+
+
+def _arduino_abs_time_range_s(synced_dir: Path) -> tuple[float, float] | None:
+    """Absolute target time (s) at first / last Arduino sample."""
+    df = _load_sensor_df(synced_dir, "arduino")
+    if df is None or df.empty:
+        return None
+    ts = df["timestamp"].to_numpy(dtype=float)
+    if ts.size < 1:
+        return None
+    return float(ts[0]) / 1000.0, float(ts[-1]) / 1000.0
+
+
+def _method_row_drift_s_per_s(m: dict) -> float:
+    """Drift (s/s) from ``all_methods`` method row."""
+    d = m.get("drift_seconds_per_second")
+    if d is not None:
+        try:
+            return float(d)
+        except (TypeError, ValueError):
+            pass
+    ppm = m.get("drift_ppm")
+    if ppm is not None:
+        try:
+            return float(ppm) * 1e-6
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _measured_anchor_points_from_method_row(
+    m: dict,
+) -> list[tuple[float, float, str]]:
+    """``(t_tgt_s, offset_s, tag)`` from calibration anchors and adaptive opening."""
+    pts: list[tuple[float, float, str]] = []
+    cal = m.get("calibration_anchors")
+    if isinstance(cal, list) and cal:
+        for i, a in enumerate(cal):
+            if not isinstance(a, dict):
+                continue
+            t = a.get("t_tgt_s")
+            o = a.get("offset_s")
+            if t is None or o is None:
+                continue
+            try:
+                pts.append((float(t), float(o), f"A{i + 1}"))
+            except (TypeError, ValueError):
+                pass
+    oa = m.get("adaptive_opening_anchor")
+    if isinstance(oa, dict):
+        t = oa.get("t_tgt_s")
+        o = oa.get("offset_s")
+        if t is not None and o is not None:
+            try:
+                pts.append((float(t), float(o), "Opn"))
+            except (TypeError, ValueError):
+                pass
+    return pts
+
+
+def _format_offset_interval_s(seconds: float | None) -> str:
+    """Format a clock offset in seconds for tables and annotations."""
+    if seconds is None:
+        return "N/A"
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not np.isfinite(s):
+        return "N/A"
+    a = abs(s)
+    if a >= 1.0:
+        return f"{s:.5f} s"
+    if a >= 1e-3:
+        return f"{s * 1e3:.4f} ms"
+    if a >= 1e-6:
+        return f"{s * 1e6:.2f} \u00b5s"
+    if a >= 1e-9:
+        return f"{s * 1e9:.2f} ns"
+    return f"{s:.2e} s"
+
+
+def _format_delta_us(delta_us: float) -> str:
+    """Compact string for an offset difference in microseconds."""
+    if not np.isfinite(delta_us):
+        return "?"
+    if abs(delta_us) >= 1000.0:
+        return f"{delta_us / 1000.0:+.4f} ms"
+    return f"{delta_us:+.2f} \u00b5s"
+
+
+def _plot_method_offset_delta_horizontal(
+    ax: plt.Axes,
+    data: dict,
+    *,
+    footnote: str | None = None,
+) -> bool:
+    """Draw horizontal bars: Δ offset vs selected method (\u00b5s). Returns False if no data."""
+    methods = [m for m in _ALL_METHODS if isinstance(data.get(m), dict)]
+    if not methods:
+        return False
+
+    selected = data.get("selected_method", "")
+    off_s = np.full(len(methods), np.nan, dtype=float)
+    avail = np.zeros(len(methods), dtype=bool)
+    for i, m in enumerate(methods):
+        md = data[m] or {}
+        if not md.get("available"):
+            continue
+        raw = md.get("offset_seconds")
+        if raw is None:
+            continue
+        try:
+            fv = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(fv):
+            off_s[i] = fv
+            avail[i] = True
+    if not avail.any():
+        return False
+
+    ref: float | None = None
+    if selected and selected in methods:
+        j = methods.index(selected)
+        if avail[j]:
+            ref = float(off_s[j])
+    if ref is None:
+        ref = float(np.median(off_s[avail]))
+
+    deltas_us = (off_s - ref) * 1e6
+    y = np.arange(len(methods))
+    method_labels = [_METHOD_LABELS.get(m, m) for m in methods]
+    finite_d = deltas_us[avail]
+    max_abs_d = float(np.nanmax(np.abs(finite_d))) if finite_d.size else 0.0
+    span = max(max_abs_d, 0.5)
+
+    for i, m in enumerate(methods):
+        if not avail[i]:
+            ax.scatter([0], [i], marker="x", color="#888888", s=36, zorder=4)
+            ax.text(0, i, "  n/a", va="center", ha="left", fontsize=8, color="gray")
+            continue
+        d = float(deltas_us[i])
+        col = _METHOD_COLORS.get(m, "gray")
+        ax.barh(
+            i, d, color=col, height=0.55, alpha=0.88,
+            edgecolor="black" if m == selected else "none",
+            linewidth=1.8 if m == selected else 0,
+        )
+        abs_lbl = _format_offset_interval_s(float(off_s[i]))
+        delta_lbl = _format_delta_us(d)
+        pad = 0.035 * span
+        if abs(d) < 1e-12:
+            tx = pad
+            ha = "left"
+        else:
+            tx = d + (pad if d >= 0 else -pad)
+            ha = "left" if d >= 0 else "right"
+        ax.text(tx, i, f" {delta_lbl}  | abs {abs_lbl}", va="center", ha=ha, fontsize=8)
+
+    ax.axvline(0, color="#333333", lw=1.0, zorder=0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(method_labels, fontsize=9)
+    ref_lbl = (
+        _METHOD_LABELS.get(selected, selected)
+        if selected and selected in methods and avail[methods.index(selected)]
+        else "median"
+    )
+    ax.set_xlabel(f"\u0394 offset vs {ref_lbl} (\u00b5s)")
+    ax.set_title("Inter-method offset spread", fontsize=10)
+    ax.set_xlim(-span * 1.45, span * 1.45)
+    ax.grid(axis="x", alpha=0.28)
+    if footnote:
+        ax.text(0.5, -0.22, footnote, transform=ax.transAxes, ha="center", fontsize=8, color="#555555")
+    return True
 
 
 def _plot_sensor_pair(axes, sensor_dfs: dict[str, pd.DataFrame], t0: float,
@@ -285,7 +501,15 @@ def plot_sync_methods_comparison(
     edge_colors = ["black" if m == selected else "none" for m in methods]
     lw_edges = [2.0 if m == selected else 0.0 for m in methods]
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+    fig = plt.figure(figsize=(14, 10.5))
+    gs = fig.add_gridspec(
+        3, 2, height_ratios=[1.05, 1.12, 0.88], hspace=0.38, wspace=0.32,
+    )
+    ax_corr = fig.add_subplot(gs[0, 0])
+    ax_drift = fig.add_subplot(gs[0, 1])
+    ax_hm = fig.add_subplot(gs[1, 0])
+    ax_tbl = fig.add_subplot(gs[1, 1])
+    ax_off = fig.add_subplot(gs[2, :])
     fig.suptitle(
         f"{synced_dir.parent.name} \u2014 sync method comparison  "
         f"(\u2605 = selected: {_METHOD_LABELS.get(selected, selected)})",
@@ -303,9 +527,25 @@ def plot_sync_methods_comparison(
                 ax.text(xi, yi + ymax * 0.10, "\u2605", ha="center",
                         va="bottom", fontsize=14, fontweight="bold")
 
+    def _annotate_offset_under_bars(ax, xs) -> None:
+        trans = blended_transform_factory(ax.transData, ax.transAxes)
+        for xi, m in zip(xs, methods):
+            md = data[m] or {}
+            off = md.get("offset_seconds")
+            if off is None or not md.get("available"):
+                lbl = ""
+            else:
+                try:
+                    lbl = _format_offset_interval_s(float(off))
+                except (TypeError, ValueError):
+                    lbl = ""
+            if lbl:
+                ax.text(xi, -0.08, lbl, transform=trans, ha="center", va="top",
+                        fontsize=7, color="#444444")
+
     # Correlation (offset + drift)
     corr_vals = np.array([data[m].get("corr_offset_and_drift") or np.nan for m in methods])
-    ax = axes[0][0]
+    ax = ax_corr
     ax.bar(bar_x, corr_vals, color=colors, edgecolor=edge_colors,
            linewidth=lw_edges, width=bar_w, alpha=0.85)
     ax.axhline(0, color="gray", lw=0.7, ls="--")
@@ -314,10 +554,12 @@ def plot_sync_methods_comparison(
     ax.set_ylabel("Correlation"); ax.set_title("Cross-corr (offset + drift)")
     ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
     _annotate(ax, bar_x, corr_vals)
+    _annotate_offset_under_bars(ax, bar_x)
+    ax.margins(y=0.22)
 
     # |drift| (ppm)
     drift_vals = np.array([abs(data[m].get("drift_ppm") or 0.0) for m in methods])
-    ax = axes[0][1]
+    ax = ax_drift
     ax.bar(bar_x, drift_vals, color=colors, edgecolor=edge_colors,
            linewidth=lw_edges, width=bar_w, alpha=0.85)
     ax.axhline(400, color="orange", lw=1.0, ls=":", label="typical Arduino (~400 ppm)")
@@ -326,9 +568,11 @@ def plot_sync_methods_comparison(
     ax.set_ylabel("|drift| (ppm)"); ax.set_title("Absolute drift")
     ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
     _annotate(ax, bar_x, drift_vals, fmt=".1f")
+    _annotate_offset_under_bars(ax, bar_x)
+    ax.margins(y=0.22)
 
     # Heatmap of normalized metrics
-    ax = axes[1][0]
+    ax = ax_hm
     metric_keys = ["corr_offset_and_drift", "drift_ppm", "calibration_fit_r2",
                    "calibration_n_windows"]
     metric_labels = ["corr", "|drift| ppm", "fit R\u00b2", "n anchors"]
@@ -363,196 +607,94 @@ def plot_sync_methods_comparison(
     ax.set_title("Normalized metrics heatmap")
 
     # Summary table
-    ax = axes[1][1]
+    ax = ax_tbl
     ax.axis("off")
-    col_headers = ["Method", "Corr", "Drift (ppm)", "Avail.", "Sel."]
+    col_headers = ["Method", "Corr", "Drift (ppm)", "Offset", "Avail.", "Sel."]
     rows = []
     for m in methods:
         md = data[m]
         corr = md.get("corr_offset_and_drift")
         drift = md.get("drift_ppm")
+        off_raw = md.get("offset_seconds")
+        off_cell = (
+            _format_offset_interval_s(float(off_raw))
+            if md.get("available") and off_raw is not None
+            else "N/A"
+        )
         avail = "\u2713" if md.get("available") else "\u2717"
         sel = "\u2605" if m == selected else ""
         rows.append([
             _METHOD_LABELS.get(m, m),
             f"{corr:.4f}" if corr is not None else "N/A",
             f"{drift:.1f}" if drift is not None else "N/A",
+            off_cell,
             avail, sel,
         ])
     table = ax.table(cellText=rows, colLabels=col_headers, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.2, 1.8)
+    table.set_fontsize(9)
+    table.scale(1.15, 1.65)
     for (row, col), cell in table.get_celld().items():
         if row == 0:
             cell.set_facecolor("#e8e8e8")
-        elif rows[row - 1][4] == "\u2605":
+        elif rows[row - 1][5] == "\u2605":
             cell.set_facecolor("#d4edda")
     ax.set_title("Method summary")
 
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    if not _plot_method_offset_delta_horizontal(
+        ax_off,
+        data,
+        footnote=(
+            "\u0394 vs selected (\u2605) method, in \u00b5s. "
+            "\u201cabs\u201d = absolute clock offset for that method."
+        ),
+    ):
+        ax_off.axis("off")
+        ax_off.text(
+            0.5, 0.5,
+            "No per-method offset_seconds in all_methods.json (re-run sync to refresh).",
+            ha="center", va="center", fontsize=10, color="gray",
+            transform=ax_off.transAxes,
+        )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     return _save(fig, output_path)
 
 
 # ---------------------------------------------------------------------------
-# Plot 3: Sync detail (selected method)
+# Plot 3: Per-method offset comparison
 # ---------------------------------------------------------------------------
 
-def plot_sync_detail(
+def plot_sync_method_offsets(
     synced_dir: Path,
     *,
     output_path: Path | None = None,
 ) -> Path | None:
-    """``synced/sync_detail.png``"""
-    info = _load_json(synced_dir / "sync_info.json")
-    if info is None:
+    """``synced/method_offsets.png`` — inter-method offset spread (\u0394 vs selected)."""
+    data = _load_json(synced_dir / "all_methods.json")
+    if data is None:
         return None
     if output_path is None:
-        output_path = synced_dir / "sync_detail.png"
+        output_path = synced_dir / "method_offsets.png"
 
-    method = info.get("sync_method", "?")
-    offset_s = info.get("offset_seconds")
-    drift_sps = info.get("drift_seconds_per_second")
-    drift_ppm = (drift_sps * 1e6) if drift_sps is not None else None
-    corr = info.get("correlation") or {}
-    cal_block = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
-    adap_block = info.get("adaptive") if isinstance(info.get("adaptive"), dict) else None
-    rec_name = synced_dir.parent.name
+    selected = data.get("selected_method", "")
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+    fig.suptitle(
+        f"{synced_dir.parent.name} \u2014 clock offset comparison  "
+        f"(\u2605 = selected: {_METHOD_LABELS.get(selected, selected)})",
+        fontsize=12,
+    )
+    if not _plot_method_offset_delta_horizontal(
+        ax,
+        data,
+        footnote=(
+            "\u0394 vs selected method. Values after \u201cabs\u201d use auto scale (ms / \u00b5s / ns)."
+        ),
+    ):
+        plt.close(fig)
+        return None
 
-    has_cal = cal_block is not None
-    has_adap = adap_block is not None
-    n_rows = 1 + int(has_cal) + int(has_adap)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4 * n_rows), squeeze=False)
-    fig.suptitle(f"{rec_name} \u2014 sync detail  ({method})", fontsize=12)
-
-    # Row 0 left: key metrics
-    ax = axes[0][0]
-    ax.axis("off")
-    lines = [
-        f"Method:             {method}",
-        f"Offset:             {offset_s:.6f} s" if offset_s is not None else "Offset:             N/A",
-        f"Drift:              {drift_ppm:.2f} ppm" if drift_ppm is not None else "Drift:              N/A",
-        f"Drift source:       {info.get('drift_source', 'N/A')}",
-        f"Signal mode:        {info.get('signal_mode', 'N/A')}",
-        f"Corr (offset only): {corr.get('offset_only', float('nan')):.4f}",
-        f"Corr (offset+drift):{corr.get('offset_and_drift', float('nan')):.4f}",
-    ]
-    ax.text(0.05, 0.95, "\n".join(lines), transform=ax.transAxes,
-            fontsize=10, va="top", ha="left", family="monospace",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
-    ax.set_title("Sync parameters")
-
-    # Row 0 right: correlation gauges
-    ax = axes[0][1]
-    valid = {k: v for k, v in {
-        "offset only": corr.get("offset_only"),
-        "offset + drift": corr.get("offset_and_drift"),
-    }.items() if v is not None}
-    bx = np.arange(len(valid))
-    bar_colors = ["#2ca02c" if v >= 0.2 else "#d62728" for v in valid.values()]
-    bars = ax.barh(bx, list(valid.values()), color=bar_colors, alpha=0.85)
-    ax.axvline(0.2, color="orange", lw=1.0, ls="--", label="min threshold")
-    ax.axvline(0, color="gray", lw=0.7, ls=":")
-    ax.set_yticks(bx); ax.set_yticklabels(list(valid.keys()))
-    ax.set_xlabel("Pearson r"); ax.set_title("Cross-correlation quality")
-    ax.legend(fontsize=8); ax.grid(axis="x", alpha=0.3)
-    for bar, v in zip(bars, valid.values()):
-        ax.text(v + 0.005, bar.get_y() + bar.get_height() / 2,
-                f"{v:.4f}", va="center", fontsize=9)
-
-    # Calibration row
-    if has_cal:
-        anchors = cal_block.get("anchors")
-        anchors = anchors if isinstance(anchors, list) and anchors else []
-        opening = cal_block.get("opening") or {}
-        closing = cal_block.get("closing") or {}
-        span_s = cal_block.get("anchor_span_s") or cal_block.get("calibration_span_s")
-        n_windows = cal_block.get("n_anchors") or cal_block.get("n_windows_used")
-        fit_r2 = cal_block.get("fit_r2")
-
-        ax = axes[1][0]
-        if anchors:
-            names = [f"A{i+1}" for i in range(len(anchors))]
-            scores = [a.get("score") or 0 for a in anchors]
-        else:
-            names = ["Opening", "Closing"]
-            scores = [opening.get("score") or 0, closing.get("score") or 0]
-        cols = ["#2ca02c" if s >= 0.5 else "#d62728" for s in scores]
-        ax.bar(range(len(scores)), scores, color=cols, width=0.5, alpha=0.85)
-        ax.axhline(0.5, color="orange", lw=1.0, ls="--", label="min (0.5)")
-        ax.set_xticks(range(len(names))); ax.set_xticklabels(names, fontsize=8)
-        ax.set_ylabel("Score")
-        title = "Calibration anchors"
-        extras = []
-        if span_s is not None:
-            extras.append(f"span={span_s:.1f}s")
-        if n_windows is not None:
-            extras.append(f"n={n_windows}")
-        if fit_r2 is not None:
-            extras.append(f"R\u00b2={fit_r2:.3f}")
-        if extras:
-            title += f"  ({', '.join(extras)})"
-        ax.set_title(title); ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
-        for i, v in enumerate(scores):
-            ax.text(i, v + 0.02, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
-
-        ax = axes[1][1]
-        ax.axis("off")
-        if anchors:
-            detail_lines = ["Anchor details:"]
-            for idx, a in enumerate(anchors[:8], 1):
-                detail_lines.append(
-                    f"  A{idx}: t={a.get('t_tgt_s', 0):.1f}s  "
-                    f"off={a.get('offset_s', 0):.6f}s  "
-                    f"score={a.get('score', 0):.3f}"
-                )
-            if len(anchors) > 8:
-                detail_lines.append(f"  ... {len(anchors)-8} more ...")
-        else:
-            detail_lines = [
-                f"Opening: t={opening.get('t_tgt_s', 0):.1f}s  off={opening.get('offset_s', 0):.6f}s",
-                f"Closing: t={closing.get('t_tgt_s', 0):.1f}s  off={closing.get('offset_s', 0):.6f}s",
-            ]
-        ax.text(0.05, 0.95, "\n".join(detail_lines), transform=ax.transAxes,
-                fontsize=10, va="top", ha="left", family="monospace",
-                bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
-        ax.set_title("Anchor details")
-
-    # Adaptive row
-    if has_adap:
-        adap_row = 1 + int(has_cal)
-        n_wins = adap_block.get("n_windows_used")
-        fit_r2 = adap_block.get("fit_r2")
-        init_meth = adap_block.get("initial_method", "N/A")
-
-        ax = axes[adap_row][0]
-        r2_val = fit_r2 if fit_r2 is not None else 0.0
-        bar_color = "#2ca02c" if r2_val >= 0.1 else "#d62728"
-        ax.bar([0], [r2_val], color=bar_color, width=0.4, alpha=0.85)
-        ax.axhline(0.1, color="orange", lw=1.0, ls="--", label="min R\u00b2")
-        ax.set_xlim(-0.5, 0.5); ax.set_ylim(0, max(1.1, r2_val * 1.2))
-        ax.set_xticks([0]); ax.set_xticklabels(["Drift fit R\u00b2"]); ax.set_ylabel("R\u00b2")
-        ax.set_title(f"Adaptive \u2014 {n_wins or '?'} windows (init: {init_meth})")
-        ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
-        if fit_r2 is not None:
-            ax.text(0, r2_val + 0.02, f"{r2_val:.4f}", ha="center", va="bottom", fontsize=9)
-
-        ax = axes[adap_row][1]
-        ax.axis("off")
-        anchor = adap_block.get("opening_anchor") or {}
-        adap_lines = [
-            f"Init method:  {init_meth}",
-            f"Init offset:  {adap_block.get('initial_offset_s', 0):.6f} s",
-            f"Opening: t={anchor.get('t_tgt_s', 0):.1f}s  score={anchor.get('score', 0):.3f}",
-            f"Windows:      {n_wins}",
-            f"Fit R\u00b2:       {fit_r2:.4f}" if fit_r2 is not None else "Fit R\u00b2: N/A",
-        ]
-        ax.text(0.05, 0.95, "\n".join(adap_lines), transform=ax.transAxes,
-                fontsize=10, va="top", ha="left", family="monospace",
-                bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
-        ax.set_title("Adaptive details")
-
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.tight_layout(rect=[0, 0.03, 1, 0.93])
     return _save(fig, output_path)
 
 
@@ -581,17 +723,19 @@ def plot_sync_model_dashboard(
     cal = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
     rec_name = synced_dir.parent.name
 
-    fig = plt.figure(figsize=(16, 9))
+    fig = plt.figure(figsize=(16, 10))
     fig.suptitle(f"{rec_name} \u2014 sync model dashboard", fontsize=13, fontweight="bold")
 
-    gs = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.35)
+    gs = fig.add_gridspec(
+        4, 3, hspace=0.45, wspace=0.35, height_ratios=[1.0, 1.15, 0.9, 1.0],
+    )
 
     # (0,0) Key metrics text
     ax = fig.add_subplot(gs[0, 0])
     ax.axis("off")
     lines = [
         f"Method:  {_METHOD_LABELS.get(method, method)}",
-        f"Offset:  {offset_s:.6f} s" if offset_s is not None else "Offset:  N/A",
+        f"Offset:  {_format_offset_interval_s(offset_s)}" if offset_s is not None else "Offset:  N/A",
         f"Drift:   {drift_ppm:.2f} ppm" if drift_ppm is not None else "Drift:   N/A",
         f"Source:  {info.get('drift_source', 'N/A')}",
         f"Signal:  {info.get('signal_mode', 'N/A')}",
@@ -626,7 +770,15 @@ def plot_sync_model_dashboard(
         ax.set_yticks(range(len(avail)))
         ax.set_yticklabels([_METHOD_LABELS.get(m, m) for m in avail], fontsize=8)
         for i, v in enumerate(d_vals):
-            ax.text(v + 10, i, f"{v:.0f}", va="center", fontsize=8)
+            md_r = allm[avail[i]] or {}
+            off_t = ""
+            if md_r.get("available") and md_r.get("offset_seconds") is not None:
+                try:
+                    off_t = _format_offset_interval_s(float(md_r["offset_seconds"]))
+                except (TypeError, ValueError):
+                    off_t = ""
+            suffix = f"  | off {off_t}" if off_t else ""
+            ax.text(v + 10, i, f"{v:.0f}{suffix}", va="center", fontsize=8)
     else:
         ax.text(0.5, 0.5, "N/A", transform=ax.transAxes, ha="center", fontsize=12, color="gray")
     ax.set_xlabel("|drift| (ppm)"); ax.set_title("Drift comparison", fontsize=10)
@@ -677,8 +829,20 @@ def plot_sync_model_dashboard(
         ax.text(0.5, 0.5, "No calibration anchors available",
                 ha="center", va="center", fontsize=12, color="gray", transform=ax.transAxes)
 
-    # (2,0:3) Per-method correlation comparison
-    ax = fig.add_subplot(gs[2, :])
+    # (2,0:3) Per-method offset spread
+    ax_off = fig.add_subplot(gs[2, :])
+    if allm:
+        if not _plot_method_offset_delta_horizontal(
+            ax_off,
+            allm,
+            footnote="\u0394 vs selected (\u2605) method; \u201cabs\u201d = absolute offset.",
+        ):
+            ax_off.axis("off")
+    else:
+        ax_off.axis("off")
+
+    # (3,0:3) Per-method correlation comparison
+    ax = fig.add_subplot(gs[3, :])
     if allm:
         avail = [m for m in _ALL_METHODS if allm.get(m)]
         n_m = len(avail)
@@ -692,10 +856,22 @@ def plot_sync_model_dashboard(
         ax.axhline(0.2, color="orange", lw=1.0, ls=":")
         ax.set_xticks(x_m)
         ax.set_xticklabels([_METHOD_LABELS.get(m, m) for m in avail], fontsize=9)
+        trans_c = blended_transform_factory(ax.transData, ax.transAxes)
         for i, v in enumerate(corr_vals):
             ax.text(i, v + 0.01, f"{v:.4f}", ha="center", fontsize=8)
             if avail[i] == allm.get("selected_method"):
                 ax.text(i, v + 0.05, "\u2605", ha="center", fontsize=13, fontweight="bold")
+            md = allm[avail[i]] or {}
+            off_c = md.get("offset_seconds")
+            if md.get("available") and off_c is not None:
+                try:
+                    ax.text(
+                        i, -0.07, _format_offset_interval_s(float(off_c)),
+                        transform=trans_c, ha="center", va="top", fontsize=7, color="#444444",
+                    )
+                except (TypeError, ValueError):
+                    pass
+        ax.margins(y=0.2)
     ax.set_ylabel("Corr (offset+drift)"); ax.set_title("All methods \u2014 correlation", fontsize=10)
     ax.grid(axis="y", alpha=0.3)
 
@@ -711,15 +887,12 @@ def plot_sync_zoom_alignment(
     *,
     output_path: Path | None = None,
 ) -> Path | None:
-    """``synced/zoom_alignment.png`` — 3 windows: opening, mid, late."""
-    parsed_dir = synced_dir.parent / "parsed"
+    """``synced/zoom_alignment.png`` — 3 windows: opening, mid, late (synced only)."""
     if output_path is None:
         output_path = synced_dir / "zoom_alignment.png"
 
     ref_s = _load_sensor_df(synced_dir, "sporsa")
     tgt_s = _load_sensor_df(synced_dir, "arduino")
-    ref_p = _load_sensor_df(parsed_dir, "sporsa") if parsed_dir.exists() else None
-    tgt_p = _load_sensor_df(parsed_dir, "arduino") if parsed_dir.exists() else None
 
     if any(x is None for x in (ref_s, tgt_s)):
         return None
@@ -753,29 +926,10 @@ def plot_sync_zoom_alignment(
         m_t = (tgt_ts >= start) & (tgt_ts <= end)
         if m_r.sum() > 5:
             ax.plot(ref_ts[m_r], ref_norm_s[m_r], lw=0.9, color=_SENSOR_COLORS["sporsa"],
-                    label="SPORSA (synced)", alpha=0.9)
+                    label="SPORSA", alpha=0.9)
         if m_t.sum() > 5:
             ax.plot(tgt_ts[m_t], tgt_norm_s[m_t], lw=0.9, color=_SENSOR_COLORS["arduino"],
-                    label="Arduino (synced)", alpha=0.9)
-
-        # Parsed (unsynced) as dashed if available
-        if ref_p is not None and tgt_p is not None:
-            ref_norm_p = _acc_norm(ref_p)
-            tgt_norm_p = _acc_norm(tgt_p)
-            if ref_norm_p is not None and tgt_norm_p is not None:
-                # Each sensor relative to its own first timestamp
-                ref_pt = _ts_s(ref_p, ref_p["timestamp"].iloc[0])
-                tgt_pt = _ts_s(tgt_p, tgt_p["timestamp"].iloc[0])
-                m_rp = (ref_pt >= start) & (ref_pt <= end)
-                m_tp = (tgt_pt >= start) & (tgt_pt <= end)
-                if m_rp.sum() > 5:
-                    ax.plot(ref_pt[m_rp], ref_norm_p[m_rp], lw=0.6,
-                            color=_SENSOR_COLORS["sporsa"], ls="--", alpha=0.5,
-                            label="SPORSA (parsed)")
-                if m_tp.sum() > 5:
-                    ax.plot(tgt_pt[m_tp], tgt_norm_p[m_tp], lw=0.6,
-                            color=_SENSOR_COLORS["arduino"], ls="--", alpha=0.5,
-                            label="Arduino (parsed)")
+                    label="Arduino", alpha=0.9)
 
         ax.set_ylabel("|acc| (m/s\u00b2)")
         ax.set_title(f"{label}  [{start:.0f}\u2013{end:.0f} s]", fontsize=10)
@@ -787,62 +941,7 @@ def plot_sync_zoom_alignment(
 
 
 # ---------------------------------------------------------------------------
-# Plot 6: Clock correction curve
-# ---------------------------------------------------------------------------
-
-def plot_sync_clock_correction(
-    synced_dir: Path,
-    *,
-    output_path: Path | None = None,
-) -> Path | None:
-    """``synced/clock_correction.png`` — delta_ms and drift-only term vs Arduino time."""
-    info = _load_json(synced_dir / "sync_info.json")
-    parsed_dir = synced_dir.parent / "parsed"
-    if info is None:
-        return None
-    if output_path is None:
-        output_path = synced_dir / "clock_correction.png"
-
-    tgt_p = _load_sensor_df(parsed_dir, "arduino") if parsed_dir.exists() else None
-    if tgt_p is None:
-        return None
-
-    offset_s = info.get("offset_seconds")
-    drift_sps = info.get("drift_seconds_per_second")
-    t0_s = info.get("target_time_origin_seconds")
-    if offset_s is None or drift_sps is None or t0_s is None:
-        return None
-
-    ts_raw_ms = tgt_p["timestamp"].to_numpy(dtype=float)
-    ts_raw_s = ts_raw_ms / 1000.0
-    delta_total_ms = (offset_s + drift_sps * (ts_raw_s - t0_s)) * 1000.0
-    drift_only_ms = drift_sps * (ts_raw_s - t0_s) * 1000.0
-
-    t_plot = ts_raw_s - ts_raw_s[0]
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
-    fig.suptitle(f"{synced_dir.parent.name} \u2014 clock correction", fontsize=12)
-
-    ax = axes[0]
-    ax.plot(t_plot, delta_total_ms, lw=1.0, color="#2ca02c")
-    ax.set_ylabel("\u0394 total (ms)")
-    ax.set_title("Total correction (offset + drift)")
-    ax.grid(alpha=0.2, lw=0.4)
-
-    ax = axes[1]
-    ax.plot(t_plot, drift_only_ms, lw=1.0, color="#e67e22")
-    ax.axhline(0, color="gray", lw=0.7, ls="--")
-    ax.set_ylabel("\u0394 drift (ms)")
-    ax.set_xlabel("Arduino time (s, relative)")
-    ax.set_title(f"Drift-only term  ({drift_sps*1e6:.1f} ppm)")
-    ax.grid(alpha=0.2, lw=0.4)
-
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    return _save(fig, output_path)
-
-
-# ---------------------------------------------------------------------------
-# Plot 7: Rolling global correlation
+# Plot 6: Rolling global correlation
 # ---------------------------------------------------------------------------
 
 def plot_sync_roll_corr_global(
@@ -902,7 +1001,7 @@ def plot_sync_roll_corr_global(
 
 
 # ---------------------------------------------------------------------------
-# Plot 8: Scatter zoom
+# Plot 7: Scatter zoom
 # ---------------------------------------------------------------------------
 
 def plot_sync_scatter_zoom(
@@ -936,27 +1035,94 @@ def plot_sync_scatter_zoom(
     t_seg = tgt_n[mask]
     r_val = np.corrcoef(r_seg, t_seg)[0, 1] if np.std(r_seg) > 1e-12 and np.std(t_seg) > 1e-12 else 0.0
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"{synced_dir.parent.name} \u2014 scatter zoom  "
-                 f"[{mid_start:.0f}\u2013{mid_end:.0f} s]", fontsize=12)
-
-    ax = axes[0]
-    ax.scatter(r_seg, t_seg, s=6, alpha=0.4, c="#2ca02c", edgecolors="none")
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+    fig.suptitle(
+        f"{synced_dir.parent.name} \u2014 |acc| agreement (mid session "
+        f"{mid_start:.0f}\u2013{mid_end:.0f} s)",
+        fontsize=12,
+    )
+    ax.scatter(r_seg, t_seg, s=7, alpha=0.35, c="#2ca02c", edgecolors="none")
     lo = min(r_seg.min(), t_seg.min())
     hi = max(r_seg.max(), t_seg.max())
-    ax.plot([lo, hi], [lo, hi], "--", color="gray", lw=0.8, label="y=x")
-    ax.set_xlabel("|acc| SPORSA (m/s\u00b2)"); ax.set_ylabel("|acc| Arduino (m/s\u00b2)")
-    ax.set_title(f"Scatter (r={r_val:.3f})"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+    ax.plot([lo, hi], [lo, hi], "--", color="gray", lw=0.9, label="Ideal (y = x)")
+    ax.set_xlabel("|acc| SPORSA (m/s\u00b2)")
+    ax.set_ylabel("|acc| Arduino (m/s\u00b2)")
+    ax.set_title(
+        f"Each point is one time sample (resampled to {_TARGET_HZ:.0f} Hz); "
+        f"Pearson r = {r_val:.3f}",
+        fontsize=10,
+    )
+    ax.legend(fontsize=8, loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.text(
+        0.5, 0.02,
+        "After sync, both axes share the same timeline; a tight cloud on the diagonal means "
+        "the two sensors report similar acceleration magnitude at the same instants.",
+        ha="center", fontsize=9, color="#444444",
+    )
 
-    # Time-series of this window
-    ax = axes[1]
-    t_win = time_s[mask]
-    ax.plot(t_win, r_seg, lw=0.8, color=_SENSOR_COLORS["sporsa"], label="SPORSA")
-    ax.plot(t_win, t_seg, lw=0.8, color=_SENSOR_COLORS["arduino"], label="Arduino")
+    fig.tight_layout(rect=[0, 0.06, 1, 0.95])
+    return _save(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Plot 8: Anchors on reference |acc| trace
+# ---------------------------------------------------------------------------
+
+def plot_sync_anchor_timeline(
+    synced_dir: Path,
+    *,
+    output_path: Path | None = None,
+) -> Path | None:
+    """``synced/anchor_timeline.png`` — full SPORSA |acc| with anchor times marked."""
+    info = _load_json(synced_dir / "sync_info.json")
+    if info is None:
+        return None
+    markers = _anchor_markers_from_sync_info(info)
+    if not markers:
+        return None
+    if output_path is None:
+        output_path = synced_dir / "anchor_timeline.png"
+
+    ref = _load_sensor_df(synced_dir, "sporsa")
+    if ref is None:
+        return None
+    acc_cols = [c for c in ("ax", "ay", "az") if c in ref.columns]
+    if not acc_cols:
+        return None
+
+    t0 = _shared_t0([ref])
+    ts = _ts_s(ref, t0)
+    norm = strict_vector_norm(ref, acc_cols)
+    x, y = filter_valid_plot_xy(ts, norm)
+
+    fig, ax = plt.subplots(figsize=(14, 4.5))
+    ax.plot(x, y, lw=0.55, color=_SENSOR_COLORS["sporsa"], alpha=0.85, label="|acc| SPORSA")
+
+    y_hi = float(np.nanmax(y)) if y.size else 1.0
+    y_lo = float(np.nanmin(y)) if y.size else 0.0
+    y_rng = y_hi - y_lo if y_hi > y_lo else 1.0
+    t0_s = t0 / 1000.0
+    for t_abs, label, score in markers:
+        t_evt = t_abs - t0_s
+        if t_evt < x.min() - 1 or t_evt > x.max() + 1:
+            continue
+        sc = 0.5 if score is None else float(score)
+        color = "#2ca02c" if sc >= 0.5 else "#d62728"
+        ax.axvline(t_evt, color=color, ls="--", lw=1.0, alpha=0.75)
+        ax.text(
+            t_evt + 0.02 * (x.max() - x.min() if x.size > 1 else 1),
+            y_lo + 0.92 * y_rng,
+            f"{label}\n({sc:.2f})" if score is not None else label,
+            fontsize=8,
+            color=color,
+            va="top",
+        )
+
     ax.set_xlabel("Time (s)"); ax.set_ylabel("|acc| (m/s\u00b2)")
-    ax.set_title("Zoomed overlay"); ax.legend(fontsize=8); ax.grid(alpha=0.2, lw=0.4)
-
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    ax.set_title(f"{synced_dir.parent.name} \u2014 calibration / anchor times on reference signal")
+    ax.grid(alpha=0.2, lw=0.4)
+    fig.tight_layout()
     return _save(fig, output_path)
 
 
@@ -977,7 +1143,7 @@ def plot_sync_anchor_offsets(
     if cal is None:
         return None
     anchors = cal.get("anchors") or []
-    if len(anchors) < 2:
+    if len(anchors) < 1:
         return None
     if output_path is None:
         output_path = synced_dir / "anchor_offsets.png"
@@ -991,83 +1157,152 @@ def plot_sync_anchor_offsets(
     sc = ax.scatter(t_vals, off_vals, s=sizes, c=scores, cmap="RdYlGn",
                     vmin=0, vmax=1, edgecolors="black", linewidths=0.6, zorder=3)
 
-    # Linear fit
-    z = np.polyfit(t_vals, off_vals, 1)
-    fit_fn = np.poly1d(z)
-    t_range = np.linspace(t_vals.min(), t_vals.max(), 100)
-    drift_ppm = z[0] * 1e6
-    ax.plot(t_range, fit_fn(t_range), "--", color="gray", lw=1.2,
-            label=f"Linear fit (drift \u2248 {drift_ppm:.0f} ppm)")
-
-    # Residuals
-    residuals = off_vals - fit_fn(t_vals)
-    for t, o, r in zip(t_vals, off_vals, residuals):
-        ax.annotate(f"{r*1e3:+.1f} ms", (t, o), textcoords="offset points",
-                    xytext=(6, 6), fontsize=7, color="gray")
+    if len(anchors) >= 2:
+        z = np.polyfit(t_vals, off_vals, 1)
+        fit_fn = np.poly1d(z)
+        t_range = np.linspace(t_vals.min(), t_vals.max(), 100)
+        drift_ppm = z[0] * 1e6
+        ax.plot(t_range, fit_fn(t_range), "--", color="gray", lw=1.2,
+                label=f"Linear fit (drift \u2248 {drift_ppm:.0f} ppm)")
+        residuals = off_vals - fit_fn(t_vals)
+        for t, o, r in zip(t_vals, off_vals, residuals):
+            ax.annotate(f"{r*1e3:+.1f} ms", (t, o), textcoords="offset points",
+                        xytext=(6, 6), fontsize=7, color="gray")
 
     plt.colorbar(sc, ax=ax, label="Anchor score", shrink=0.8)
     ax.set_xlabel("Arduino target time (s)")
     ax.set_ylabel("Estimated offset (s)")
     ax.set_title(f"{synced_dir.parent.name} \u2014 anchor offsets vs time")
-    ax.legend(fontsize=9); ax.grid(alpha=0.3)
+    if len(anchors) >= 2:
+        ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
     fig.tight_layout()
     return _save(fig, output_path)
 
 
 # ---------------------------------------------------------------------------
-# Plot 10: Difference profile
+# Plot 10: Anchor measurements vs fitted linear model (all methods)
 # ---------------------------------------------------------------------------
 
-def plot_sync_difference_profile(
+def plot_sync_anchor_model_fit(
     synced_dir: Path,
     *,
     output_path: Path | None = None,
 ) -> Path | None:
-    """``synced/difference_profile.png`` — resampled |acc|_ref - |acc|_tgt."""
+    """``synced/anchor_model_fit.png`` — implied offset(t) vs measured anchors per method."""
+    data = _load_json(synced_dir / "all_methods.json")
+    if data is None:
+        return None
     if output_path is None:
-        output_path = synced_dir / "difference_profile.png"
+        output_path = synced_dir / "anchor_model_fit.png"
 
-    ref = _load_sensor_df(synced_dir, "sporsa")
-    tgt = _load_sensor_df(synced_dir, "arduino")
-    if any(x is None for x in (ref, tgt)):
+    selected = data.get("selected_method", "")
+    methods = [m for m in _ALL_METHODS if isinstance(data.get(m), dict)]
+    if not methods:
         return None
 
-    result = _resample_acc_norm_pair(ref, tgt, hz=_TARGET_HZ)
-    if result is None:
+    bounds = _arduino_abs_time_range_s(synced_dir)
+    t0_fallback = float(bounds[0]) if bounds else None
+    for m in methods:
+        md = data[m] or {}
+        if md.get("available") and md.get("target_time_origin_seconds") is not None:
+            try:
+                t0_fallback = float(md["target_time_origin_seconds"])
+                break
+            except (TypeError, ValueError):
+                pass
+    if t0_fallback is None:
         return None
-    time_s, ref_n, tgt_n = result
-    diff = ref_n - tgt_n
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True,
-                             gridspec_kw={"height_ratios": [1, 2]})
-    fig.suptitle(f"{synced_dir.parent.name} \u2014 acc norm difference profile", fontsize=12)
+    t_lo = t0_fallback
+    t_hi = t0_fallback + 1.0
+    if bounds:
+        t_lo, t_hi = bounds[0], bounds[1]
+    anchor_ts: list[float] = []
+    for m in methods:
+        md = data[m] or {}
+        if not md.get("available"):
+            continue
+        for t, _o, _tag in _measured_anchor_points_from_method_row(md):
+            anchor_ts.append(t)
+    if anchor_ts:
+        t_lo = min(t_lo, min(anchor_ts))
+        t_hi = max(t_hi, max(anchor_ts))
+    margin = max(30.0, 0.02 * (t_hi - t_lo))
+    t_lo -= margin
+    t_hi += margin
+    t_fine = np.linspace(t_lo, t_hi, max(400, int((t_hi - t_lo) * 3)))
 
-    # Top: overlaid norms
-    ax = axes[0]
-    ax.plot(time_s, ref_n, lw=0.5, color=_SENSOR_COLORS["sporsa"],
-            label="SPORSA", alpha=0.8)
-    ax.plot(time_s, tgt_n, lw=0.5, color=_SENSOR_COLORS["arduino"],
-            label="Arduino", alpha=0.8)
-    ax.set_ylabel("|acc|"); ax.legend(fontsize=7, loc="upper right"); ax.grid(alpha=0.2, lw=0.4)
+    fig, ax = plt.subplots(figsize=(14, 6))
+    any_line = False
+    y_vals: list[float] = []
 
-    # Bottom: difference
-    ax = axes[1]
-    ax.fill_between(time_s, 0, diff, where=diff >= 0, color="#2ca02c", alpha=0.3)
-    ax.fill_between(time_s, 0, diff, where=diff < 0, color="#d62728", alpha=0.3)
-    ax.plot(time_s, diff, lw=0.5, color="black", alpha=0.6)
-    ax.axhline(0, color="gray", lw=0.7, ls="--")
-    # Running mean
-    win = max(1, int(10.0 * _TARGET_HZ))
-    if len(diff) > win:
-        smooth = np.convolve(diff, np.ones(win) / win, mode="same")
-        ax.plot(time_s, smooth, lw=1.5, color="#9b59b6", label=f"10 s mean")
-        ax.legend(fontsize=7)
-    ax.set_ylabel("|acc|_ref \u2212 |acc|_tgt")
-    ax.set_xlabel("Time (s)")
-    ax.set_title("Residual difference (SPORSA \u2212 Arduino)")
-    ax.grid(alpha=0.2, lw=0.4)
+    for m in methods:
+        md = data[m] or {}
+        if not md.get("available"):
+            continue
+        b = md.get("offset_seconds")
+        if b is None:
+            continue
+        try:
+            b = float(b)
+        except (TypeError, ValueError):
+            continue
+        t0 = md.get("target_time_origin_seconds")
+        if t0 is None:
+            t0 = t0_fallback
+        else:
+            try:
+                t0 = float(t0)
+            except (TypeError, ValueError):
+                t0 = t0_fallback
+        a = _method_row_drift_s_per_s(md)
+        y_line = b + a * (t_fine - t0)
+        col = _METHOD_COLORS.get(m, "gray")
+        mk = _METHOD_MARKERS.get(m, "o")
+        lbl = _METHOD_LABELS.get(m, m)
+        if m == selected:
+            lbl += " (\u2605)"
+        ax.plot(t_fine, y_line, color=col, lw=2.0, ls="-", label=lbl, alpha=0.9)
+        any_line = True
+        y_vals.extend([float(np.nanmin(y_line)), float(np.nanmax(y_line))])
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+        pts = _measured_anchor_points_from_method_row(md)
+        for t_a, o_a, tag in pts:
+            ax.scatter(
+                [t_a], [o_a], s=72, marker=mk, color=col,
+                edgecolors="black", linewidths=0.7, zorder=5,
+            )
+            ax.annotate(
+                tag, (t_a, o_a), textcoords="offset points", xytext=(5, 5),
+                fontsize=7, color=col,
+            )
+            y_vals.extend([o_a, b + a * (t_a - t0)])
+
+    if not any_line and not y_vals:
+        plt.close(fig)
+        return None
+
+    ax.set_xlabel("Target time (s, Arduino clock)")
+    ax.set_ylabel("Offset (s)  \u2014 maps target \u2192 reference")
+    ax.set_title(
+        f"{synced_dir.parent.name} \u2014 linear model vs measured anchor offsets",
+    )
+    ax.axhline(0, color="gray", lw=0.6, ls=":", alpha=0.6)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, loc="best", framealpha=0.92)
+    fig.text(
+        0.5, 0.01,
+        "Curves: offset(t) = offset_at_t\u2080 + drift\u00b7(t \u2212 t\u2080) from each method\u2019s sync_info. "
+        "Markers: per-anchor cross-correlation offsets (tags A1\u2026 / Opn = adaptive opening). "
+        "Re-run sync to refresh all_methods.json if models are missing.",
+        ha="center", fontsize=8, color="#444444",
+    )
+    if y_vals:
+        pad = max(0.05 * (max(y_vals) - min(y_vals)), 0.02)
+        ax.set_ylim(min(y_vals) - pad, max(y_vals) + pad)
+
+    fig.tight_layout(rect=[0, 0.05, 1, 0.98])
     return _save(fig, output_path)
 
 
@@ -1082,16 +1317,16 @@ def plot_sync_stage(
     out_paths: list[Path] = []
 
     for name, fn in [
-        ("overlay",       lambda: plot_sync_overlay(synced_dir)),
-        ("methods",       lambda: plot_sync_methods_comparison(synced_dir)),
-        ("dashboard",     lambda: plot_sync_model_dashboard(synced_dir)),
-        ("zoom",          lambda: plot_sync_zoom_alignment(synced_dir)),
-        ("clock",         lambda: plot_sync_clock_correction(synced_dir)),
-        ("rolling_corr",  lambda: plot_sync_roll_corr_global(synced_dir)),
-        ("scatter",       lambda: plot_sync_scatter_zoom(synced_dir)),
-        ("anchors",       lambda: plot_sync_anchor_offsets(synced_dir)),
-        ("difference",    lambda: plot_sync_difference_profile(synced_dir)),
-        ("detail",        lambda: plot_sync_detail(synced_dir)),
+        ("overlay",         lambda: plot_sync_overlay(synced_dir)),
+        ("methods",         lambda: plot_sync_methods_comparison(synced_dir)),
+        ("offsets",         lambda: plot_sync_method_offsets(synced_dir)),
+        ("dashboard",       lambda: plot_sync_model_dashboard(synced_dir)),
+        ("zoom",            lambda: plot_sync_zoom_alignment(synced_dir)),
+        ("rolling_corr",    lambda: plot_sync_roll_corr_global(synced_dir)),
+        ("scatter",         lambda: plot_sync_scatter_zoom(synced_dir)),
+        ("anchors",         lambda: plot_sync_anchor_offsets(synced_dir)),
+        ("anchor_timeline", lambda: plot_sync_anchor_timeline(synced_dir)),
+        ("anchor_model",    lambda: plot_sync_anchor_model_fit(synced_dir)),
     ]:
         try:
             p = fn()
@@ -1114,8 +1349,8 @@ def plot_sync_stage(
 # ---------------------------------------------------------------------------
 
 _PLOT_CHOICES = [
-    "all", "overlay", "methods", "detail", "dashboard", "zoom",
-    "clock", "rolling_corr", "scatter", "anchors", "difference",
+    "all", "overlay", "methods", "offsets", "dashboard", "zoom",
+    "rolling_corr", "scatter", "anchors", "anchor_timeline", "anchor_model",
 ]
 
 
@@ -1147,17 +1382,17 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     dispatch = {
-        "overlay":      lambda: [plot_sync_overlay(synced_dir)],
-        "methods":      lambda: [plot_sync_methods_comparison(synced_dir)],
-        "detail":       lambda: [plot_sync_detail(synced_dir)],
-        "dashboard":    lambda: [plot_sync_model_dashboard(synced_dir)],
-        "zoom":         lambda: [plot_sync_zoom_alignment(synced_dir)],
-        "clock":        lambda: [plot_sync_clock_correction(synced_dir)],
-        "rolling_corr": lambda: [plot_sync_roll_corr_global(synced_dir)],
-        "scatter":      lambda: [plot_sync_scatter_zoom(synced_dir)],
-        "anchors":      lambda: [plot_sync_anchor_offsets(synced_dir)],
-        "difference":   lambda: [plot_sync_difference_profile(synced_dir)],
-        "all":          lambda: plot_sync_stage(synced_dir),
+        "overlay":         lambda: [plot_sync_overlay(synced_dir)],
+        "methods":         lambda: [plot_sync_methods_comparison(synced_dir)],
+        "offsets":         lambda: [plot_sync_method_offsets(synced_dir)],
+        "dashboard":       lambda: [plot_sync_model_dashboard(synced_dir)],
+        "zoom":            lambda: [plot_sync_zoom_alignment(synced_dir)],
+        "rolling_corr":    lambda: [plot_sync_roll_corr_global(synced_dir)],
+        "scatter":         lambda: [plot_sync_scatter_zoom(synced_dir)],
+        "anchors":         lambda: [plot_sync_anchor_offsets(synced_dir)],
+        "anchor_timeline": lambda: [plot_sync_anchor_timeline(synced_dir)],
+        "anchor_model":    lambda: [plot_sync_anchor_model_fit(synced_dir)],
+        "all":             lambda: plot_sync_stage(synced_dir),
     }
 
     paths = dispatch[args.plot]()

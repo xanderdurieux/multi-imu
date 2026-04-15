@@ -232,6 +232,7 @@ def adaptive_windowed_refinement(
     min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
     min_points_for_drift: int = 3,
     min_valid_fraction: float = 0.5,
+    start_ref_time_seconds: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Causal windowed refinement: updates running model after each window.
 
@@ -269,6 +270,8 @@ def adaptive_windowed_refinement(
 
     for center in range(half, n_ref - half, step_n):
         t_ref_center = float(ref_ts[center])
+        if start_ref_time_seconds is not None and t_ref_center < float(start_ref_time_seconds):
+            continue
 
         # Predict where this ref window maps in target time.
         t_tgt_pred = (

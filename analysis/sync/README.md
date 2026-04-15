@@ -1,350 +1,352 @@
-# `sync/` — IMU Stream Synchronization
+# `sync/` — IMU stream synchronization
 
-This package aligns the Arduino (helmet, **target**) timestamps to the Sporsa
-(bicycle, **reference**) clock. It provides four sync methods, shared signal
-processing utilities, a comparison/selection pipeline, and a session-level
-orchestrator for the broader Multi-IMU workflow.
+This package aligns the **target** sensor (Arduino helmet, `millis()` time base) to the **reference** sensor (Sporsa bicycle, Unix-epoch clock). It estimates a linear clock model (offset + drift), scores each candidate with accelerometer correlation, runs four estimation strategies, and picks one winner per recording.
+
+Run commands from the `analysis/` directory so the package imports as `sync` (see [Usage](#usage)).
 
 ---
 
-## Concepts
+## Table of contents
 
-### The sync problem
+1. [Problem and model](#problem-and-model)
+2. [Package layout](#package-layout)
+3. [End-to-end flow](#end-to-end-flow)
+4. [The four sync methods](#the-four-sync-methods)
+5. [Selection policy](#selection-policy)
+6. [Outputs](#outputs)
+7. [Usage](#usage)
+8. [Module reference](#module-reference)
+9. [Maintenance and code review notes](#maintenance-and-code-review-notes)
 
-The Sporsa sensor uses a stable Unix-epoch clock. The Arduino sensor uses
-`millis()` — a counter that starts from zero at boot with no wall-clock
-reference. Two parameters need to be estimated:
+---
 
-- **Offset** (`offset_seconds`): constant shift, `t_ref = t_tgt + offset` at
-  the target's time origin. Accounts for the gap between sensor boot times
-  and absolute time epochs.
-- **Drift** (`drift_seconds_per_second`): the Arduino crystal runs slightly
-  fast or slow. A drift of 400 ppm means the Arduino gains/loses 400 µs per
-  second of recording.
+## Problem and model
 
-The corrected target timestamp is:
+### Clocks
 
-```
-t_ref = t_tgt + offset + drift × (t_tgt − t_origin)
-```
+- **Reference:** stable wall time (seconds since epoch in CSV `timestamp`, ms).
+- **Target:** monotonic counter from boot; a constant shift and small crystal drift vs reference are expected.
 
-This linear model is captured in the `SyncModel` dataclass (`core.py`) and
-serialised to `sync_info.json`.
+### Linear model
+
+Let \(t_{\mathrm{tgt}}\) be target time (seconds) and \(t_0\) the chosen origin (`target_time_origin_seconds`, usually the first target sample). The mapping to reference time is:
+
+\[
+t_{\mathrm{ref}} = t_{\mathrm{tgt}} + b + a\,(t_{\mathrm{tgt}} - t_0)
+\]
+
+- **`offset_seconds`** (\(b\)): shift at the origin.
+- **`drift_seconds_per_second`** (\(a\)): slope of the correction vs elapsed target time from \(t_0\) (see `apply_linear_time_transform` in `model.py` for the exact ms-scale implementation).
+
+Implementation: [`SyncModel`][sync-model], [`apply_linear_time_transform`][apply-linear], [`apply_sync_model`][apply-sync] in `model.py` (timestamps in CSV are ms; helpers convert to seconds internally).
 
 ### Quality metric
 
-All four methods compute the Pearson r of `acc_norm` between the two
-resampled streams over their overlap window — evaluated twice:
+Every method fills `sync_info.json → correlation` via [`compute_sync_correlations`][compute-sync-corr] in `quality.py`:
 
-1. **Offset only** (`corr.offset_only`): drift correction is zeroed out.
-2. **Offset + drift** (`corr.offset_and_drift`): full model applied.
+- **`offset_only`:** same model with drift forced to zero (Pearson \(r\) of `acc_norm` on a common resampled grid).
+- **`offset_and_drift`:** full model.
 
-Both values are written to `sync_info.json` by `core.compute_sync_correlations`
-so they are directly comparable across methods.
+Both use the **overlap** of reference and (transformed) target time ranges after resampling at `sample_rate_hz`.
+
+[sync-model]: #modelpy
+[apply-linear]: #modelpy
+[apply-sync]: #modelpy
+[compute-sync-corr]: #qualitypy
 
 ---
 
 ## Package layout
 
-```
-sync/
-├── core.py        # shared stream utilities, SDA/LIDA math, SyncModel, metrics
-├── methods.py     # the four concrete sync methods + recording/file I/O
-├── pipeline.py    # orchestration, comparison, selection, CLI main()
-├── __main__.py    # delegates to pipeline.main()
-└── __init__.py    # package exports
-```
+| File | Role |
+|------|------|
+| [`model.py`](#modelpy) | `SyncModel` dataclass; timestamp transform and `apply_sync_model`. |
+| [`stream_io.py`](#stream_iopy) | Load CSVs, norms, resampling, low-pass filter, dropout removal. |
+| [`signals.py`](#signalspy) | Z-scoring, norm helpers with configurable axes, `build_activity_signal`, signal mode resolution. |
+| [`activity.py`](#activitypy) | `AlignmentSeries` + `build_alignment_series` (resample → optional LPF → activity signal). |
+| [`xcorr.py`](#xcorrpy) | FFT lag search, masked NCC, drift fit, windowed / adaptive refinement. |
+| [`anchors.py`](#anchorspy) | Calibration detection, coarse offset, per-segment refinement, `extract_calibration_anchors`. |
+| [`strategies.py`](#strategiespy) | Four public estimators: `estimate_*` → `(SyncModel, meta_dict)`. |
+| [`quality.py`](#qualitypy) | `acc_norm_correlation`, `compute_sync_correlations`. |
+| [`orchestrate.py`](#orchestratepy) | Method registry, load/compare `sync_info.json`, selection, logging table. |
+| [`pipeline.py`](#pipelinepy) | Per-recording I/O, run all methods, flatten to `synced/`, CLI. |
+| [`__init__.py`](#package-exports) | Public re-exports. |
+| [`__main__.py`](#package-exports) | `python -m sync` → `pipeline.main`. |
+
+There is no `core.py` / `methods.py`; older docs referred to a previous layout.
 
 ---
 
-## Recommended workflow
+## End-to-end flow
 
-Input is always ``data/recordings/<recording>/parsed/`` (Sporsa + Arduino CSVs).
+1. **Inputs:** `data/recordings/<recording>/parsed/sporsa.csv` and `arduino.csv` (or paths resolved via `common.paths.find_sensor_csv`).
+2. **Per method:** load streams → run one `estimate_*` → apply model to target → write `synced/<stage>/{sporsa,arduino}.csv` + `sync_info.json`.
+3. **Selection:** read each stage’s `sync_info.json`, apply [Selection policy](#selection-policy), copy winner into flat `data/recordings/<recording>/synced/`, write `all_methods.json`, delete per-method subfolders.
+
+Stages (folders under `synced/` before flattening) are defined in `orchestrate.METHOD_STAGES`.
+
+---
+
+## The four sync methods
+
+Order below matches **tier preference** in `orchestrate.SYNC_METHODS` (strongest listed first). Anchor-based methods share [`extract_calibration_anchors`][extract-anchors] in `anchors.py`.
+
+[extract-anchors]: #anchorspy
+
+### 1. `multi_anchor` (`estimate_multi_anchor`)
+
+- **Needs:** at least two matched calibration windows after refinement.
+- **Drift:** weighted linear fit of per-anchor offsets vs target time (`fit_offset_drift` in `xcorr.py`).
+- **Typical use:** best when opening and closing tap sequences are detected and span enough of the ride.
+- **Meta:** `sync_method`, `drift_source: "anchor_fit"`, `calibration` (anchors, span, optional `fit_r2`).
+
+### 2. `one_anchor_adaptive` (`estimate_one_anchor_adaptive`)
+
+- **Needs:** one refined anchor.
+- **Drift:** after the opening anchor (in reference time), runs **causal** windowed lag refinement (`adaptive_windowed_refinement`): each window’s search is centred on the running offset/drift estimate from **past** windows only. Final model refits offset/drift from all accepted windows if \(R^2\) ≥ `DEFAULT_MIN_FIT_R2`, else falls back to opening anchor offset and zero drift.
+- **Meta:** `adaptive` block (accepted/rejected window counts, `fit_r2`, local corr stats).
+
+### 3. `one_anchor_prior` (`estimate_one_anchor_prior`)
+
+- **Needs:** one refined anchor.
+- **Drift:** fixed prior `DEFAULT_DRIFT_PPM` (300 ppm by default), converted to `drift_seconds_per_second`; offset at origin is back-solved from the opening anchor.
+- **Meta:** `drift_ppm_prior`, `drift_source: "prior_ppm"`.
+
+### 4. `signal_only` (`estimate_signal_only`)
+
+- **Needs:** no calibration (pure signal).
+- **Steps:** build alignment series on both streams → global FFT lag (`estimate_lag`) → non-causal `windowed_lag_refinement` → `fit_offset_drift`. If \(R^2\) is below `DEFAULT_MIN_FIT_R2`, drift is zeroed (offset-only from LIDA fit path).
+- **Meta:** `sda_score`, `windowed` stats, `drift_source` either `"sda"` or `"sda_lida"`.
+
+Shared **anchor path** (for methods 1–3): detect reference calibrations → `bootstrap_coarse_offset` (opening-cluster peaks on target, else low-rate SDA fallback) → filter segments that map into target range → `refine_offset_at_calibration` per segment (local FFT lag on short windows).
+
+---
+
+## Selection policy
+
+Implemented in `orchestrate.select_best_sync_method`:
+
+1. If **`multi_anchor`** passes `_multi_anchor_passes` (calibration span ≥ 60 s, opening/closing anchor scores ≥ 0.5, correlation ≥ 0.2, |drift| ≤ 5000 ppm), it wins.
+2. Otherwise, among methods that produced `sync_info.json`, choose the highest `correlation.offset_and_drift`. If drift magnitude exceeds 5000 ppm, the effective score is penalised by 0.5. Tie-break is implicit in iteration order over `SYNC_METHODS`.
+
+`print_comparison` logs offset, drift (ppm), and a single row for correlation across all methods.
+
+---
+
+## Outputs
+
+### Per-method directory (before flattening)
+
+Example: `synced/multi_anchor/`
+
+| Artifact | Content |
+|----------|---------|
+| `sporsa.csv` | Copy of parsed reference. |
+| `arduino.csv` | Target with `timestamp` replaced by aligned time (see `apply_sync_model`). |
+| `sync_info.json` | `SyncModel` fields as dict + method `meta` + `correlation`. |
+
+### Flat `synced/` after selection
+
+| File | Content |
+|------|---------|
+| `sporsa.csv`, `arduino.csv` | Winner copies. |
+| `sync_info.json` | Winner’s full payload (model + meta + correlation). |
+| `all_methods.json` | `recording`, `selected_method`, `selected_stage`, and for each method key a block with fields from `SyncSelectionResult.metrics` (`orchestrate.SyncMethodQuality` serialised): availability, offsets, correlation, drift, calibration summaries, adaptive anchor snapshot, etc. |
+
+Downstream consumers include `exports/aggregate.aggregate_sync_params`, `visualization/plot_sync.py`, and `orientation/pipeline.py` (copies or reads `all_methods.json`).
+
+### `sync_info.json` (guaranteed and common extras)
+
+Core fields from `SyncModel`: `reference_csv`, `target_csv`, `target_time_origin_seconds`, `offset_seconds`, `drift_seconds_per_second`, `sample_rate_hz`, `max_lag_seconds`, `created_at_utc`.
+
+Always added by `pipeline._run_method`: `correlation` (`offset_only`, `offset_and_drift`, `signal`, `sample_rate_hz`).
+
+Method-specific keys include `sync_method`, `drift_source`, `signal_mode`, `calibration`, `adaptive`, `sda_score`, `windowed`, `drift_ppm_prior` as applicable.
+
+---
+
+## Usage
+
+### CLI
+
+From `analysis/`:
 
 ```bash
-# One recording: run all four methods, select best, flatten into synced/
 uv run -m sync 2026-02-26_r5
-
-# Whole session (every folder 2026-02-26_r*)
 uv run -m sync 2026-02-26 --all
+uv run -m sync 2026-02-26_r5 --method signal_only
 ```
-
-Per-method outputs live under ``synced/sda`` … only until selection finishes; then
-they are removed and only the chosen streams remain in ``synced/`` together with
-``all_methods.json``.
 
 ### Python API
 
 ```python
-from sync.pipeline import synchronize_recording_all_methods, synchronize_session
+from sync.pipeline import (
+    synchronize_recording_all_methods,
+    synchronize_recording_chosen_method,
+    synchronize_from_calibration,
+)
 
+# Full recording: all methods + selection + flatten
 result = synchronize_recording_all_methods("2026-02-26_r5")
-results = synchronize_session("2026-02-26")
+# result.method_results, result.selection, result.selection_error
+
+# Single method + flatten
+synchronize_recording_chosen_method("2026-02-26_r5", "multi_anchor")
+
+# Section dirs (used by parser.split_sections): only multi-anchor, custom paths
+synchronize_from_calibration(
+    reference_csv=path_to_sporsa,
+    target_csv=path_to_arduino,
+    output_dir=tmp_dir,
+    sample_rate_hz=100.0,
+    coarse_max_lag_s=10.0,   # SDA fallback max lag when opening calibration fails
+    cal_search_s=5.0,        # ±seconds for per-anchor lag search
+)
 ```
 
-`RecordingResult` lists per-method success/failure and the selected method (if any).
+### Package exports
 
-### CLI
-
-```text
-python -m sync <recording_or_session_prefix> [--all]
-```
+`sync.__init__` re-exports: `SyncModel`, `make_sync_model`, `apply_sync_model`, `apply_linear_time_transform`, `SYNC_METHODS`, `SyncMethodQuality`, `SyncSelectionResult`, `main`, `synchronize_from_calibration`, `synchronize_recording_all_methods`, `synchronize_recording_chosen_method`.
 
 ---
 
-## `pipeline.py`
+## Module reference
 
-High-level orchestration: run methods, compare them, apply the selected result,
-and expose the CLI entrypoint used by ``python -m sync``.
+### `model.py`
 
----
+| Symbol | Description |
+|--------|-------------|
+| `SyncModel` | Frozen dataclass holding paths, origin, offset, drift, `sample_rate_hz`, `max_lag_seconds`, `created_at_utc`. |
+| `make_sync_model` | Construct `SyncModel` with current UTC timestamp. |
+| `apply_linear_time_transform` | Vectorised ms → ms mapping using offset + drift about `target_origin_seconds`. |
+| `apply_sync_model` | Copy target `DataFrame`, set `timestamp_orig`, `timestamp_aligned`, optionally replace `timestamp`. |
 
-## Sync methods
+### `stream_io.py`
 
-### Method 1 — SDA only (`methods.py`)
+| Symbol | Description |
+|--------|-------------|
+| `VECTOR_AXES` | Default axis groups for acc/gyro/mag norms. |
+| `load_stream` | Read CSV, drop NaN timestamps, sort. |
+| `add_vector_norms` | Add `acc_norm`, `gyro_norm`, `mag_norm` when axes exist. |
+| `infer_numeric_columns` | Numeric columns except optional skip (used by resamplers). |
+| `resample_stream` | Uniform grid linear interpolation; optional column subset and time bounds. |
+| `resample_to_reference_timestamps` | Interpolate target onto reference timestamps (NaN outside hull). |
+| `lowpass_filter` | Zero-phase Butterworth on IMU columns. |
+| `remove_dropouts` | Drop rows with `acc_norm` below a fraction of median (BLE dropouts). |
 
-**When to use:** quick baseline; recordings too short for reliable drift
-estimation; sanity-checking the offset independently of drift.
+### `signals.py`
 
-**Algorithm:**
+| Symbol | Description |
+|--------|-------------|
+| `SIGNAL_MODE_*`, `SIGNAL_MODES` | Named modes for differentiated norm signals (`acc_norm_diff`, etc.). |
+| `zscore` | Per-series z-score with finite mask. |
+| `add_vector_norms` | Like stream_io but takes `vector_axes` dict (reusable for non-standard CSVs). |
+| `resolve_signal_mode` | Map explicit `signal_mode` or legacy `use_acc` / `use_gyro` / `differentiate` flags. |
+| `build_activity_signal` | 1D signal array + resolved mode label from a `DataFrame` and axis map. |
 
-1. Run `estimate_offset()` (SDA) on the full recording.
-2. Build a `SyncModel` with `drift_seconds_per_second = 0.0`.
-3. Apply the offset-only correction to the target timestamps.
-4. Compute quality correlations via `compute_sync_correlations()`.
+### `activity.py`
 
-**Output (intermediate):** `synced/sda/`  
-**`sync_info.json` extras:** `sync_method: "sda_offset_only"`, `sda_score`
+| Symbol | Description |
+|--------|-------------|
+| `AlignmentSeries` | `timestamps_seconds`, `signal`, `sample_rate_hz`, `signal_mode`. |
+| `build_alignment_series` | Resample at `sample_rate_hz`, optional LPF, build activity signal via `signals.build_activity_signal` with `VECTOR_AXES`. |
 
----
+### `xcorr.py`
 
-### Method 2 — SDA + LIDA (`methods.py`)
+| Symbol | Description |
+|--------|-------------|
+| `fft_correlate_full` | FFT “full” cross-correlation. |
+| `estimate_lag` | Integer lag maximising overlap-normalised correlation; optional max lag. |
+| `masked_ncc` | Pearson-like NCC over finite overlap; returns score and valid fraction. |
+| `fit_offset_drift` | Weighted or OLS line `offset vs (t - t0)`; returns intercept, slope, \(R^2\). |
+| `windowed_lag_refinement` | Non-causal sliding windows around a coarse lag (signal-only / LIDA). |
+| `adaptive_windowed_refinement` | Causal sliding refinement updating offset/drift from past windows. |
 
-**When to use:** standard offline post-processing for recordings without
-reliable calibration sequences.
+Defaults: window length/step, local search half-width, minimum window score, minimum fit \(R^2\) (module constants).
 
-**Algorithm:**
+### `anchors.py`
 
-1. Run SDA (coarse offset).
-2. Slide a window over the recording to measure the local offset at each
-   position (LIDA refinement).
-3. Fit a linear model `offset(t) = offset_0 + drift × Δt` to the scatter.
-4. Apply the full `offset + drift × Δt` model.
+| Symbol | Description |
+|--------|-------------|
+| `CalibrationWindowResult` | One refined anchor: offset, target/ref peak times, score, duration. |
+| `CalibrationAnchorExtraction` | List of anchors + coarse offset + coarse method + segment counts. |
+| `_cluster_peaks` | Group tap peaks into calibration-like clusters (internal). |
+| `coarse_offset_from_opening_calibration` | Match first target cluster to first reference calibration median time. |
+| `refine_offset_at_calibration` | Crop ref/tgt around segment, build alignment series, FFT lag within ±search. |
+| `detect_reference_calibrations` | Wrapper around `parser.calibration_segments.find_calibration_segments`. |
+| `filter_segments_in_target_range` | Drop reference segments whose predicted target centre is off-range. |
+| `bootstrap_coarse_offset` | Opening calibration coarse offset, or SDA fallback at low sample rate. |
+| `extract_calibration_anchors` | Full pipeline: detect → coarse → filter → refine; optional `sda_fallback_max_lag_s` for fallback SDA. |
+| `calibration_anchor_to_dict` | JSON-serialisable anchor metadata. |
 
-**Output (intermediate):** `synced/lida/`  
-**`sync_info.json` extras:** `sync_method: "sda_lida"`
+### `strategies.py`
 
-**Notable parameters** (passed to `synchronize_recording`):
+| Symbol | Description |
+|--------|-------------|
+| `estimate_multi_anchor` | Two+ anchors, weighted drift fit; kwargs `anchor_search_seconds`, `sda_fallback_max_lag_s`. |
+| `estimate_one_anchor_adaptive` | One anchor + causal windows; same tuning kwargs. |
+| `estimate_one_anchor_prior` | One anchor + ppm prior; same tuning kwargs. |
+| `estimate_signal_only` | SDA + LIDA; uses `max_lag_seconds` for global lag search. |
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `sample_rate_hz` | 100 Hz | Resampling rate for cross-correlation |
-| `max_lag_seconds` | 60 s | Maximum SDA search window |
-| `window_seconds` | 20 s | LIDA window length |
-| `window_step_seconds` | 10 s | LIDA window stride |
-| `local_search_seconds` | 2 s | LIDA local refinement range |
+Internal `_build_calibration_meta` / `_require_anchor_count` reduce duplication for `calibration` JSON.
 
-The module also exposes `synchronize(reference_csv, target_csv, ...)` for
-file-to-file use without the recording-directory convention.
+### `quality.py`
 
----
+| Symbol | Description |
+|--------|-------------|
+| `acc_norm_correlation` | Pearson \(r\) on overlapping resampled `acc_norm`. |
+| `compute_sync_correlations` | Offset-only vs full model correlations; returns dict for `sync_info.json`. |
 
-### Method 3 — Calibration-sequence sync (`methods.py`)
+### `orchestrate.py`
 
-**When to use:** preferred method when both opening and closing calibration
-tap-bursts are present and well-detected. Gives the most precise offset and
-drift because it uses known, sharp events as timing anchors.
+| Symbol | Description |
+|--------|-------------|
+| `SYNC_METHODS`, `METHOD_STAGES`, `METHOD_LABELS` | Canonical IDs and folder names. |
+| `method_stage`, `method_label` | Resolve method → path / label. |
+| `SyncMethodQuality`, `SyncSelectionResult` | Typed summaries; `SyncSelectionResult.metrics` → `all_methods.json`. |
+| `extract_quality` | Parse one `sync_info.json` into `SyncMethodQuality`. |
+| `compare_sync_models` | Load all method JSON blobs for a recording. |
+| `select_best_sync_method` | Selection policy. |
+| `print_comparison` | Logged comparison table. |
 
-**Algorithm:**
+### `pipeline.py`
 
-1. Detect calibration segments in the **reference** sensor only. Requires ≥ 2
-   segments (opening + closing).
-2. Coarse offset: match the opening calibration cluster in the target by
-   peak-cluster timing. Falls back to low-rate SDA if no cluster is found.
-3. Fine offset at each in-range calibration window: narrow-window SDA
-   cross-correlation centred on each calibration's peak burst.
-4. If 3+ windows are successfully refined, fit a weighted linear model
-   `offset(t) = offset_0 + drift * (t - t_origin)` across all windows
-   (weights from per-window correlation scores). If fit quality is poor,
-   fall back to the previous first/last-anchor estimate.
-5. If the resulting drift exceeds 1 % (physically implausible), fall back to
-   the recording-duration ratio.
-
-**Output (intermediate):** `synced/cal/`
-
-**`sync_info.json` extras:**
-
-| Key | Meaning |
-|---|---|
-| `sync_method` | `"calibration_windows"` |
-| `drift_source` | `"calibration_windows"` or `"duration_ratio"` |
-| `calibration.opening.score` | Cross-correlation quality of the opening window |
-| `calibration.closing.score` | Cross-correlation quality of the closing window |
-| `calibration.calibration_span_s` | Time between opening and closing calibrations |
-
-**Quality indicators:** both scores ≥ 0.5, span ≥ 60 s,
-`drift_source == "calibration_windows"`.
-
----
-
-### Method 4 — Online sync (`methods.py`)
-
-**When to use:** real-time/causal context where the closing calibration has
-not yet occurred. Also useful as a reference point when evaluating how much
-drift matters for a given recording.
-
-**Algorithm:**
-
-1. Detect the opening calibration in the reference only.
-2. Match the opening cluster in the target; refine with narrow-window SDA.
-3. Load a pre-characterised median drift from
-   `data/drift_characterisation.json` (falls back to 400 ppm).
-4. Back-propagate the refined offset to the target time origin using the
-   loaded drift.
-
-**Output (intermediate):** `synced/online/`  
-**`sync_info.json` extras:** `sync_method: "online_opening_anchor"`,
-`drift_ppm_source`, `drift_ppm_applied`
-
-**Comparison of all methods:**
-
-| Property | SDA | LIDA | Calibration | Online |
-|---|---|---|---|---|
-| Requires full recording | Yes | Yes | Yes | No (causal) |
-| Calibration tap required | No | No | Yes (both) | Yes (opening only) |
-| Drift source | Signal | Signal | Two anchors | Pre-characterised |
-| Typical precision | Low | Medium | High | Medium |
+| Symbol | Description |
+|--------|-------------|
+| `MethodResult`, `RecordingResult` | Per-method status and final selection handle. |
+| `_run_method` | Load parsed CSVs, dispatch strategy, write stage outputs. |
+| `synchronize_recording_all_methods` | Run all tiers, select, flatten. |
+| `synchronize_recording_chosen_method` | One tier, synthesise `SyncSelectionResult`, flatten. |
+| `synchronize_from_calibration` | Standalone multi-anchor sync for arbitrary paths (section splitter). |
+| `main` | Argument parser: recording or session `--all`, optional `--method`. |
 
 ---
 
-## Comparison and selection
+## Maintenance and code review notes
 
-After any methods have been run, `pipeline.py` compares them and picks the
-best result.
+### Fixes applied while auditing
 
-### Selection heuristic
+- **`synchronize_from_calibration`** previously passed unsupported kwargs into `estimate_multi_anchor`; `anchor_search_seconds` and `sda_fallback_max_lag_s` are now threaded from `cal_search_s` and `coarse_max_lag_s`. Section-level sync therefore honours the splitter’s search window and SDA fallback lag.
+- **`print_comparison`** printed one correlation column per method in separate rows; it now prints a single **Corr offset+drift** row aligned with all methods.
+- **Unused** `build_activity_signal` wrapper in `activity.py` was removed (only `build_alignment_series` is used internally).
 
-1. **Calibration first:** if calibration-sync passes all quality gates
-   (span ≥ 60 s, both scores ≥ 0.5, drift ≤ 5 000 ppm, correlation ≥ 0.2)
-   → choose `calibration`.
-2. **Highest correlation otherwise:** pick whichever available method has the
-   highest `corr.offset_and_drift`. Ties broken by preference order:
-   `calibration > lida > sda > online`.
+### Duplication that is intentional (for now)
 
-### `synced/` output
+- **`add_vector_norms`** exists in both `stream_io.py` (fixed `VECTOR_AXES`) and `signals.py` (parameterised axes). Consolidating would touch `quality.py` and `activity.py`; keeping both avoids churn while `signals` stays generic.
 
-`apply_selection` (called automatically by the pipeline) copies the winner into
-flat `synced/`, writes `all_methods.json`, and then removes the per-method
-subfolders.
+### Possible future simplifications
 
-| File | Description |
-|---|---|
-| `sporsa.csv` | Reference sensor (copy from winner) |
-| `arduino.csv` | Synchronised target sensor (copy from winner) |
-| `sync_info.json` | The winning method's model |
-| `all_methods.json` | Comparison metrics for all four methods |
+- **`pipeline` argparse:** the user preference is to avoid CLI parsers in scripts; here the parser is the package entrypoint—acceptable, but a thinner `main` could move to a tiny `cli.py` if desired.
+- **Selection policy:** `_multi_anchor_passes` and drift penalty thresholds are hard-coded; a single config object would make thesis experiments easier.
+- **`aggregate_sync_params`** still reads optional keys (`calibration_usage_strategy`, `segment_aware_used`) that the current sync pipeline does not emit; harmless, but could be dropped from exports if unused.
+- **Thesis plots** (`visualization/thesis_plots.py`) reimplement a private `_build_activity_signal` instead of importing `sync.activity.build_alignment_series`; importing would deduplicate behaviour at the cost of coupling plotting to sync resampling defaults.
+
+### API / output stability
+
+- Changing keys inside `sync_info.json` or `all_methods.json` will affect `plot_sync.py` and `aggregate.py`. The user indicated plots may be updated after pipeline changes; exports should be updated alongside any schema change.
 
 ---
 
-## Core algorithm modules
+## Licence / context
 
-### `core.py` (SDA section) — Signal-Density Alignment
-
-Estimates a single coarse offset by cross-correlating a 1-D *activity signal*
-derived from both IMU streams.
-
-1. Resample both streams to a uniform grid.
-2. Compute a z-scored, orientation-invariant activity signal from selected
-   vector norms. By default uses `acc_norm` differentiated once to emphasise
-   transient events.
-3. FFT cross-correlation to find the integer lag that maximises normalised
-   overlap score.
-4. Convert lag to seconds and adjust for differing start times.
-
-Result: `OffsetEstimate(offset_seconds, lag_seconds, score, ...)`.
-
-**Limitation:** SDA gives a single global offset with no drift estimate. Clock
-drift accumulates over time and degrades alignment quality for long recordings.
-
----
-
-### `core.py` (LIDA section) — Local Instance-based Drift Analysis
-
-Extends SDA by fitting a linear drift model on top of the coarse offset.
-
-1. Run SDA to get a coarse lag.
-2. Slide a window (default 20 s, step 10 s) over the recording and find the
-   best local lag within ±`local_search_seconds` at each position → scatter
-   of `(t_target, local_offset)` points.
-3. Weighted linear regression: `offset(t) = offset_0 + drift × (t − t_origin)`.
-   Slope = drift; intercept = offset at target origin.
-4. Return a `SyncModel`.
-
-**`SyncModel` fields:**
-
-| Field | Meaning |
-|---|---|
-| `offset_seconds` | Offset at `target_time_origin_seconds` |
-| `drift_seconds_per_second` | Clock drift (positive = Arduino runs slow) |
-| `target_time_origin_seconds` | Reference point for drift extrapolation |
-| `sample_rate_hz` | Resampling rate used during estimation |
-
-**Helpers:** `apply_sync_model`, `save_sync_model` / `load_sync_model`,
-`resample_aligned_stream`.
-
----
-
-### `core.py` (metrics) — Synchronization quality metrics
-
-Used by every method to populate `sync_info.json`:
-
-- `acc_norm_correlation(ref_df, tgt_df, *, sample_rate_hz)` — Pearson r over
-  the shared timestamp window.
-- `compute_sync_correlations(ref_df, tgt_df, model, *, sample_rate_hz)` —
-  evaluates both offset-only and offset+drift correlations, returns the
-  standard `"correlation"` dict block.
-
----
-
-### `core.py` (streams) — Shared stream utilities
-
-| Function | Purpose |
-|---|---|
-| `load_stream(path)` | Load sensor CSV, coerce numerics, sort by timestamp |
-| `add_vector_norms(df)` | Append `acc_norm`, `gyro_norm`, `mag_norm` |
-| `resample_stream(df, hz)` | Linear-interpolate onto a uniform time grid |
-| `resample_to_reference_timestamps(tgt, ref)` | Resample target at reference timestamps |
-| `lowpass_filter(df, cutoff_hz, sr_hz)` | Zero-phase Butterworth filter |
-| `remove_dropouts(df)` | Remove near-zero acceleration rows (BLE dropout packets) |
-| `apply_linear_time_transform(ts, ...)` | Apply `offset + drift × Δt` to a timestamp array |
-
----
-
-## `sync_info.json` schema
-
-Every sync method writes `sync_info.json` with these guaranteed fields plus
-method-specific extras:
-
-```jsonc
-{
-  "reference_csv": "<path>",
-  "target_csv": "<path>",
-  "target_time_origin_seconds": 12345.678,
-  "offset_seconds": 3601.234,
-  "drift_seconds_per_second": 4.1e-4,
-  "sample_rate_hz": 100.0,
-  "max_lag_seconds": 60.0,
-  "created_at_utc": "2026-02-26T10:00:00+00:00",
-  "sync_method": "<method_id>",
-  "correlation": {
-    "offset_only": 0.312,
-    "offset_and_drift": 0.487,
-    "signal": "acc_norm",
-    "sample_rate_hz": 100.0
-  }
-}
-```
-
-`all_methods.json` (written by `apply_selection`) contains one block per
-method plus the selection decision — enough to reproduce any sync result or
-switch methods in downstream analysis without re-running the sync.
+Part of the Multi-IMU analysis pipeline; depends on `common.paths`, `parser.calibration_segments`, and recording layout under `data/recordings/`.

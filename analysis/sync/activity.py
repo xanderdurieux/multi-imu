@@ -23,16 +23,6 @@ class AlignmentSeries:
     signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF
 
 
-def build_activity_signal(
-    df: pd.DataFrame, *, signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF
-) -> np.ndarray:
-    """Build a scalar activity signal from an IMU DataFrame."""
-    signal, _ = _build_raw_signal(
-        df, vector_axes=VECTOR_AXES, signal_mode=signal_mode
-    )
-    return signal
-
-
 def build_alignment_series(
     df: pd.DataFrame,
     *,

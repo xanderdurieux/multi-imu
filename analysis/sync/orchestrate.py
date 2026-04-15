@@ -30,10 +30,10 @@ METHOD_STAGES: dict[str, str] = {
 }
 
 METHOD_LABELS: dict[str, str] = {
-    "multi_anchor": "Multi-anchor protocol",
+    "multi_anchor": "Multi-anchor",
     "one_anchor_adaptive": "One-anchor adaptive",
     "one_anchor_prior": "One-anchor prior",
-    "signal_only": "Signal-only",
+    "signal_only": "Signal-only (SDA/LIDA)",
 }
 
 SyncMethodName = Literal[
@@ -66,6 +66,7 @@ class SyncMethodQuality:
     method: str
     stage: str
     available: bool
+    offset_seconds: Optional[float]
     corr_offset_and_drift: Optional[float]
     drift_ppm: Optional[float]
     drift_source: Optional[str]
@@ -75,6 +76,9 @@ class SyncMethodQuality:
     calibration_n_windows: Optional[int]
     calibration_fit_r2: Optional[float]
     calibration_anchors: Optional[list[dict[str, Any]]]
+    target_time_origin_seconds: Optional[float]
+    drift_seconds_per_second: Optional[float]
+    adaptive_opening_anchor: Optional[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ class SyncSelectionResult:
             return {
                 "stage": q.stage,
                 "available": q.available,
+                "offset_seconds": q.offset_seconds,
                 "corr_offset_and_drift": q.corr_offset_and_drift,
                 "drift_ppm": q.drift_ppm,
                 "drift_source": q.drift_source,
@@ -101,6 +106,9 @@ class SyncSelectionResult:
                 "calibration_n_windows": q.calibration_n_windows,
                 "calibration_fit_r2": q.calibration_fit_r2,
                 "calibration_anchors": q.calibration_anchors,
+                "target_time_origin_seconds": q.target_time_origin_seconds,
+                "drift_seconds_per_second": q.drift_seconds_per_second,
+                "adaptive_opening_anchor": q.adaptive_opening_anchor,
             }
 
         return {
@@ -127,18 +135,26 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
     if info is None:
         return SyncMethodQuality(
             method=method, stage=stage, available=False,
+            offset_seconds=None,
             corr_offset_and_drift=None, drift_ppm=None, drift_source=None,
             calibration_span_s=None, calibration_open_score=None,
             calibration_close_score=None, calibration_n_windows=None,
             calibration_fit_r2=None, calibration_anchors=None,
+            target_time_origin_seconds=None,
+            drift_seconds_per_second=None,
+            adaptive_opening_anchor=None,
         )
 
     corr = (info.get("correlation") or {}).get("offset_and_drift")
     drift = info.get("drift_seconds_per_second")
     cal = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
+    adap = info.get("adaptive") if isinstance(info.get("adaptive"), dict) else None
+    oa = adap.get("opening_anchor") if adap else None
+    oa = oa if isinstance(oa, dict) else None
 
     return SyncMethodQuality(
         method=method, stage=stage, available=True,
+        offset_seconds=info.get("offset_seconds"),
         corr_offset_and_drift=corr,
         drift_ppm=(drift * 1e6) if drift is not None else None,
         drift_source=info.get("drift_source"),
@@ -148,6 +164,9 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
         calibration_n_windows=cal.get("n_anchors") if cal else None,
         calibration_fit_r2=cal.get("fit_r2") if cal else None,
         calibration_anchors=cal.get("anchors") if cal else None,
+        target_time_origin_seconds=info.get("target_time_origin_seconds"),
+        drift_seconds_per_second=float(drift) if drift is not None else None,
+        adaptive_opening_anchor=dict(oa) if oa else None,
     )
 
 
@@ -170,7 +189,7 @@ def _multi_anchor_passes(
         return False
     if (q.calibration_open_score or 0.0) < min_cal_score:
         return False
-    if q.drift_source != "duration_ratio" and (q.calibration_close_score or 0.0) < min_cal_score:
+    if (q.calibration_close_score or 0.0) < min_cal_score:
         return False
     if q.corr_offset_and_drift is None or q.corr_offset_and_drift < min_corr:
         return False
@@ -206,7 +225,6 @@ def select_best_sync_method(recording_name: str) -> SyncSelectionResult:
         # Fall through tier order.  Prefer tier priority, but penalise
         # methods with implausible drift or negative correlation.
         max_plausible_drift_ppm = 5_000.0
-        min_useful_corr = 0.0
 
         def _score(q: SyncMethodQuality) -> float:
             if not q.available:
@@ -267,29 +285,13 @@ def print_comparison(result: dict[str, Any]) -> None:
         for m in SYNC_METHODS
     ])
 
-    for m in SYNC_METHODS:
-        info = result[m]
-        if info is None:
-            continue
-        corr = info.get("correlation") or {}
-        _row(f"Corr offset+drift ({m})", [
-            _fmt(corr.get("offset_and_drift"), ".4f")
-        ])
-
-
-def print_selection_result(result: SyncSelectionResult) -> None:
-    """Print a short summary of the selected method."""
-    log.info("Recording  : %s", result.recording_name)
-    log.info("Selected   : %s (stage: %s)", result.method, result.stage)
-    for method in SYNC_METHODS:
-        q = result.qualities[method]
-        if not q.available:
-            log.info("  %-22s  unavailable", method_label(method))
-            continue
-        corr = f"{q.corr_offset_and_drift:.4f}" if q.corr_offset_and_drift is not None else "N/A"
-        drift = f"{q.drift_ppm:.1f}" if q.drift_ppm is not None else "N/A"
-        marker = " <- selected" if method == result.method else ""
-        log.info(
-            "  %-22s  corr=%s  drift=%s ppm%s",
-            method_label(method), corr, drift, marker,
-        )
+    _row(
+        "Corr offset+drift",
+        [
+            _fmt(
+                ((result[m] or {}).get("correlation") or {}).get("offset_and_drift"),
+                ".4f",
+            )
+            for m in SYNC_METHODS
+        ],
+    )

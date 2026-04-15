@@ -1,9 +1,10 @@
-"""Calibration-anchor detection, coarse offset, and per-segment refinement."""
+"""Calibration-anchor detection, matching, and per-segment refinement."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,12 @@ from .xcorr import estimate_lag
 
 log = logging.getLogger(__name__)
 
+DEFAULT_ANCHOR_SAMPLE_RATE_HZ = 100.0
+DEFAULT_ANCHOR_SEARCH_SECONDS = 5.0
+DEFAULT_ANCHOR_PEAK_BUFFER_SECONDS = 1.0
+DEFAULT_ANCHOR_PEAK_MIN_HEIGHT = 3.0
+DEFAULT_ANCHOR_PEAK_MIN_COUNT = 3
+
 
 @dataclass(frozen=True)
 class CalibrationWindowResult:
@@ -31,6 +38,18 @@ class CalibrationWindowResult:
     t_tgt_seconds: float
     correlation_score: float
     window_duration_s: float
+    t_ref_peak_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class CalibrationAnchorExtraction:
+    """Shared result of extracting matched calibration anchors."""
+
+    anchors: list[CalibrationWindowResult]
+    coarse_offset_seconds: float
+    coarse_method: str
+    reference_segments_detected: int
+    reference_segments_in_range: int
 
 
 # ---------------------------------------------------------------------------
@@ -197,12 +216,16 @@ def refine_offset_at_calibration(
     tgt_start_s = float(tgt_series.timestamps_seconds[0])
     offset_seconds = (ref_start_s - tgt_start_s) + lag_seconds
 
-    t_tgt_center_ms = float(ref_df["timestamp"].iloc[p_mid]) - coarse_offset_s * 1000.0
+    ref_peak_ts = ref_df.iloc[seg.peak_indices]["timestamp"].to_numpy(dtype=float)
+    t_ref_center_s = float(np.median(ref_peak_ts)) / 1000.0
+    t_tgt_center_s = t_ref_center_s - float(offset_seconds)
+
     return CalibrationWindowResult(
         offset_seconds=float(offset_seconds),
-        t_tgt_seconds=float(t_tgt_center_ms / 1000.0),
+        t_tgt_seconds=t_tgt_center_s,
         correlation_score=float(score),
         window_duration_s=float(window_duration_s),
+        t_ref_peak_s=t_ref_center_s,
     )
 
 
@@ -285,3 +308,91 @@ def bootstrap_coarse_offset(
     tgt_start = float(tgt_series.timestamps_seconds[0])
     offset = (ref_start - tgt_start) + lag_seconds
     return offset, "sda_fallback"
+
+
+def extract_calibration_anchors(
+    ref_df: pd.DataFrame,
+    tgt_df: pd.DataFrame,
+    *,
+    sample_rate_hz: float = DEFAULT_ANCHOR_SAMPLE_RATE_HZ,
+    search_seconds: float = DEFAULT_ANCHOR_SEARCH_SECONDS,
+    peak_buffer_seconds: float = DEFAULT_ANCHOR_PEAK_BUFFER_SECONDS,
+    lowpass_cutoff_hz: float | None = None,
+    sda_fallback_max_lag_s: float = 120.0,
+) -> CalibrationAnchorExtraction:
+    """Detect, match, and refine shared calibration anchors once."""
+    ref_cals = detect_reference_calibrations(
+        ref_df,
+        sample_rate_hz=sample_rate_hz,
+        peak_min_height=DEFAULT_ANCHOR_PEAK_MIN_HEIGHT,
+        peak_min_count=DEFAULT_ANCHOR_PEAK_MIN_COUNT,
+    )
+    if not ref_cals:
+        raise ValueError("No calibration sequences found in reference stream.")
+
+    coarse_offset_s, coarse_method = bootstrap_coarse_offset(
+        ref_df,
+        tgt_df,
+        ref_cals,
+        peak_min_height=DEFAULT_ANCHOR_PEAK_MIN_HEIGHT,
+        peak_min_count=DEFAULT_ANCHOR_PEAK_MIN_COUNT,
+        sda_max_lag_s=sda_fallback_max_lag_s,
+    )
+    in_range = filter_segments_in_target_range(
+        ref_df,
+        tgt_df,
+        ref_cals,
+        coarse_offset_s=coarse_offset_s,
+    )
+    if not in_range:
+        raise ValueError("No calibration sequences map into the target stream.")
+
+    anchors: list[CalibrationWindowResult] = []
+    current_coarse = coarse_offset_s
+    for seg in in_range:
+        try:
+            anchor = refine_offset_at_calibration(
+                ref_df,
+                tgt_df,
+                seg,
+                coarse_offset_s=current_coarse,
+                sample_rate_hz=sample_rate_hz,
+                peak_buffer_s=peak_buffer_seconds,
+                search_s=search_seconds,
+                lowpass_cutoff_hz=lowpass_cutoff_hz,
+            )
+        except Exception as exc:
+            log.warning("Skipping calibration window during refinement: %s", exc)
+            continue
+        anchors.append(anchor)
+        current_coarse = anchor.offset_seconds
+
+    if not anchors:
+        raise ValueError("No calibration sequences were refined successfully.")
+
+    anchors = sorted(anchors, key=lambda anchor: (anchor.t_tgt_seconds, anchor.t_ref_peak_s))
+    return CalibrationAnchorExtraction(
+        anchors=anchors,
+        coarse_offset_seconds=float(coarse_offset_s),
+        coarse_method=coarse_method,
+        reference_segments_detected=len(ref_cals),
+        reference_segments_in_range=len(in_range),
+    )
+
+
+def calibration_anchor_to_dict(
+    anchor: CalibrationWindowResult,
+    *,
+    index: int | None = None,
+) -> dict[str, Any]:
+    """Serialize one matched anchor for sync metadata."""
+    data: dict[str, Any] = {
+        "offset_s": round(float(anchor.offset_seconds), 6),
+        "t_ref_s": round(float(anchor.t_ref_peak_s), 3),
+        "t_tgt_s": round(float(anchor.t_tgt_seconds), 3),
+        "score": round(float(anchor.correlation_score), 4),
+        "window_duration_s": round(float(anchor.window_duration_s), 2),
+    }
+    if index is not None:
+        data["index"] = int(index)
+    return data

@@ -247,6 +247,7 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         for method in _ALL_SYNC_METHODS:
             m = data.get(method, {}) or {}
             row[f"{method}_available"] = bool(m.get("available", False))
+            row[f"{method}_offset_seconds"] = m.get("offset_seconds")
             row[f"{method}_corr_offset_and_drift"] = m.get("corr_offset_and_drift")
             row[f"{method}_drift_ppm"] = m.get("drift_ppm")
             row[f"{method}_drift_source"] = m.get("drift_source", "")

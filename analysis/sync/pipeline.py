@@ -20,9 +20,8 @@ from common.paths import (
     write_csv,
 )
 
-from .model import SyncModel, apply_sync_model, save_sync_model
+from .model import apply_sync_model
 from .orchestrate import (
-    METHOD_LABELS,
     METHOD_STAGES,
     SYNC_METHODS,
     SyncSelectionResult,
@@ -30,16 +29,14 @@ from .orchestrate import (
     method_label,
     method_stage,
     print_comparison,
-    print_selection_result,
     select_best_sync_method,
 )
 from .quality import compute_sync_correlations
-from .stream_io import load_stream, resample_stream
+from .stream_io import load_stream
 
 log = logging.getLogger(__name__)
 
 _STAGE_IN = "parsed"
-ALL_METHODS: list[str] = list(SYNC_METHODS)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +149,7 @@ def _run_method(
 # ---------------------------------------------------------------------------
 
 
-def prune_method_stage_directories(recording_name: str) -> None:
+def _prune_method_stage_directories(recording_name: str) -> None:
     """Remove all method-specific output directories after flattening."""
     for method in SYNC_METHODS:
         path = recording_stage_dir(recording_name, method_stage(method))
@@ -161,7 +158,7 @@ def prune_method_stage_directories(recording_name: str) -> None:
             log.debug("sync pruned: %s", project_relative_path(path))
 
 
-def apply_selection(
+def _apply_selection(
     recording_name: str,
     result: SyncSelectionResult,
     *,
@@ -191,7 +188,7 @@ def apply_selection(
         "sync %s/synced: selected method=%s (stage=%s)",
         recording_name, result.method, result.stage,
     )
-    prune_method_stage_directories(recording_name)
+    _prune_method_stage_directories(recording_name)
     return out_dir
 
 
@@ -233,7 +230,7 @@ def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
             "sync %s: selected %s (stage=%s)",
             recording_name, selection.method, selection.stage,
         )
-        apply_selection(recording_name, selection)
+        _apply_selection(recording_name, selection)
     except Exception as exc:
         result.selection_error = str(exc)
         log.warning("Selection failed for %s: %s", recording_name, exc)
@@ -270,12 +267,12 @@ def synchronize_recording_chosen_method(
         stage=method_stage(method),
         qualities=qualities,
     )
-    apply_selection(recording_name, result)
+    _apply_selection(recording_name, result)
     return result
 
 
-def synchronize_session(session_name: str) -> list[RecordingResult]:
-    """Run synchronization for every recording in a session."""
+def _synchronize_session(session_name: str) -> list[RecordingResult]:
+    """Run synchronization for every recording in a session (CLI helper)."""
     root = recordings_root()
     recordings = sorted(
         d.name
@@ -312,7 +309,6 @@ def synchronize_from_calibration(
     sample_rate_hz: float = 100.0,
     coarse_max_lag_s: float = 120.0,
     cal_search_s: float = 5.0,
-    **kwargs,
 ) -> tuple[Path, Path, Path | None]:
     """Calibration-based sync writing outputs to output_dir.
 
@@ -335,7 +331,8 @@ def synchronize_from_calibration(
         reference_name=str(ref_path),
         target_name=str(tgt_path),
         sample_rate_hz=sample_rate_hz,
-        cal_search_s=cal_search_s,
+        anchor_search_seconds=cal_search_s,
+        sda_fallback_max_lag_s=coarse_max_lag_s,
     )
 
     payload = asdict(model)
@@ -389,7 +386,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if args.all_recordings:
-        synchronize_session(args.name)
+        _synchronize_session(args.name)
     elif args.method:
         synchronize_recording_chosen_method(args.name, args.method)
     else:

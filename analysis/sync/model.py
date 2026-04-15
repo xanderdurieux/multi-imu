@@ -1,11 +1,9 @@
-"""SyncModel dataclass, linear time transform, and JSON persistence."""
+"""SyncModel dataclass and linear time transform helpers."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -83,19 +81,3 @@ def apply_sync_model(
     if replace_timestamp:
         out["timestamp"] = out["timestamp_aligned"]
     return out
-
-
-def save_sync_model(model: SyncModel, path: Path | str) -> Path:
-    """Serialize a SyncModel to JSON."""
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(asdict(model), indent=2, sort_keys=False), encoding="utf-8")
-    return out
-
-
-def load_sync_model(path: Path | str) -> SyncModel:
-    """Deserialize a SyncModel from JSON."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    allowed_keys = {f.name for f in fields(SyncModel)}
-    filtered = {k: v for k, v in data.items() if k in allowed_keys}
-    return SyncModel(**filtered)
