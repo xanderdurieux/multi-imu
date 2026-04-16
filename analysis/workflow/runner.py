@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from common.paths import (
-    analysis_root,
     data_root,
     evaluation_root,
     exports_root,

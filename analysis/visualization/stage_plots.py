@@ -9,14 +9,16 @@ from common.paths import recording_stage_dir
 
 def plot_recording_pipeline_stage(recording_name: str, stage: str) -> None:
     """Plot outputs for a recording-level stage directory (parsed / synced)."""
-    if stage == "synced":
-        from visualization.plot_sync import plot_sync_stage
-
-        plot_sync_stage(recording_stage_dir(recording_name, stage))
-    elif stage == "parsed":
+    if stage == "parsed":
         from visualization.plot_comparison import plot_stage_data
 
         plot_stage_data(recording_stage_dir(recording_name, stage))
+    elif stage == "synced":
+        from visualization.plot_sync import plot_sync_stage
+
+        plot_sync_stage(recording_name)
+    else:
+        raise ValueError(f"Invalid stage: {stage}")
 
 
 def plot_section_pipeline_stage(section_dir: Path, stage: str) -> None:
@@ -46,3 +48,5 @@ def plot_section_pipeline_stage(section_dir: Path, stage: str) -> None:
         plot_features_stage(section_dir)
         plot_labels(section_dir, stage="calibrated")
         plot_labels(section_dir, stage="features")
+    else:
+        raise ValueError(f"Invalid stage: {stage}")

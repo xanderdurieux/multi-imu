@@ -2,8 +2,10 @@
 
 CLI (from the ``analysis`` directory)::
 
-    python -m visualization.plot_sync before-after  <recording>
-    python -m visualization.plot_sync offset-drift  <recording>
+    python -m visualization.plot_sync <recording>
+    python -m visualization.plot_sync all <recording>
+    python -m visualization.plot_sync before-after <recording>
+    python -m visualization.plot_sync offset-drift <recording>
     python -m visualization.plot_sync offset-drift-zoomed <recording> [--zoom-start S] [--zoom-end S]
 """
 
@@ -21,10 +23,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import colors
 
 from common.paths import recording_stage_dir
-from sync.sync_info_format import flatten_sync_info_dict
-from visualization._primitives import draw_acc, draw_signal
+from visualization._primitives import draw_acc, draw_signal, draw_two_streams, imu_figure
 from visualization._utils import (
     SENSOR_COLORS,
     SENSORS,
@@ -63,34 +65,129 @@ _METHOD_LABELS: dict[str, str] = {
     "signal_only":         "Signal-only",
 }
 
-_METHOD_STAGES: dict[str, str] = {
-    "multi_anchor":        "synced/multi_anchor",
-    "one_anchor_adaptive": "synced/one_anchor_adaptive",
-    "one_anchor_prior":    "synced/one_anchor_prior",
-    "signal_only":         "synced/signal_only",
-}
-
-
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
 
 def _load_sync_infos(recording_name: str) -> dict[str, dict | None]:
-    """Load and flatten ``sync_info.json`` for every method stage."""
+    """Load sync model info for every method.
+
+    Your pipeline produces a consistent layout:
+    - ``synced/all_methods.json`` contains per-method estimates and shared calibration.
+    """
+    synced_root = recording_stage_dir(recording_name, "synced")
+    all_methods_path = synced_root / "all_methods.json"
+    if not all_methods_path.exists():
+        raise FileNotFoundError(f"Missing all_methods.json under {synced_root}")
+
+    payload = json.loads(all_methods_path.read_text(encoding="utf-8"))
+    shared = payload.get("shared") if isinstance(payload, dict) else None
+    methods = payload.get("methods") if isinstance(payload, dict) else None
+    if not isinstance(shared, dict):
+        raise ValueError(f"Invalid all_methods.json: missing 'shared' under {all_methods_path}")
+
+    target_time_origin_seconds = shared.get("target_time_origin_seconds")
+    calibration = shared.get("calibration")
+    if target_time_origin_seconds is None or not isinstance(calibration, dict):
+        raise ValueError(f"Invalid all_methods.json: missing shared origin/calibration under {all_methods_path}")
+
     result: dict[str, dict | None] = {}
-    for method, stage in _METHOD_STAGES.items():
-        path = recording_stage_dir(recording_name, stage) / "sync_info.json"
-        if not path.exists():
+
+    # Build the flattened shape expected by the plotting code.
+    for method in _ALL_METHODS:
+        estimate = None
+        if isinstance(methods, dict):
+            m = methods.get(method)
+            if isinstance(m, dict):
+                est = m.get("estimate")
+                if isinstance(est, dict):
+                    estimate = est
+
+        if not isinstance(estimate, dict):
             result[method] = None
             continue
-        try:
-            result[method] = flatten_sync_info_dict(
-                json.loads(path.read_text(encoding="utf-8"))
-            )
-        except Exception as exc:
-            log.warning("Could not load sync_info for %s/%s: %s", recording_name, method, exc)
+
+        offset_s = estimate.get("offset_seconds")
+        drift_s = estimate.get("drift_seconds_per_second")
+        if offset_s is None or drift_s is None:
             result[method] = None
+            continue
+
+        result[method] = {
+            "target_time_origin_seconds": target_time_origin_seconds,
+            "offset_seconds": float(offset_s),
+            "drift_seconds_per_second": float(drift_s),
+            "calibration": calibration,  # includes `anchors`
+        }
+
     return result
+
+
+def _load_all_methods_payload(recording_name: str) -> dict:
+    """Load the raw ``all_methods.json`` payload for *recording_name*."""
+    synced_root = recording_stage_dir(recording_name, "synced")
+    all_methods_path = synced_root / "all_methods.json"
+    if not all_methods_path.exists():
+        raise FileNotFoundError(f"Missing all_methods.json under {synced_root}")
+
+    payload = json.loads(all_methods_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid all_methods.json: expected object at {all_methods_path}")
+    return payload
+
+
+def _method_metrics_rows(payload: dict) -> list[dict[str, object]]:
+    """Build per-method metric rows from an ``all_methods.json`` payload."""
+    methods = payload.get("methods")
+    selected_method = str(payload.get("selected_method") or "")
+    rows: list[dict[str, object]] = []
+
+    for method in _ALL_METHODS:
+        method_block = methods.get(method) if isinstance(methods, dict) else None
+        if not isinstance(method_block, dict):
+            rows.append(
+                {
+                    "method": method,
+                    "label": _METHOD_LABELS[method],
+                    "available": False,
+                    "selected": method == selected_method,
+                    "offset_seconds": np.nan,
+                    "drift_seconds_per_second": np.nan,
+                    "correlation": np.nan,
+                }
+            )
+            continue
+
+        estimate = method_block.get("estimate") if isinstance(method_block.get("estimate"), dict) else {}
+        scores = method_block.get("scores") if isinstance(method_block.get("scores"), dict) else {}
+        rows.append(
+            {
+                "method": method,
+                "label": _METHOD_LABELS[method],
+                "available": bool(method_block.get("available", False)),
+                "selected": method == selected_method,
+                "offset_seconds": float(estimate["offset_seconds"]) if estimate.get("offset_seconds") is not None else np.nan,
+                "drift_seconds_per_second": (
+                    float(estimate["drift_seconds_per_second"])
+                    if estimate.get("drift_seconds_per_second") is not None
+                    else np.nan
+                ),
+                "correlation": (
+                    float(scores["corr_offset_and_drift"])
+                    if scores.get("corr_offset_and_drift") is not None
+                    else np.nan
+                ),
+            }
+        )
+
+    return rows
+
+
+def _format_metric(value: float, fmt: str) -> str:
+    """Format a numeric value for a table cell, preserving missing entries."""
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    return format(value, fmt)
 
 
 def _collect_anchors(sync_infos: dict[str, dict | None]) -> list[dict]:
@@ -130,36 +227,30 @@ def _recording_duration_s(recording_name: str) -> float:
     return 3600.0
 
 
-def _sync_model_ylim(
-    sync_infos: dict[str, dict | None],
-    xlim: tuple[float, float],
-    anchors: list[dict],
-    origin_s: float,
+def _build_zoom_windows(
+    overlap_start_s: float,
+    overlap_end_s: float,
     *,
-    margin: float = 1.0,
-) -> tuple[float, float]:
-    """Tight y-range for the sync model view over *xlim*, including anchors."""
-    x1, x2 = xlim
-    ys: list[float] = [x1, x2]  # the y = x reference touches these corners
+    window_s: float = 45.0,
+) -> list[tuple[str, float, float]]:
+    """Return first/middle/end windows within the shared synced overlap."""
+    overlap_duration_s = max(0.0, overlap_end_s - overlap_start_s)
+    if overlap_duration_s <= 0.0:
+        return []
 
-    for method in _ALL_METHODS:
-        info = sync_infos.get(method)
-        if not isinstance(info, dict):
-            continue
-        offset_s = info.get("offset_seconds")
-        if offset_s is None:
-            continue
-        drift = float(info.get("drift_seconds_per_second") or 0.0)
-        for x in (x1, x2):
-            ys.append((1.0 + drift) * x + float(offset_s))
+    actual_window_s = min(window_s, overlap_duration_s)
+    midpoint_s = overlap_start_s + overlap_duration_s / 2.0
 
-    for a in anchors:
-        τ_tgt = float(a["t_tgt_s"]) - origin_s
-        if x1 <= τ_tgt <= x2:
-            ys.append(float(a["t_ref_s"]) - origin_s)
-
-    return min(ys) - margin, max(ys) + margin
-
+    windows = [
+        ("Start", overlap_start_s, overlap_start_s + actual_window_s),
+        (
+            "Middle",
+            max(overlap_start_s, midpoint_s - actual_window_s / 2.0),
+            min(overlap_end_s, midpoint_s + actual_window_s / 2.0),
+        ),
+        ("End", overlap_end_s - actual_window_s, overlap_end_s),
+    ]
+    return windows
 
 # ---------------------------------------------------------------------------
 # Ax-level drawing primitives (sync-specific)
@@ -172,30 +263,28 @@ def draw_sync_model_comparison(
     duration_s: float,
     origin_s: float,
     anchors: list[dict] | None = None,
+    show_anchor_scorebar: bool = False,
 ) -> plt.Axes:
-    """Draw sync method lines + calibration anchor scatter on *ax*.
+    """Draw sync method offset lines + calibration anchor scatter on *ax*.
 
     **Coordinate system** (origin = ``target_time_origin_seconds``):
 
     - x-axis: τ_tgt = t_tgt − origin_s  (target clock, s from recording start)
-    - y-axis: τ_ref = t_ref − origin_s  (reference clock, s from recording start)
+    - y-axis: Δ = t_ref − t_tgt  (local offset between clocks, s)
 
-    Each method is drawn as a line that passes through
-    ``(τ_tgt=0, offset_seconds)`` with slope ``(1 + drift_seconds_per_second)``.
-    Calibration anchors appear as black triangles at their measured
-    ``(τ_tgt, τ_ref)`` positions.
+    Each method is drawn as the offset model
+    ``Δ(τ_tgt) = offset_seconds + drift_seconds_per_second * τ_tgt``.
+    Calibration anchors appear as score-colored dots at their measured
+    ``(τ_tgt, offset_s)`` positions.
     """
     if anchors is None:
         anchors = _collect_anchors(sync_infos)
 
     t_range = np.linspace(0.0, duration_s, 500)
-
-    # Perfect-sync reference diagonal
-    ax.plot(
-        t_range, t_range,
-        color="gray", lw=1.0, ls="--", alpha=0.4,
-        label="Perfect sync (y = x)", zorder=1,
-    )
+    y_values: list[float] = []
+    primary_line: tuple[np.ndarray, np.ndarray, str] | None = None
+    intercept_specs: list[dict[str, float | str]] = []
+    drift_label_specs: list[dict[str, float | str]] = []
 
     # Per-method model lines
     for method in _ALL_METHODS:
@@ -209,37 +298,181 @@ def draw_sync_model_comparison(
         drift    = float(info.get("drift_seconds_per_second") or 0.0)
         color    = _METHOD_COLORS[method]
 
-        y_line = (1.0 + drift) * t_range + offset_s
+        y_line = drift * t_range + offset_s
         ax.plot(t_range, y_line, color=color, lw=1.8,
                 label=_METHOD_LABELS[method], zorder=3)
+        y_values.extend([float(np.nanmin(y_line)), float(np.nanmax(y_line))])
+        if primary_line is None:
+            primary_line = (t_range.copy(), y_line.copy(), color)
+        label_x = 0.72 * duration_s
+        label_y = float(np.interp(label_x, t_range, y_line))
+        drift_label_specs.append(
+            {
+                "x": label_x,
+                "y": label_y,
+                "color": color,
+                "label": f"{drift * 1e6:+.1f} ppm",
+            }
+        )
 
         # Y-intercept marker + label
         ax.scatter([0.0], [offset_s], color=color, s=55, marker="o", zorder=5)
-        ax.annotate(
-            f"{offset_s:+.2f} s",
-            xy=(0.0, offset_s), xytext=(6, 0),
-            textcoords="offset points",
-            fontsize=7, color=color, va="center",
+        intercept_specs.append(
+            {
+                "y": offset_s,
+                "color": color,
+                "label": f"{offset_s:+.2f} s",
+            }
         )
 
     # Calibration anchors
     if anchors:
         τ_tgt_arr = np.array([float(a["t_tgt_s"]) - origin_s for a in anchors])
-        τ_ref_arr = np.array([float(a["t_ref_s"]) - origin_s for a in anchors])
-        ax.scatter(
-            τ_tgt_arr, τ_ref_arr,
-            c="black", s=70, marker="^", zorder=6, alpha=0.85,
+        offset_arr = np.array(
+            [float(a["t_ref_s"]) - float(a["t_tgt_s"]) for a in anchors],
+            dtype=float,
+        )
+        anchor_scores = np.array(
+            [float(a.get("score")) if a.get("score") is not None else np.nan for a in anchors],
+            dtype=float,
+        )
+        finite_scores = anchor_scores[np.isfinite(anchor_scores)]
+        score_norm = None
+        if finite_scores.size:
+            score_norm = colors.Normalize(
+                vmin=min(0.0, float(finite_scores.min())),
+                vmax=max(1.0, float(finite_scores.max())),
+            )
+
+        anchor_scatter = ax.scatter(
+            τ_tgt_arr, offset_arr,
+            c=anchor_scores if finite_scores.size else "#444444",
+            cmap="RdYlGn",
+            norm=score_norm,
+            s=65,
+            marker="o",
+            edgecolors="black",
+            linewidths=0.6,
+            zorder=6,
+            alpha=0.95,
             label="Calibration anchors",
         )
-        for i, (xt, yr) in enumerate(zip(τ_tgt_arr, τ_ref_arr)):
+        y_values.extend(offset_arr[np.isfinite(offset_arr)].tolist())
+
+        if primary_line is not None:
+            line_x, line_y, line_color = primary_line
+            residual_specs: list[dict[str, float]] = []
+            for xt, ya in zip(τ_tgt_arr, offset_arr):
+                if not (np.isfinite(xt) and np.isfinite(ya)):
+                    continue
+                y_model = float(np.interp(xt, line_x, line_y))
+                residual_ms = (ya - y_model) * 1000.0
+                ax.plot(
+                    [xt, xt],
+                    [y_model, ya],
+                    color=line_color,
+                    lw=1.0,
+                    alpha=0.8,
+                    zorder=4,
+                )
+                residual_specs.append(
+                    {
+                        "x": float(xt),
+                        "y_anchor": float(ya),
+                        "y_model": y_model,
+                        "residual_ms": residual_ms,
+                    }
+                )
+                y_values.append(y_model)
+
+            residual_specs.sort(key=lambda item: (item["x"], item["y_anchor"]))
+            if residual_specs:
+                y_min_now = min(y_values)
+                y_max_now = max(y_values)
+                y_span = max(y_max_now - y_min_now, 0.02)
+                min_gap = 0.04 * y_span
+                placed_y: list[float] = []
+                for spec in residual_specs:
+                    direction = 1.0 if spec["residual_ms"] >= 0.0 else -1.0
+                    base_y = spec["y_anchor"] + direction * (0.015 * y_span)
+                    text_y = base_y
+                    while any(abs(text_y - prev_y) < min_gap for prev_y in placed_y):
+                        text_y += direction * min_gap
+                    placed_y.append(text_y)
+                    y_values.append(text_y)
+                    va = "bottom" if direction > 0 else "top"
+                    ax.text(
+                        spec["x"] + 3.0,
+                        text_y,
+                        f"{spec['residual_ms']:+.1f} ms",
+                        fontsize=7,
+                        color=line_color,
+                        va=va,
+                        ha="left",
+                        zorder=7,
+                        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.4},
+                    )
+        if show_anchor_scorebar and finite_scores.size:
+            cbar = ax.figure.colorbar(anchor_scatter, ax=ax, pad=0.015)
+            cbar.set_label("Anchor score", fontsize=8)
+            cbar.ax.tick_params(labelsize=7)
+
+    if intercept_specs:
+        intercept_specs.sort(key=lambda item: float(item["y"]))
+        y_min_now = min(y_values) if y_values else min(float(item["y"]) for item in intercept_specs)
+        y_max_now = max(y_values) if y_values else max(float(item["y"]) for item in intercept_specs)
+        y_span = max(y_max_now - y_min_now, 0.02)
+        min_gap = 0.035 * y_span
+        placed_y: list[float] = []
+        for spec in intercept_specs:
+            text_y = float(spec["y"])
+            while any(abs(text_y - prev_y) < min_gap for prev_y in placed_y):
+                text_y += min_gap
+            placed_y.append(text_y)
+            y_values.append(text_y)
             ax.annotate(
-                str(i), xy=(xt, yr), xytext=(4, 4),
+                str(spec["label"]),
+                xy=(0.0, float(spec["y"])),
+                xytext=(8, (text_y - float(spec["y"])) * 72.0),
                 textcoords="offset points",
-                fontsize=7, color="black", zorder=7,
+                fontsize=7,
+                color=str(spec["color"]),
+                va="center",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.4},
+            )
+
+    if drift_label_specs:
+        drift_label_specs.sort(key=lambda item: float(item["y"]))
+        y_min_now = min(y_values) if y_values else min(float(item["y"]) for item in drift_label_specs)
+        y_max_now = max(y_values) if y_values else max(float(item["y"]) for item in drift_label_specs)
+        y_span = max(y_max_now - y_min_now, 0.02)
+        min_gap = 0.04 * y_span
+        placed_y: list[float] = []
+        for spec in drift_label_specs:
+            text_y = float(spec["y"])
+            while any(abs(text_y - prev_y) < min_gap for prev_y in placed_y):
+                text_y += min_gap
+            placed_y.append(text_y)
+            y_values.append(text_y)
+            ax.text(
+                float(spec["x"]),
+                text_y,
+                str(spec["label"]),
+                fontsize=7,
+                color=str(spec["color"]),
+                va="center",
+                ha="left",
+                zorder=7,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.4},
             )
 
     ax.set_xlabel("Target time from origin (s)")
-    ax.set_ylabel("Reference time from origin (s)")
+    ax.set_ylabel("Offset t_ref - t_tgt (s)")
+    if y_values:
+        y_min = min(y_values)
+        y_max = max(y_values)
+        margin = max(0.01, 0.08 * max(y_max - y_min, 0.02))
+        ax.set_ylim(y_min - margin, y_max + margin)
     ax.grid(alpha=0.25, lw=0.4)
     ax.legend(fontsize=8, loc="upper left")
     return ax
@@ -248,6 +481,7 @@ def draw_sync_model_comparison(
 # ---------------------------------------------------------------------------
 # Figure-level public functions
 # ---------------------------------------------------------------------------
+
 
 def plot_before_after_imu(
     recording_name: str,
@@ -261,7 +495,7 @@ def plot_before_after_imu(
     - **Before (top two)**: SPORSA and Arduino each at their own t = 0
     - **After (bottom)**: both sensors on a shared timeline post-sync
 
-    Output: ``synced/sync_before_after_acc.png``.
+    Output: ``synced/before_after_comparison.png``.
     """
     parsed_dir = recording_stage_dir(recording_name, "parsed")
     synced_dir = recording_stage_dir(recording_name, "synced")
@@ -280,7 +514,7 @@ def plot_before_after_imu(
         raise FileNotFoundError(f"Both sensor CSVs required under {synced_dir}")
 
     if output_path is None:
-        output_path = synced_dir / "sync_before_after_acc.png"
+        output_path = synced_dir / "before_after_comparison.png"
 
     fig = plt.figure(figsize=(12, 7.0))
     gs_outer = fig.add_gridspec(2, 1, height_ratios=[2, 1])
@@ -326,21 +560,19 @@ def plot_before_after_imu(
     return save_figure(fig, output_path, dpi=150)
 
 
-def plot_sync_offset_drift_comparison(
+def plot_sync_offset_drift_model_comparison(
     recording_name: str,
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Reference vs target time: all sync methods as model lines + calibration anchors.
+    """Offset vs target time: all sync methods as model lines + calibration anchors.
 
     The coordinate origin is ``target_time_origin_seconds`` (the Arduino epoch),
-    so each method line passes through ``(τ_tgt=0, offset_seconds)`` with slope
-    ``(1 + drift_seconds_per_second)``.  This lets you directly read off the
-    initial offset from the y-intercept and compare drift angles across methods.
-    Calibration anchors (black triangles) are the ground-truth observations the
-    models were fitted to.
+    so each method line starts at ``offset_seconds`` and changes with slope
+    ``drift_seconds_per_second``. This keeps the y-axis in offset space, which
+    makes anchor-vs-model differences visible at millisecond scale.
 
-    Output: ``synced/sync_offset_drift_comparison.png``.
+    Output: ``synced/offset_drift_comparison.png``.
     """
     synced_dir = recording_stage_dir(recording_name, "synced")
     if not synced_dir.is_dir():
@@ -359,83 +591,252 @@ def plot_sync_offset_drift_comparison(
     duration_s = _recording_duration_s(recording_name)
 
     if output_path is None:
-        output_path = synced_dir / "sync_offset_drift_comparison.png"
+        output_path = synced_dir / "offset_drift_comparison.png"
 
     fig, ax = plt.subplots(figsize=(11, 7))
-    draw_sync_model_comparison(ax, sync_infos, duration_s=duration_s, origin_s=origin_s)
+    draw_sync_model_comparison(
+        ax,
+        sync_infos,
+        duration_s=duration_s,
+        origin_s=origin_s,
+        show_anchor_scorebar=True,
+    )
     ax.set_title(
-        f"{recording_name} — sync models: reference vs target time",
+        f"{recording_name} — sync models: offset vs target time",
         fontsize=11,
     )
     fig.tight_layout()
     return save_figure(fig, output_path, dpi=150)
 
 
-def plot_sync_offset_drift_zoomed(
+def plot_sync_zoomed_comparison(
     recording_name: str,
     *,
     zoom_start_s: float | None = None,
     zoom_end_s: float | None = None,
     output_path: Path | None = None,
 ) -> Path:
-    """Zoomed reference vs target time plot around the calibration anchor region.
+    """Three-window synced comparison between SPORSA and Arduino.
 
-    *zoom_start_s* and *zoom_end_s* are in seconds relative to
-    ``target_time_origin_seconds``.  When omitted they are auto-derived from the
-    anchor timestamps ± 60 s buffer.  Falls back to ``[0, 300]`` if no anchors
-    are available.
+    Creates three stacked comparison panels from the synced streams:
+    the first, middle, and final 45 s of the shared recording overlap.
+    ``zoom_start_s`` / ``zoom_end_s`` remain accepted for CLI compatibility,
+    but are ignored by this view.
 
-    Output: ``synced/sync_offset_drift_zoomed.png``.
+    Output: ``synced/zoomed_comparison.png``.
     """
     synced_dir = recording_stage_dir(recording_name, "synced")
     if not synced_dir.is_dir():
         raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
 
-    sync_infos = _load_sync_infos(recording_name)
-    if not any(v is not None for v in sync_infos.values()):
+    sporsa_df = load_sensor_df(synced_dir, "sporsa")
+    arduino_df = load_sensor_df(synced_dir, "arduino")
+    if sporsa_df is None or arduino_df is None:
         raise FileNotFoundError(
-            f"No sync_info.json found for any method under {synced_dir}"
+            f"Both synced sensor CSVs are required under {synced_dir}"
         )
 
-    origin_s = _tgt_origin_s(sync_infos)
-    if origin_s is None:
-        raise ValueError("No target_time_origin_seconds found in any sync_info.")
+    t0_ms = shared_t0_ms(sporsa_df, arduino_df)
+    sporsa_t_s = relative_seconds(
+        sporsa_df["timestamp"].to_numpy(dtype=float),
+        t0_ms,
+    )
+    arduino_t_s = relative_seconds(
+        arduino_df["timestamp"].to_numpy(dtype=float),
+        t0_ms,
+    )
 
-    anchors  = _collect_anchors(sync_infos)
-    buffer_s = 60.0
+    sporsa_acc = acc_norm(sporsa_df)
+    arduino_acc = acc_norm(arduino_df)
+    if sporsa_acc is None or arduino_acc is None:
+        raise ValueError("Both synced streams need accelerometer data for comparison.")
 
-    # Auto-derive zoom window from anchor positions when not explicitly given
-    if zoom_start_s is None or zoom_end_s is None:
-        if anchors:
-            τ_vals = [float(a["t_tgt_s"]) - origin_s for a in anchors]
-            auto_start = max(0.0, min(τ_vals) - buffer_s)
-            auto_end   = max(τ_vals) + buffer_s
-        else:
-            auto_start, auto_end = 0.0, 300.0
-        zoom_start_s = zoom_start_s if zoom_start_s is not None else auto_start
-        zoom_end_s   = zoom_end_s   if zoom_end_s   is not None else auto_end
+    sporsa_valid = sporsa_t_s[np.isfinite(sporsa_t_s)]
+    arduino_valid = arduino_t_s[np.isfinite(arduino_t_s)]
+    if sporsa_valid.size == 0 or arduino_valid.size == 0:
+        raise ValueError("Synced timestamps are empty after filtering.")
+
+    overlap_start_s = max(float(sporsa_valid[0]), float(arduino_valid[0]))
+    overlap_end_s = min(float(sporsa_valid[-1]), float(arduino_valid[-1]))
+    windows = _build_zoom_windows(overlap_start_s, overlap_end_s)
+    if not windows:
+        raise ValueError("No shared synced overlap available for zoomed comparison.")
 
     if output_path is None:
-        output_path = synced_dir / "sync_offset_drift_zoomed.png"
+        output_path = synced_dir / "zoomed_comparison.png"
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    draw_sync_model_comparison(
-        ax, sync_infos,
-        duration_s=zoom_end_s + buffer_s,
-        origin_s=origin_s,
-        anchors=anchors,
+    fig, axes = imu_figure(3, row_height=2.8, width=12.0, sharex=False)
+
+    for ax, (label, window_start_s, window_end_s) in zip(axes, windows):
+        draw_two_streams(
+            ax,
+            sporsa_t_s,
+            sporsa_acc,
+            arduino_t_s,
+            arduino_acc,
+            label_a="sporsa",
+            label_b="arduino",
+            ylabel="|acc| (m/s²)",
+            title=f"{label} [{window_start_s:.0f}–{window_end_s:.0f} s]",
+            lw=0.9,
+            alpha=0.85,
+        )
+        ax.set_xlim(window_start_s, window_end_s)
+        ax.grid(alpha=0.2, lw=0.4)
+
+    axes[-1].set_xlabel("Time from shared synced start (s)")
+    fig.suptitle(
+        f"{recording_name} — synced SPORSA vs Arduino comparison",
+        fontsize=12,
+        y=0.995,
     )
-    ax.set_xlim(zoom_start_s, zoom_end_s)
-    y_lo, y_hi = _sync_model_ylim(
-        sync_infos, (zoom_start_s, zoom_end_s), anchors, origin_s
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
+    return save_figure(fig, output_path, dpi=150)
+
+
+def plot_sync_method_metrics(
+    recording_name: str,
+    *,
+    output_path: Path | None = None,
+) -> Path:
+    """Plot method correlation bars with selected-method highlight and metrics table.
+
+    Output: ``synced/method_metrics_comparison.png``.
+    """
+    synced_dir = recording_stage_dir(recording_name, "synced")
+    if not synced_dir.is_dir():
+        raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
+
+    payload = _load_all_methods_payload(recording_name)
+    rows = _method_metrics_rows(payload)
+    selected_method = str(payload.get("selected_method") or "")
+
+    if output_path is None:
+        output_path = synced_dir / "method_metrics_comparison.png"
+
+    labels = [str(row["label"]) for row in rows]
+    correlations = np.array(
+        [
+            float(row["correlation"]) if np.isfinite(float(row["correlation"])) else np.nan
+            for row in rows
+        ],
+        dtype=float,
     )
-    ax.set_ylim(y_lo, y_hi)
-    ax.set_title(
-        f"{recording_name} — sync models zoomed"
-        f" [{zoom_start_s:.0f}–{zoom_end_s:.0f} s]",
-        fontsize=11,
+    x = np.arange(len(rows))
+    base_colors = [_METHOD_COLORS[str(row["method"])] for row in rows]
+    bar_colors = []
+    bar_edges = []
+    bar_widths = []
+    for row, color in zip(rows, base_colors, strict=False):
+        is_selected = bool(row["selected"])
+        available = bool(row["available"])
+        bar_colors.append(color if available else "#d9d9d9")
+        bar_edges.append("black" if is_selected else "#666666")
+        bar_widths.append(2.0 if is_selected else 0.8)
+
+    fig = plt.figure(figsize=(11.5, 7.8))
+    gs = fig.add_gridspec(2, 1, height_ratios=[3.0, 1.45], hspace=0.16)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_table = fig.add_subplot(gs[1, 0])
+
+    finite_corr = correlations[np.isfinite(correlations)]
+    if finite_corr.size:
+        ymin = min(0.0, float(finite_corr.min()) - 0.05)
+        ymax = max(0.05, float(finite_corr.max()) + 0.08)
+    else:
+        ymin, ymax = 0.0, 1.0
+
+    bars = ax.bar(
+        x,
+        np.nan_to_num(correlations, nan=0.0),
+        color=bar_colors,
+        edgecolor=bar_edges,
+        linewidth=bar_widths,
+        zorder=3,
     )
-    fig.tight_layout()
+
+    for bar, row in zip(bars, rows, strict=False):
+        corr = float(row["correlation"])
+        label = f"{corr:.3f}" if np.isfinite(corr) else "n/a"
+        y = corr if np.isfinite(corr) else 0.0
+        va = "bottom" if y >= 0 else "top"
+        offset = 0.015 if y >= 0 else -0.015
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            y + offset,
+            label,
+            ha="center",
+            va=va,
+            fontsize=9,
+            fontweight="bold" if bool(row["selected"]) else "normal",
+        )
+
+    for idx, row in enumerate(rows):
+        if bool(row["selected"]):
+            ax.scatter(
+                [idx],
+                [max(float(row["correlation"]) if np.isfinite(float(row["correlation"])) else 0.0, ymin) + 0.04],
+                marker="*",
+                s=180,
+                color="#f1c40f",
+                edgecolors="black",
+                linewidths=0.8,
+                zorder=5,
+                clip_on=False,
+            )
+
+    ax.axhline(0.0, color="#666666", lw=0.8, alpha=0.8, zorder=2)
+    ax.set_xticks(x, labels)
+    ax.set_ylim(ymin, ymax)
+    ax.set_ylabel("Correlation score")
+    ax.set_title(f"{recording_name} — sync method correlation comparison", fontsize=11)
+    ax.grid(axis="y", alpha=0.25, lw=0.4, zorder=1)
+
+    for tick, row in zip(ax.get_xticklabels(), rows, strict=False):
+        if bool(row["selected"]):
+            tick.set_fontweight("bold")
+            tick.set_color(_METHOD_COLORS[str(row["method"])])
+
+    table_rows = [
+        [
+            str(row["label"]),
+            _format_metric(float(row["offset_seconds"]), ".3f"),
+            _format_metric(float(row["drift_seconds_per_second"]), ".6f"),
+            _format_metric(float(row["correlation"]), ".3f"),
+        ]
+        for row in rows
+    ]
+
+    ax_table.axis("off")
+    table = ax_table.table(
+        cellText=table_rows,
+        colLabels=["Method", "Offset (s)", "Drift (s/s)", "Correlation"],
+        cellLoc="center",
+        colLoc="center",
+        bbox=[0.02, 0.0, 0.96, 1.0],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.25)
+
+    for (row_idx, col_idx), cell in table.get_celld().items():
+        cell.set_linewidth(0.5)
+        if row_idx == 0:
+            cell.set_facecolor("#f2f2f2")
+            cell.set_text_props(weight="bold")
+            continue
+        data_row = rows[row_idx - 1]
+        if bool(data_row["selected"]):
+            cell.set_facecolor("#fff6cc")
+        elif not bool(data_row["available"]):
+            cell.set_facecolor("#f7f7f7")
+            cell.set_text_props(color="#777777")
+        if col_idx == 0:
+            cell.set_text_props(ha="left")
+
+    selection_suffix = f"selected: {_METHOD_LABELS.get(selected_method, selected_method)}" if selected_method else "no selected method"
+    fig.suptitle(f"{recording_name} — sync method summary ({selection_suffix})", fontsize=12, y=0.985)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     return save_figure(fig, output_path, dpi=150)
 
 
@@ -443,42 +844,60 @@ def plot_sync_offset_drift_zoomed(
 # CLI
 # ---------------------------------------------------------------------------
 
-def main(argv: list[str] | None = None) -> None:
-    argv = list(argv if argv is not None else sys.argv[1:])
+def plot_sync_stage(recording_name: str, output_path: Path | None = None):
+    """Plot the sync stage for a recording."""
+    plot_before_after_imu(recording_name, output_path=output_path)
+    plot_sync_offset_drift_model_comparison(recording_name, output_path=output_path)
+    plot_sync_zoomed_comparison(recording_name, output_path=output_path)
+    plot_sync_method_metrics(recording_name, output_path=output_path)
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m visualization.plot_sync",
         description=(
             "Sync-stage diagnostic plots.\n\n"
-            "  before-after <recording>          — |acc| before/after sync\n"
-            "  offset-drift <recording>          — full offset/drift model comparison\n"
-            "  offset-drift-zoomed <recording>   — zoomed view around calibration anchors"
+            "  <recording>                      — generate all sync plots\n"
+            "  --plot <plot>                    — plot only this plot: before-after, offset-drift-model, zoomed, method-metrics, or all."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "subcommand",
-        choices=["before-after", "offset-drift", "offset-drift-zoomed"],
-    )
-    parser.add_argument("recording_name", help="Recording folder name")
-    parser.add_argument("--zoom-start", type=float, default=None,
-                        help="Zoom window start (s from target origin)")
-    parser.add_argument("--zoom-end", type=float, default=None,
-                        help="Zoom window end (s from target origin)")
 
-    args = parser.parse_args(argv)
+    parser.add_argument("recording_name", nargs="?", help="Recording folder name")
+    parser.add_argument(
+        "--plot", 
+        choices=["before-after", "offset-drift-model", "zoomed", "method-metrics", "all"], 
+        default="all", 
+        help="Plot only this plot: before-after, offset-drift-model, zoomed, method-metrics, or all."
+    )
+    parser.add_argument(
+        "--output",
+        help="Output filename for the plots."
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = list(argv if argv is not None else sys.argv[1:])
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if args.subcommand == "before-after":
-        out = plot_before_after_imu(args.recording_name)
-    elif args.subcommand == "offset-drift":
-        out = plot_sync_offset_drift_comparison(args.recording_name)
-    else:
-        out = plot_sync_offset_drift_zoomed(
-            args.recording_name,
-            zoom_start_s=args.zoom_start,
-            zoom_end_s=args.zoom_end,
-        )
-    print(f"Saved → {out}")
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    recording_name = args.recording_name
+    output_name = args.output
+
+    if args.plot == "all":
+        plot_sync_stage(recording_name, output_path=output_name)
+    elif args.plot == "before-after":
+        plot_before_after_imu(recording_name, output_path=output_name)
+    elif args.plot == "offset-drift-model":
+        plot_sync_offset_drift_model_comparison(recording_name, output_path=output_name)
+    elif args.plot == "zoomed":
+        plot_sync_zoomed_comparison(recording_name, output_path=output_name)
+    elif args.plot == "method-metrics":
+        plot_sync_method_metrics(recording_name, output_path=output_name)
 
 
 if __name__ == "__main__":
