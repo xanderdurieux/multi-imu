@@ -243,6 +243,8 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
 # Selection policy
 # ---------------------------------------------------------------------------
 
+_MAX_DRIFT_PPM = 2_000.0
+
 
 def _multi_anchor_passes(
     q: SyncMethodQuality,
@@ -250,7 +252,7 @@ def _multi_anchor_passes(
     min_cal_span_s: float = 60.0,
     min_cal_score: float = 0.5,
     min_corr: float = 0.2,
-    max_drift_ppm: float = 5_000.0,
+    max_drift_ppm: float = _MAX_DRIFT_PPM,
 ) -> bool:
     if not q.available:
         return False
@@ -293,13 +295,11 @@ def select_best_sync_method(recording_name: str) -> SyncSelectionResult:
     else:
         # Fall through tier order.  Prefer tier priority, but penalise
         # methods with implausible drift or negative correlation.
-        max_plausible_drift_ppm = 5_000.0
-
         def _score(q: SyncMethodQuality) -> float:
             if not q.available:
                 return -999.0
             corr = q.corr_offset_and_drift or -1.0
-            if q.drift_ppm is not None and abs(q.drift_ppm) > max_plausible_drift_ppm:
+            if q.drift_ppm is not None and abs(q.drift_ppm) > _MAX_DRIFT_PPM:
                 corr -= 0.5
             return corr
 

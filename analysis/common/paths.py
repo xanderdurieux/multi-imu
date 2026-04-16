@@ -346,6 +346,11 @@ def cal_segments_config_path() -> Path:
     return configs_root() / "cal_segments_args.json"
 
 
+def calibration_segments_json_path(recording_name: str) -> Path:
+    """Return the path to the calibration-segments JSON for a recording."""
+    return recording_stage_dir(recording_name, "parsed") / "calibration_segments.json"
+
+
 def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
     """Load workflow config data with default-as-base merging.
 

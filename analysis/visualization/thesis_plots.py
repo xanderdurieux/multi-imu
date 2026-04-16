@@ -20,90 +20,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path, read_csv, recording_stage_dir
+from common.paths import recording_stage_dir
+from sync.signals import build_activity_signal
+from sync.stream_io import VECTOR_AXES
 from sync.sync_info_format import flatten_sync_info_dict
-from visualization._utils import filter_valid_plot_xy, strict_vector_norm
+from visualization._utils import (
+    SENSOR_COLORS,
+    filter_valid_plot_xy,
+    load_sensor_df,
+    save_figure,
+)
+from visualization.plot_sync import plot_before_after_imu
 
 log = logging.getLogger(__name__)
-
-_SENSORS = ("sporsa", "arduino")
-_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
-_ACC_COLS = ("ax", "ay", "az")
-
-
-def _load_sensor_df(stage_dir: Path, sensor: str) -> pd.DataFrame | None:
-    csv = stage_dir / f"{sensor}.csv"
-    if not csv.exists():
-        return None
-    df = read_csv(csv)
-    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
-
-
-def _timestamp_series(df: pd.DataFrame) -> pd.Series:
-    return pd.to_numeric(df["timestamp"], errors="coerce")
-
-
-def _timestamps_to_relative_seconds(df: pd.DataFrame) -> np.ndarray:
-    return (_timestamp_series(df).to_numpy(dtype=float) - _timestamp_series(df).min()) / 1000.0
-
-
-def _recording_start_ms(sensor_dfs: dict[str, pd.DataFrame]) -> float:
-    """Earliest finite ``timestamp`` (ms) among streams — one origin for a shared *x* axis."""
-    mins: list[float] = []
-    for df in sensor_dfs.values():
-        ts = _timestamp_series(df).to_numpy(dtype=float)
-        finite = ts[np.isfinite(ts)]
-        if finite.size:
-            mins.append(float(finite.min()))
-    if not mins:
-        raise ValueError("No timestamps in sensor dataframes.")
-    return min(mins)
-
-
-def _relative_seconds_from_t0(df: pd.DataFrame, t0_ms: float) -> np.ndarray:
-    return (_timestamp_series(df).to_numpy(dtype=float) - t0_ms) / 1000.0
-
-
-def _plot_acc_single(ax: plt.Axes, df: pd.DataFrame, *, sensor: str) -> None:
-    cols = [c for c in _ACC_COLS if c in df.columns]
-    if not cols:
-        return
-    color = _SENSOR_COLORS[sensor]
-    t_s = _timestamps_to_relative_seconds(df)
-    norm = strict_vector_norm(df, cols)
-    x, y = filter_valid_plot_xy(t_s, norm)
-    ax.plot(x, y, lw=0.85, color=color, label=sensor, alpha=0.88)
-    ax.set_ylabel("|acc| (m/s²)")
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(alpha=0.2, lw=0.4)
-
-
-def _plot_acc_merged(
-    ax: plt.Axes,
-    sensor_dfs: dict[str, pd.DataFrame]
-) -> None:
-    """Plot |acc| on one axis; synced streams share ``t0`` = min timestamp across both."""
-
-    if len(sensor_dfs) < 2:
-        raise ValueError("Need at least two sensors to plot merged acc.")
-
-    t0_ms = _recording_start_ms(sensor_dfs)
-    for sensor, df in sensor_dfs.items():
-        cols = [c for c in _ACC_COLS if c in df.columns]
-        if not cols:
-            continue
-        color = _SENSOR_COLORS.get(sensor)
-        t_s = _relative_seconds_from_t0(df, t0_ms)
-        norm = strict_vector_norm(df, cols)
-        x, y = filter_valid_plot_xy(t_s, norm)
-        ax.plot(x, y, lw=0.85, color=color, label=sensor, alpha=0.88)
-    ax.set_xlabel("Time from recording start (s)")
-    ax.set_ylabel("|acc| (m/s²)")
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(alpha=0.2, lw=0.4)
 
 
 def plot_parsed_vs_synced_imu(
@@ -111,76 +40,33 @@ def plot_parsed_vs_synced_imu(
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Accelerometer |acc|: parsed Sporsa, parsed Arduino, then merged synced pair.
+    """Accelerometer |acc|: parsed sensors separately, then merged synced pair.
 
-    *x* is seconds from each stream’s first ``timestamp`` in the before panels; the merged panel uses one
-    origin (earliest ``timestamp`` across both synced CSVs) so both traces share the same relative time.
+    Thin wrapper around :func:`visualization.plot_sync.plot_before_after_imu`
+    kept for backwards compatibility.  New code should call that function directly.
     """
-    parsed_dir = recording_stage_dir(recording_name, "parsed")
-    if not parsed_dir.is_dir():
-        raise FileNotFoundError(f"Parsed directory not found: {parsed_dir}")
-
     synced_dir = recording_stage_dir(recording_name, "synced")
-    if not synced_dir.is_dir():
-        raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
-
-    parsed = {s: df for s in _SENSORS if (df := _load_sensor_df(parsed_dir, s)) is not None}
-    synced = {s: df for s in _SENSORS if (df := _load_sensor_df(synced_dir, s)) is not None}
-
-    if len(parsed) < 2:
-        raise FileNotFoundError(f"Need sporsa and arduino under parsed: {parsed_dir}")
-    if len(synced) < 2:
-        raise FileNotFoundError(f"Need sporsa and arduino under synced: {synced_dir}")
-
     if output_path is None:
         output_path = synced_dir / "thesis_parsed_vs_synced_acc.png"
-
-    fig = plt.figure(figsize=(12, 7.0))
-    gs_outer = fig.add_gridspec(2, 1, height_ratios=[2, 1])
-    gs_before = gs_outer[0].subgridspec(2, 1, hspace=0.0)
-
-    ax_sp = fig.add_subplot(gs_before[0, 0])
-    ax_ar = fig.add_subplot(gs_before[1, 0], sharex=ax_sp)
-    ax_merged = fig.add_subplot(gs_outer[1, 0])
-
-    ax_sp.set_title("Before sync", fontsize=10, pad=4)
-    ax_sp.tick_params(axis="x", which="both", labelbottom=False, bottom=False)
-    ax_merged.set_title("After sync", fontsize=10, pad=4)
-
-    _plot_acc_single(ax_sp, parsed["sporsa"], sensor="sporsa")
-    _plot_acc_single(ax_ar, parsed["arduino"], sensor="arduino")
-    _plot_acc_merged(ax_merged, synced)
-
-    fig.suptitle(
-        f"{recording_name} — accelerometer: before (separate) vs after (merged)",
-        fontsize=14,
-        y=0.98,
-    )
-    fig.subplots_adjust(left=0.05, right=0.992, top=0.91, bottom=0.055)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight", pad_inches=0.02)
-    plt.close(fig)
-    log.info("Thesis plot written: %s", project_relative_path(output_path))
-    return output_path
+    return plot_before_after_imu(recording_name, output_path=output_path)
 
 
 def _build_activity_signal(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """Build standardized Δ||acc|| activity signal per §4.3.3 of the thesis.
 
+    Delegates to :func:`sync.signals.build_activity_signal` so the
+    z-scored diff-of-norms logic is defined in one place.
+
     Returns ``(timestamps_s, activity)`` where ``timestamps_s`` is absolute time
     in seconds derived from the ``timestamp`` column (milliseconds).
     """
     ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
-    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
-    if not acc_cols:
-        return ts / 1000.0, np.zeros(len(ts))
-    arr = df[acc_cols].to_numpy(dtype=float)
-    norm = np.sqrt(np.nansum(arr ** 2, axis=1))
-    diff = np.diff(norm, prepend=norm[0])
-    mu = float(np.nanmean(diff))
-    sigma = float(np.nanstd(diff))
-    if sigma < 1e-9:
-        return ts / 1000.0, np.zeros_like(diff)
-    return ts / 1000.0, (diff - mu) / sigma
+    activity, _mode = build_activity_signal(
+        df,
+        vector_axes=VECTOR_AXES,
+        signal_mode="acc_norm_diff",
+    )
+    return ts / 1000.0, activity
 
 
 def plot_sync_method_hierarchy(
@@ -313,10 +199,7 @@ def plot_sync_method_hierarchy(
               framealpha=0.8, handlelength=1.2, handleheight=1.0)
 
     fig.subplots_adjust(left=0.01, right=0.99, top=0.93, bottom=0.12)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Thesis plot written: %s", output_path)
-    return output_path
+    return save_figure(fig, output_path, dpi=150)
 
 
 def plot_sync_example_result(
@@ -353,10 +236,10 @@ def plot_sync_example_result(
     if not sync_json.exists():
         raise FileNotFoundError(f"sync_info.json not found: {sync_json}")
 
-    sporsa_parsed = _load_sensor_df(parsed_dir, "sporsa")
-    arduino_parsed = _load_sensor_df(parsed_dir, "arduino")
-    sporsa_synced = _load_sensor_df(synced_dir, "sporsa")
-    arduino_synced = _load_sensor_df(synced_dir, "arduino")
+    sporsa_parsed = load_sensor_df(parsed_dir, "sporsa")
+    arduino_parsed = load_sensor_df(parsed_dir, "arduino")
+    sporsa_synced = load_sensor_df(synced_dir, "sporsa")
+    arduino_synced = load_sensor_df(synced_dir, "arduino")
 
     for name, df in [("parsed/sporsa", sporsa_parsed), ("parsed/arduino", arduino_parsed),
                      ("synced/sporsa", sporsa_synced), ("synced/arduino", arduino_synced)]:
@@ -429,8 +312,8 @@ def plot_sync_example_result(
     lw = 0.75
     lw_full = 0.5      # lighter weight for the full-recording panel
     alpha = 0.82
-    sp_color = _SENSOR_COLORS["sporsa"]
-    ar_color = _SENSOR_COLORS["arduino"]
+    sp_color = SENSOR_COLORS["sporsa"]
+    ar_color = SENSOR_COLORS["arduino"]
     clip = 5.0          # clip extreme activity values for readability
     zoom_s = 120.0      # first N seconds for panels 1 & 2
     tail_s = 100.0      # last N seconds for panel 3
@@ -519,10 +402,7 @@ def plot_sync_example_result(
 
     fig.suptitle(f"{recording_name} — Example synchronization result", fontsize=12, y=1.005)
     fig.tight_layout(h_pad=1.2)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Thesis plot written: %s", project_relative_path(output_path))
-    return output_path
+    return save_figure(fig, output_path, dpi=150)
 
 
 def main(argv: list[str] | None = None) -> None:

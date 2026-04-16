@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.paths import list_csv_files, read_csv, recording_dir, recording_stage_dir
+from common.paths import list_csv_files, read_csv, recording_stage_dir
 
 
 def _interval_summary(interval_ms: pd.Series) -> dict[str, Any]:
@@ -235,7 +235,7 @@ def compute_recording_stats(recording_name: str, stage: str = "parsed") -> Recor
 
 def write_recording_stats(recording_name: str, stage: str = "parsed") -> Path:
     stats = compute_recording_stats(recording_name, stage)
-    path = recording_dir(recording_name) / "session_stats.json"
+    path = recording_stage_dir(recording_name, stage) / "session_stats.json"
     path.write_text(json.dumps(asdict(stats), indent=2, sort_keys=True), encoding="utf-8")
     return path
 

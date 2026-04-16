@@ -16,13 +16,12 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from common.paths import project_relative_path
+from visualization._utils import SENSOR_COLORS, SENSORS, save_figure
 
 log = logging.getLogger(__name__)
 
 _DPI = 150
 _LABEL_CMAP = "tab10"
-_SENSORS = ("sporsa", "arduino")
-_SENSOR_COLORS = {"sporsa": "#2980b9", "arduino": "#e67e22"}
 _QUALITY_COLORS = {"good": "#2ecc71", "marginal": "#f39c12", "poor": "#e74c3c", "": "#95a5a6"}
 _ALL_SYNC_METHODS = ["multi_anchor", "one_anchor_adaptive", "one_anchor_prior", "signal_only"]
 _METHOD_COLORS = {
@@ -110,13 +109,6 @@ def _short_recording(name: str) -> str:
     return parts[-1] if parts else name
 
 
-def _save(fig: plt.Figure, path: Path) -> Path:
-    fig.savefig(path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(path))
-    return path
-
-
 def _labeled_only(df: pd.DataFrame) -> pd.DataFrame:
     if "scenario_label" not in df.columns:
         return pd.DataFrame()
@@ -170,10 +162,7 @@ def plot_label_distribution(df: pd.DataFrame, output_dir: Path) -> Path:
     ax.spines["right"].set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def _violin_by_label(
@@ -259,13 +248,8 @@ def _violin_by_label(
         flat_axes[idx].set_visible(False)
 
     fig.suptitle(title, fontsize=11, y=0.99)
-    # Reserve a little room for the title and tighten panel spacing to reduce
-    # unused white margins in the exported PNG.
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97), pad=0.45, w_pad=0.35, h_pad=0.45)
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight", pad_inches=0.03)
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(output_path))
-    return output_path
+    return save_figure(fig, output_path, dpi=_DPI)
 
 
 def plot_feature_distributions_by_label(
@@ -335,10 +319,7 @@ def plot_feature_correlation(
     ax.set_title(f"Feature correlation (top {n} by variance)", fontsize=11)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_pca_by_label(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -392,10 +373,7 @@ def plot_pca_by_label(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.spines["right"].set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_quality_distribution(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -439,10 +417,7 @@ def plot_quality_distribution(df: pd.DataFrame, output_dir: Path) -> Path | None
     ax.spines["right"].set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_section_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -500,10 +475,7 @@ def plot_section_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.spines["right"].set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +543,7 @@ def plot_calibration_quality_overview(df: pd.DataFrame, output_dir: Path) -> Pat
     x = np.arange(n)
     width = 0.35
     fig, ax = plt.subplots(figsize=(max(8, n * 0.55 + 2), 4))
-    for i, sensor in enumerate(_SENSORS):
+    for i, sensor in enumerate(SENSORS):
         col = f"{sensor}_quality"
         if col not in df.columns:
             continue
@@ -584,7 +556,7 @@ def plot_calibration_quality_overview(df: pd.DataFrame, output_dir: Path) -> Pat
     ax.set_yticks([])
     ax.set_title("Calibration quality per section")
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_gravity_residuals(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -598,13 +570,13 @@ def plot_gravity_residuals(df: pd.DataFrame, output_dir: Path) -> Path | None:
     x = np.arange(n)
     width = 0.35
     fig, ax = plt.subplots(figsize=(max(8, n * 0.55 + 2), 4))
-    for i, sensor in enumerate(_SENSORS):
+    for i, sensor in enumerate(SENSORS):
         col = f"{sensor}_gravity_residual_ms2"
         if col not in df.columns:
             continue
         vals = pd.to_numeric(df[col], errors="coerce").fillna(0.0).tolist()
         offset = (i - 0.5) * width
-        ax.bar(x + offset, vals, width, color=_SENSOR_COLORS[sensor], label=sensor, edgecolor="white", linewidth=0.5)
+        ax.bar(x + offset, vals, width, color=SENSOR_COLORS[sensor], label=sensor, edgecolor="white", linewidth=0.5)
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels([_short_section(s) for s in sections], rotation=45, ha="right", fontsize=7)
@@ -613,7 +585,7 @@ def plot_gravity_residuals(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.legend(fontsize=8, framealpha=0.8)
     ax.grid(axis="y", alpha=0.3, lw=0.5)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sensor_biases(df: pd.DataFrame, output_dir: Path) -> list[Path]:
@@ -629,8 +601,8 @@ def plot_sensor_biases(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     for bias_type in ("acc_bias", "gyro_bias"):
         ylabel = "Acc bias (m/s²)" if bias_type == "acc_bias" else "Gyro bias (rad/s)"
         out_path = output_dir / f"cal_{bias_type}.png"
-        fig, axes = plt.subplots(1, len(_SENSORS), figsize=(max(8, n * 0.45 + 2) * len(_SENSORS) / 2, 4), squeeze=False)
-        for col_idx, sensor in enumerate(_SENSORS):
+        fig, axes = plt.subplots(1, len(SENSORS), figsize=(max(8, n * 0.45 + 2) * len(SENSORS) / 2, 4), squeeze=False)
+        for col_idx, sensor in enumerate(SENSORS):
             ax = axes[0][col_idx]
             width = 0.25
             offsets = [-width, 0, width]
@@ -671,7 +643,7 @@ def plot_sensor_biases(df: pd.DataFrame, output_dir: Path) -> list[Path]:
             ax.grid(axis="y", alpha=0.3, lw=0.5)
         fig.suptitle(f"{bias_type.replace('_', ' ').title()} across sections", fontsize=11)
         fig.tight_layout(rect=(0, 0, 1, 0.96))
-        paths.append(_save(fig, out_path))
+        paths.append(save_figure(fig, out_path, dpi=_DPI))
     return paths
 
 
@@ -683,18 +655,18 @@ def plot_forward_confidence(df: pd.DataFrame, output_dir: Path) -> Path | None:
     n = len(sections)
     if n == 0:
         return None
-    if not any(f"{s}_forward_confidence" in df.columns for s in _SENSORS):
+    if not any(f"{s}_forward_confidence" in df.columns for s in SENSORS):
         return None
     x = np.arange(n)
     width = 0.35
     fig, ax = plt.subplots(figsize=(max(8, n * 0.55 + 2), 4))
-    for i, sensor in enumerate(_SENSORS):
+    for i, sensor in enumerate(SENSORS):
         col = f"{sensor}_forward_confidence"
         if col not in df.columns:
             continue
         vals = pd.to_numeric(df[col], errors="coerce").fillna(0.0).tolist()
         offset = (i - 0.5) * width
-        ax.bar(x + offset, vals, width, color=_SENSOR_COLORS[sensor], label=sensor, edgecolor="white", linewidth=0.5)
+        ax.bar(x + offset, vals, width, color=SENSOR_COLORS[sensor], label=sensor, edgecolor="white", linewidth=0.5)
     ax.axhline(0.3, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels([_short_section(s) for s in sections], rotation=45, ha="right", fontsize=7)
@@ -704,7 +676,7 @@ def plot_forward_confidence(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.legend(fontsize=8, framealpha=0.8)
     ax.grid(axis="y", alpha=0.3, lw=0.5)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_static_calibration_reference(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -759,7 +731,7 @@ def plot_static_calibration_reference(df: pd.DataFrame, output_dir: Path) -> Pat
 
     fig.suptitle("Static calibration reference (Arduino)", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_method_selection(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -781,7 +753,7 @@ def plot_sync_method_selection(df: pd.DataFrame, output_dir: Path) -> Path | Non
     ax.set_yticks([])
     ax.set_title("Selected sync method per recording")
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_method_availability(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -808,7 +780,7 @@ def plot_sync_method_availability(df: pd.DataFrame, output_dir: Path) -> Path | 
     ax.set_yticklabels(method_names, fontsize=9)
     ax.set_title("Sync method availability per recording")
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_correlation_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -861,7 +833,7 @@ def plot_sync_correlation_overview(df: pd.DataFrame, output_dir: Path) -> Path |
             framealpha=0.8,
         )
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_drift_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -899,7 +871,7 @@ def plot_sync_drift_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
         ax.set_title("Selected sync drift per recording")
         ax.grid(axis="y", alpha=0.3, lw=0.5)
         fig.tight_layout()
-        return _save(fig, out_path)
+        return save_figure(fig, out_path, dpi=_DPI)
 
     x = np.arange(n)
     width = 0.8 / len(available_methods)
@@ -932,7 +904,7 @@ def plot_sync_drift_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.grid(axis="y", alpha=0.3, lw=0.5)
     ax.legend(handles=legend_handles, title="Method", loc="upper right", fontsize=8, title_fontsize=8, framealpha=0.8)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -984,7 +956,7 @@ def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) ->
     ax.set_xticklabels([_short_recording(r) for r in recordings], rotation=45, ha="right", fontsize=8)
 
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_offset_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -1015,7 +987,7 @@ def plot_sync_offset_overview(df: pd.DataFrame, output_dir: Path) -> Path | None
         ax.set_ylim(min_v - pad, max_v + pad)
     ax.grid(axis="y", alpha=0.3, lw=0.5)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def run_calibration_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
@@ -1084,7 +1056,7 @@ def plot_sync_session_corr(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.axhline(0.2, color="orange", lw=0.8, ls=":")
     ax.grid(axis="y", alpha=0.3, lw=0.5)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_method_heatmap(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -1128,7 +1100,7 @@ def plot_sync_method_heatmap(df: pd.DataFrame, output_dir: Path) -> Path | None:
     plt.colorbar(im, ax=ax, label="Corr (offset+drift)", shrink=0.8)
     ax.set_title("Sync method correlation heatmap (box = selected)")
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_session_strip(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -1178,7 +1150,7 @@ def plot_sync_session_strip(df: pd.DataFrame, output_dir: Path) -> Path | None:
                bbox_to_anchor=(0.5, 1.0))
     fig.suptitle("Sync quality by session (color = selected method)", fontsize=11, y=1.04)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def plot_sync_session_drift(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -1211,7 +1183,7 @@ def plot_sync_session_drift(df: pd.DataFrame, output_dir: Path) -> Path | None:
     ax.set_title("Sync drift by session")
     ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3, lw=0.5)
     fig.tight_layout()
-    return _save(fig, out_path)
+    return save_figure(fig, out_path, dpi=_DPI)
 
 
 def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:

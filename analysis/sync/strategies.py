@@ -88,21 +88,23 @@ def estimate_multi_anchor(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
+    recording_name: str = "",
     reference_name: str = "",
     target_name: str = "",
     reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
-    sda_fallback_max_lag_s: float = 120.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Fit offset and drift from all matched calibration anchors."""
     extraction = extract_calibration_anchors(
         ref_df,
         tgt_df,
+        recording_name=recording_name,
         reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
         sample_rate_hz=sample_rate_hz,
         search_seconds=anchor_search_seconds,
-        sda_fallback_max_lag_s=sda_fallback_max_lag_s,
     )
     anchors = _require_anchor_count(extraction, min_count=2, method="multi_anchor")
 
@@ -139,21 +141,23 @@ def estimate_one_anchor_adaptive(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
+    recording_name: str = "",
     reference_name: str = "",
     target_name: str = "",
     reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
-    sda_fallback_max_lag_s: float = 120.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Use the first anchor for offset, then refine causally from signal windows."""
     extraction = extract_calibration_anchors(
         ref_df,
         tgt_df,
+        recording_name=recording_name,
         reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
         sample_rate_hz=sample_rate_hz,
         search_seconds=anchor_search_seconds,
-        sda_fallback_max_lag_s=sda_fallback_max_lag_s,
     )
     anchors = _require_anchor_count(extraction, min_count=1, method="one_anchor_adaptive")
     opening_anchor = anchors[0]
@@ -233,22 +237,24 @@ def estimate_one_anchor_prior(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
+    recording_name: str = "",
     reference_name: str = "",
     target_name: str = "",
     reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     drift_ppm: float = DEFAULT_DRIFT_PPM,
     anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
-    sda_fallback_max_lag_s: float = 120.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Use the first anchor for offset and a fixed drift prior afterwards."""
     extraction = extract_calibration_anchors(
         ref_df,
         tgt_df,
+        recording_name=recording_name,
         reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
         sample_rate_hz=sample_rate_hz,
         search_seconds=anchor_search_seconds,
-        sda_fallback_max_lag_s=sda_fallback_max_lag_s,
     )
     anchors = _require_anchor_count(extraction, min_count=1, method="one_anchor_prior")
     opening_anchor = anchors[0]

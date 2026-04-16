@@ -14,26 +14,18 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 from common.paths import read_csv, sensor_csv
-from visualization._utils import filter_valid_plot_xy, strict_vector_norm
+from visualization._utils import (
+    filter_valid_plot_xy,
+    prepare_sensor_df,
+    save_figure,
+    strict_vector_norm,
+    timestamps_to_relative_seconds,
+)
 
 log = logging.getLogger(__name__)
-
-def _ts_seconds(df: pd.DataFrame) -> np.ndarray:
-    ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
-    if ts.size > 0:
-        finite = ts[np.isfinite(ts)]
-        t0 = finite[0] if finite.size > 0 else 0.0
-        ts = (ts - t0) / 1000.0  # relative seconds
-    return ts
-
-
-def _prepare_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep plotting rows aligned on valid, monotonic timestamps."""
-    return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
 
 def plot_sensor_data(
@@ -51,9 +43,9 @@ def plot_sensor_data(
     for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = _prepare_sensor_df(df)
+    df = prepare_sensor_df(df)
 
-    ts = _ts_seconds(df)
+    ts = timestamps_to_relative_seconds(df["timestamp"])
 
     if output_path is None:
         stem = csv_path.stem
@@ -130,10 +122,7 @@ def plot_sensor_data(
         fig.suptitle(f"{csv_path.parent.name}/{csv_path.name}")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=120)
-    plt.close(fig)
-    log.debug("Saved sensor plot → %s", output_path)
-    return output_path
+    return save_figure(fig, output_path)
 
 
 def main(argv: list[str] | None = None) -> None:

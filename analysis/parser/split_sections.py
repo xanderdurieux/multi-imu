@@ -220,7 +220,6 @@ def sync_sections(
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
     sample_rate_hz: float = 100.0,
-    coarse_max_lag_s: float = 10.0,
     cal_search_s: float = 3.0,
     plot: bool = True,
 ) -> None:
@@ -240,9 +239,6 @@ def sync_sections(
         Sensor whose timestamps are corrected.
     sample_rate_hz:
         Sampling rate for peak detection and cross-correlation.
-    coarse_max_lag_s:
-        Max lag (seconds) for the coarse SDA search.  Sections are already
-        roughly synced, so a small value (e.g. 10 s) is sufficient.
     cal_search_s:
         Search window (±s) for each calibration window alignment.
     plot:
@@ -274,10 +270,11 @@ def sync_sections(
             sync_json_raw, synced_csv_raw, _ = synchronize_from_calibration(
                 reference_csv=ref_csv,
                 target_csv=tgt_csv,
+                recording_name=recording_name,
                 output_dir=tmp_dir,
                 reference_sensor=reference_sensor,
+                target_sensor=target_sensor,
                 sample_rate_hz=sample_rate_hz,
-                coarse_max_lag_s=coarse_max_lag_s,
                 cal_search_s=cal_search_s,
             )
 

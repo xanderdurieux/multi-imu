@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 
-from common.paths import cal_segments_config_path, read_json_file
+from common.paths import cal_segments_config_path, calibration_segments_json_path, read_json_file
 from common.signals import smooth_moving_average, vector_norm
 
 _NOMINAL_GRAVITY_MS2 = 9.81
@@ -706,6 +706,32 @@ def find_calibration_segments(
     params = cal_segment_kwargs_for_sensor(sensor)
     params.update(overrides)
     return _find_calibration_segments_impl(df, params)
+
+
+def load_calibration_segments_from_json(
+    recording_name: str,
+    sensor: str,
+) -> list[CalibrationSegment]:
+    """Load pre-detected calibration segments for *sensor* from the recording JSON.
+
+    Reads ``data/recordings/<recording_name>/parsed/calibration_segments.json``
+    and converts the stored segment records back to :class:`CalibrationSegment`
+    objects.  Raises :exc:`FileNotFoundError` if the JSON is missing and
+    :exc:`KeyError` if the sensor block is absent.
+    """
+    path = calibration_segments_json_path(recording_name)
+    data = read_json_file(path)
+    sensor_data = data["sensors"][sensor]
+    segments: list[CalibrationSegment] = []
+    for rec in sensor_data.get("segments", []):
+        segments.append(
+            CalibrationSegment(
+                start_idx=int(rec["start_idx"]),
+                end_idx=int(rec["end_idx"]),
+                peak_indices=[int(p) for p in rec["peak_indices"]],
+            )
+        )
+    return segments
 
 
 def _find_calibration_segments_impl(

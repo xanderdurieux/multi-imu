@@ -17,24 +17,30 @@ plot_calibration_stage
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path, read_csv, resolve_data_dir
-from visualization._utils import filter_valid_plot_xy, strict_vector_norm, timestamps_to_relative_seconds
+from common.paths import read_csv, resolve_data_dir
+from visualization._utils import (
+    ACC_COLS,
+    GYRO_COLS,
+    SENSOR_COLORS,
+    SENSORS,
+    filter_valid_plot_xy,
+    load_json,
+    save_figure,
+    strict_vector_norm,
+    timestamps_to_relative_seconds,
+)
 
 log = logging.getLogger(__name__)
 
-_SENSORS = ("sporsa", "arduino")
-_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 _RAW_ALPHA = 0.55
 _CAL_ALPHA = 0.90
 _G = 9.81
@@ -55,17 +61,6 @@ def _resolve_section_dir(target: str | Path) -> Path:
     )
 
 
-def _load_calibration_json(section_dir: Path) -> dict:
-    cal_json = section_dir / "calibrated" / "calibration.json"
-    if not cal_json.exists():
-        return {}
-    return json.loads(cal_json.read_text(encoding="utf-8"))
-
-
-def _ts_s(df: pd.DataFrame) -> np.ndarray:
-    return timestamps_to_relative_seconds(df["timestamp"])
-
-
 # ---------------------------------------------------------------------------
 # Plot 1: Raw vs calibrated — individual axes + norms
 # ---------------------------------------------------------------------------
@@ -82,7 +77,7 @@ def plot_calibration_raw_vs_calibrated(
     ``calibrated/<sensor>_calibration_comparison.png``
     ``calibrated/<sensor>_axes_comparison.png``
     """
-    selected = sensors or list(_SENSORS)
+    selected = sensors or list(SENSORS)
     out_paths: list[Path] = []
     cal_dir = section_dir / "calibrated"
 
@@ -98,9 +93,9 @@ def plot_calibration_raw_vs_calibrated(
         if "timestamp" not in df_raw.columns or "timestamp" not in df_cal.columns:
             continue
 
-        ts_raw = _ts_s(df_raw)
-        ts_cal = _ts_s(df_cal)
-        color = _SENSOR_COLORS.get(sensor, "steelblue")
+        ts_raw = timestamps_to_relative_seconds(df_raw["timestamp"])
+        ts_cal = timestamps_to_relative_seconds(df_cal["timestamp"])
+        color = SENSOR_COLORS.get(sensor, "steelblue")
 
         # --- Norm comparison ---
         acc_raw = strict_vector_norm(df_raw, [c for c in ("ax", "ay", "az") if c in df_raw.columns])
@@ -128,10 +123,7 @@ def plot_calibration_raw_vs_calibrated(
         fig.suptitle(f"{section_dir.name} / {sensor} — calibration effect (norms)")
         fig.tight_layout()
         out_a = cal_dir / f"{sensor}_calibration_comparison.png"
-        fig.savefig(out_a, dpi=120)
-        plt.close(fig)
-        out_paths.append(out_a)
-        log.info("Plot written: %s", project_relative_path(out_a))
+        out_paths.append(save_figure(fig, out_a))
 
         # --- Per-axis comparison ---
         acc_axes = [c for c in ("ax", "ay", "az") if c in df_raw.columns and c in df_cal.columns]
@@ -171,10 +163,7 @@ def plot_calibration_raw_vs_calibrated(
         fig.suptitle(f"{section_dir.name} / {sensor} — per-axis calibration effect", y=1.01)
         fig.tight_layout()
         out_b = cal_dir / f"{sensor}_axes_comparison.png"
-        fig.savefig(out_b, dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        out_paths.append(out_b)
-        log.info("Plot written: %s", project_relative_path(out_b))
+        out_paths.append(save_figure(fig, out_b))
 
     return out_paths
 
@@ -194,12 +183,12 @@ def plot_calibration_parameters(
     ------
     ``calibrated/calibration_parameters.png``
     """
-    cal_data = _load_calibration_json(section_dir)
+    cal_data = load_json(section_dir / "calibrated" / "calibration.json") or {}
     if not cal_data:
         log.warning("No calibration.json found in %s", section_dir.name)
         return None
 
-    selected = sensors or list(_SENSORS)
+    selected = sensors or list(SENSORS)
     intrinsics_block = cal_data.get("intrinsics", {})
     alignment_block = cal_data.get("alignment", {})
     sensors_present = [s for s in selected if s in intrinsics_block or s in alignment_block]
@@ -225,7 +214,7 @@ def plot_calibration_parameters(
         grav_est = aln.get("gravity_estimate", [0, 0, _G])
         yaw_src = aln.get("yaw_source", "?")
         yaw_conf = aln.get("yaw_confidence", 0.0)
-        color = _SENSOR_COLORS.get(sensor, "steelblue")
+        color = SENSOR_COLORS.get(sensor, "steelblue")
 
         # Row 0: gyro bias
         ax_gyro = axes_grid[0, s_idx]
@@ -274,10 +263,7 @@ def plot_calibration_parameters(
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     out_path = section_dir / "calibrated" / "calibration_parameters.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Plot written: %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +281,7 @@ def plot_calibration_world_frame(
     ------
     ``calibrated/<sensor>_world_frame.png``
     """
-    selected = sensors or list(_SENSORS)
+    selected = sensors or list(SENSORS)
     out_paths: list[Path] = []
     cal_dir = section_dir / "calibrated"
 
@@ -313,7 +299,7 @@ def plot_calibration_world_frame(
             log.info("No world-frame columns in %s/%s — skipping", section_dir.name, sensor)
             continue
 
-        ts = _ts_s(df)
+        ts = timestamps_to_relative_seconds(df["timestamp"])
         axis_colors = {
             "ax_world": "#d62728", "ay_world": "#2ca02c", "az_world": "#1f77b4",
             "gx_world": "#9467bd", "gy_world": "#8c564b", "gz_world": "#e377c2",
@@ -352,10 +338,7 @@ def plot_calibration_world_frame(
         fig.suptitle(f"{section_dir.name} / {sensor} — world-frame signals after calibration")
         fig.tight_layout()
         out_path = cal_dir / f"{sensor}_world_frame.png"
-        fig.savefig(out_path, dpi=120)
-        plt.close(fig)
-        out_paths.append(out_path)
-        log.info("Plot written: %s", project_relative_path(out_path))
+        out_paths.append(save_figure(fig, out_path))
 
     return out_paths
 
@@ -382,12 +365,12 @@ def plot_calibration_protocol(
     ------
     ``calibrated/<sensor>_protocol.png``
     """
-    cal_data = _load_calibration_json(section_dir)
+    cal_data = load_json(section_dir / "calibrated" / "calibration.json") or {}
     if not cal_data:
         log.warning("No calibration.json found in %s — skipping protocol plot", section_dir.name)
         return []
 
-    selected = sensors or list(_SENSORS)
+    selected = sensors or list(SENSORS)
     out_paths: list[Path] = []
     cal_dir = section_dir / "calibrated"
 
@@ -408,13 +391,13 @@ def plot_calibration_protocol(
         t0 = ts[0]
         ts_s = (ts - t0) / 1000.0
 
-        acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+        acc_cols = [c for c in ACC_COLS if c in df.columns]
         if not acc_cols:
             continue
-        acc_norm = np.sqrt(np.nansum(df[acc_cols].to_numpy(dtype=float) ** 2, axis=1))
+        acc_norm = strict_vector_norm(df, acc_cols)
 
         fig, ax = plt.subplots(figsize=(15, 4))
-        color = _SENSOR_COLORS.get(sensor, "steelblue")
+        color = SENSOR_COLORS.get(sensor, "steelblue")
         ax.plot(ts_s, acc_norm, lw=0.7, color=color, alpha=0.8, label="|acc|")
         ax.axhline(_G, color="gray", lw=0.8, ls="--", label=f"g = {_G} m/s²")
 
@@ -473,10 +456,7 @@ def plot_calibration_protocol(
 
         fig.tight_layout()
         out_path = cal_dir / f"{sensor}_protocol.png"
-        fig.savefig(out_path, dpi=120)
-        plt.close(fig)
-        out_paths.append(out_path)
-        log.info("Plot written: %s", project_relative_path(out_path))
+        out_paths.append(save_figure(fig, out_path))
 
     return out_paths
 
@@ -542,7 +522,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--sensor",
         action="append",
-        choices=list(_SENSORS),
+        choices=list(SENSORS),
         dest="sensors",
         help="Limit to one or more sensors (repeat option).",
     )

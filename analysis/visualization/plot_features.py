@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path, read_csv, resolve_data_dir
-from visualization._utils import filter_valid_plot_xy
+from common.paths import read_csv, resolve_data_dir
+from visualization._utils import filter_valid_plot_xy, save_figure
 
 log = logging.getLogger(__name__)
 
@@ -114,10 +114,7 @@ def plot_features_stage(
     fig.tight_layout()
 
     out_path = features_csv.parent / "features_overview.png"
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    log.info("Plot written: %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path)
 
 
 def main(argv: list[str] | None = None) -> None:

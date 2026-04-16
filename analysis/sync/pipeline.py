@@ -118,9 +118,11 @@ def _run_method(
 
     model, meta = strategy(
         ref_df, tgt_df,
+        recording_name=recording_name,
         reference_name=str(ref_csv),
         target_name=str(tgt_csv),
         reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
     )
 
     aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
@@ -308,10 +310,11 @@ def synchronize_from_calibration(
     reference_csv: Path | str,
     target_csv: Path | str,
     *,
+    recording_name: str,
     output_dir: Path | str,
     reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
     sample_rate_hz: float = 100.0,
-    coarse_max_lag_s: float = 120.0,
     cal_search_s: float = 5.0,
 ) -> tuple[Path, Path, Path | None]:
     """Calibration-based sync writing outputs to output_dir.
@@ -332,12 +335,13 @@ def synchronize_from_calibration(
 
     model, meta = estimate_multi_anchor(
         ref_df, tgt_df,
+        recording_name=recording_name,
         reference_name=str(ref_path),
         target_name=str(tgt_path),
         reference_sensor=reference_sensor,
+        target_sensor=target_sensor,
         sample_rate_hz=sample_rate_hz,
         anchor_search_seconds=cal_search_s,
-        sda_fallback_max_lag_s=coarse_max_lag_s,
     )
 
     correlation = compute_sync_correlations(

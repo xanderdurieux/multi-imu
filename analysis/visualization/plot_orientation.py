@@ -8,7 +8,6 @@ Generates:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 
@@ -18,14 +17,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path, read_csv, resolve_data_dir
-from visualization._utils import filter_valid_plot_xy, timestamps_to_relative_seconds
+from common.paths import read_csv, resolve_data_dir
+from visualization._utils import (
+    SENSOR_COLORS,
+    SENSORS,
+    filter_valid_plot_xy,
+    load_json,
+    save_figure,
+    timestamps_to_relative_seconds,
+)
 
 log = logging.getLogger(__name__)
 
-_SENSORS = ("sporsa", "arduino")
 _ANGLES = ("yaw_deg", "pitch_deg", "roll_deg")
-_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 _METHOD_COLORS = {"madgwick": "#2ca02c", "complementary": "#d62728"}
 
 
@@ -64,19 +68,9 @@ def _resolve_orientation_dir(target: str | Path) -> Path:
     raise FileNotFoundError(f"No orientation directory found for: {target}")
 
 
-def _load_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        log.warning("Could not read %s: %s", path, exc)
-        return {}
-
-
 def _load_selected_sensor_csvs(orient_dir: Path) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
-    for sensor in _SENSORS:
+    for sensor in SENSORS:
         csv_path = orient_dir / f"{sensor}.csv"
         if csv_path.exists():
             out[sensor] = read_csv(csv_path)
@@ -85,7 +79,7 @@ def _load_selected_sensor_csvs(orient_dir: Path) -> dict[str, pd.DataFrame]:
 
 def plot_orientation_overlay(orient_dir: Path) -> Path | None:
     """Plot selected orientation angles with both sensors overlaid."""
-    stats = _load_json(orient_dir / "orientation_stats.json")
+    stats = load_json(orient_dir / "orientation_stats.json") or {}
     selected = stats.get("selected_method", "?")
     sensor_dfs = _load_selected_sensor_csvs(orient_dir)
     if not sensor_dfs:
@@ -110,7 +104,7 @@ def plot_orientation_overlay(orient_dir: Path) -> Path | None:
                 y_plot,
                 lw=0.9,
                 alpha=0.95,
-                color=_SENSOR_COLORS.get(sensor),
+                color=SENSOR_COLORS.get(sensor),
                 label=sensor,
             )
             any_line = True
@@ -129,15 +123,15 @@ def plot_orientation_overlay(orient_dir: Path) -> Path | None:
 
     out_path = orient_dir / "orientation_overlay.png"
     if any_line:
-        fig.savefig(out_path, dpi=120)
-        log.info("Plot written: %s", project_relative_path(out_path))
+        save_figure(fig, out_path)
+        return out_path
     plt.close(fig)
-    return out_path if any_line else None
+    return None
 
 
 def plot_orientation_methods_comparison(orient_dir: Path) -> Path | None:
     """Compare orientation methods via per-sensor quality metrics."""
-    data = _load_json(orient_dir / "all_methods.json")
+    data = load_json(orient_dir / "all_methods.json") or {}
     methods = data.get("methods", {})
     if not methods:
         log.warning("No all_methods.json found in %s", orient_dir)
@@ -157,7 +151,7 @@ def plot_orientation_methods_comparison(orient_dir: Path) -> Path | None:
 
     for row, (metric, title, lower_is_better) in enumerate(metrics):
         ax = axes[row]
-        for sensor_idx, sensor in enumerate(_SENSORS):
+        for sensor_idx, sensor in enumerate(SENSORS):
             vals = []
             for method in method_names:
                 vals.append(float(methods.get(method, {}).get(sensor, {}).get(metric, np.nan)))
@@ -166,7 +160,7 @@ def plot_orientation_methods_comparison(orient_dir: Path) -> Path | None:
                 x + offset,
                 vals,
                 width=width,
-                color=_SENSOR_COLORS.get(sensor),
+                color=SENSOR_COLORS.get(sensor),
                 alpha=0.85,
                 label=sensor,
             )
@@ -196,10 +190,7 @@ def plot_orientation_methods_comparison(orient_dir: Path) -> Path | None:
     fig.tight_layout()
 
     out_path = orient_dir / "orientation_methods_comparison.png"
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    log.info("Plot written: %s", project_relative_path(out_path))
-    return out_path
+    return save_figure(fig, out_path)
 
 
 def plot_orientation_stage(target: str | Path) -> list[Path]:

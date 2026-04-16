@@ -18,7 +18,7 @@ from parser.calibration_segments import (
     cal_segment_kwargs_for_sensor,
     prepare_calibration_detection_arrays,
 )
-from visualization._utils import filter_valid_plot_xy, strict_vector_norm
+from visualization._utils import filter_valid_plot_xy, save_figure, strict_vector_norm
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +125,4 @@ def plot_calibration_segments_from_detection(
         framealpha=0.92,
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=120)
-    log.debug("Saved calibration segments plot → %s", out_path)
+    save_figure(fig, out_path)

@@ -49,6 +49,20 @@ def smooth_moving_average(signal: np.ndarray, window: int) -> np.ndarray:
     )
 
 
+def rolling_pearson(a: np.ndarray, b: np.ndarray, window: int) -> np.ndarray:
+    """Rolling Pearson *r* using a centered window. Returns NaN at edges."""
+    n = len(a)
+    out = np.full(n, np.nan)
+    half = window // 2
+    for i in range(half, n - half):
+        x = a[i - half : i + half]
+        y = b[i - half : i + half]
+        if np.std(x) < 1e-12 or np.std(y) < 1e-12:
+            continue
+        out[i] = np.corrcoef(x, y)[0, 1]
+    return out
+
+
 def find_peaks_simple(
     signal: np.ndarray,
     *,

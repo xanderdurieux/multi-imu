@@ -31,7 +31,6 @@ import pandas as pd
 
 from common.paths import (
     list_csv_files,
-    project_relative_path,
     read_csv,
     recording_labels_csv,
     recordings_root,
@@ -40,12 +39,17 @@ from common.paths import (
     sections_root,
 )
 from labels.parser import LabelRow, load_labels
-from visualization._utils import filter_valid_plot_xy, strict_vector_norm
+from visualization._utils import (
+    ACC_COLS,
+    GYRO_COLS,
+    SENSOR_COLORS,
+    filter_valid_plot_xy,
+    save_figure,
+    strict_vector_norm,
+)
 
 log = logging.getLogger(__name__)
 
-_ACC_COLS = ["ax", "ay", "az"]
-_GYRO_COLS = ["gx", "gy", "gz"]
 _LABEL_ALPHA = 0.22
 _FEATURES_TOP_N = 5
 _EXCLUDE_FEATURE_COLS = frozenset({
@@ -114,7 +118,7 @@ def _load_sensor_dfs(stage_dir: Path) -> dict[str, pd.DataFrame]:
             continue
         if "timestamp" not in df.columns:
             continue
-        if not any(c in df.columns for c in _ACC_COLS):
+        if not any(c in df.columns for c in ACC_COLS):
             continue
         df = (
             df.dropna(subset=["timestamp"])
@@ -159,8 +163,8 @@ def plot_labels_sensor(
         ts_s = (ts_ms - t0_ms) / 1000.0
         sc = sensor_cmap(si % 9)
 
-        acc_cols = [c for c in _ACC_COLS if c in df.columns]
-        gyro_cols = [c for c in _GYRO_COLS if c in df.columns]
+        acc_cols = [c for c in ACC_COLS if c in df.columns]
+        gyro_cols = [c for c in GYRO_COLS if c in df.columns]
 
         if acc_cols:
             acc_norm = strict_vector_norm(df, acc_cols)
@@ -190,10 +194,7 @@ def plot_labels_sensor(
 
     if output_path is None:
         output_path = stage_dir / "labels_overlay.png"
-    fig.savefig(output_path, dpi=120)
-    plt.close(fig)
-    log.info("Saved label overlay → %s", project_relative_path(output_path))
-    return output_path
+    return save_figure(fig, output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +293,7 @@ def plot_labels_features(
 
     if output_path is None:
         output_path = feat_csv.parent / "labels_overlay.png"
-    fig.savefig(output_path, dpi=120)
-    plt.close(fig)
-    log.info("Saved features label overlay → %s", project_relative_path(output_path))
-    return output_path
+    return save_figure(fig, output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +332,6 @@ def plot_labels_calibrated(
 # ---------------------------------------------------------------------------
 
 _ORIENT_ANGLES = ("yaw_deg", "pitch_deg", "roll_deg")
-_ORIENT_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 
 
 def plot_labels_orientation(
@@ -379,7 +376,7 @@ def plot_labels_orientation(
     for sensor, df in sensor_dfs.items():
         ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
         ts_s = (ts_ms - t0_ms) / 1000.0
-        sc = _ORIENT_SENSOR_COLORS.get(sensor, "gray")
+        sc = SENSOR_COLORS.get(sensor, "gray")
         for idx, angle_col in enumerate(_ORIENT_ANGLES):
             if angle_col not in df.columns:
                 continue
@@ -405,10 +402,7 @@ def plot_labels_orientation(
 
     if output_path is None:
         output_path = orient_dir / "labels_overlay.png"
-    fig.savefig(output_path, dpi=120)
-    plt.close(fig)
-    log.info("Saved orientation label overlay → %s", project_relative_path(output_path))
-    return output_path
+    return save_figure(fig, output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +415,6 @@ _DERIVED_PANELS = [
     ("jerk_norm",    "jerk norm (m/s³)"),
     ("acc_hf",       "acc HF (m/s²)"),
 ]
-_DERIVED_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 
 
 def plot_labels_derived(
@@ -486,7 +479,7 @@ def plot_labels_derived(
             y = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
             x_plot, y_plot = filter_valid_plot_xy(ts_s, y)
             if x_plot.size:
-                sc = _DERIVED_SENSOR_COLORS.get(sensor, "gray")
+                sc = SENSOR_COLORS.get(sensor, "gray")
                 ax.plot(x_plot, y_plot, lw=0.7, alpha=0.8, color=sc, label=sensor)
         ax.set_ylabel(ylabel, fontsize=8)
         ax.grid(alpha=0.2, lw=0.4)
@@ -504,10 +497,7 @@ def plot_labels_derived(
 
     if output_path is None:
         output_path = derived_dir / "labels_overlay.png"
-    fig.savefig(output_path, dpi=120)
-    plt.close(fig)
-    log.info("Saved derived label overlay → %s", project_relative_path(output_path))
-    return output_path
+    return save_figure(fig, output_path)
 
 
 # ---------------------------------------------------------------------------
