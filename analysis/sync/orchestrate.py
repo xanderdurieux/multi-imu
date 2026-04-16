@@ -139,7 +139,17 @@ def _load_sync_info(recording_name: str, stage: str) -> Optional[dict]:
 
 def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
     """Recording-level calibration block shared by all anchor-based sync methods."""
-    empty: dict[str, Any] = {"target_time_origin_seconds": None, "calibration": None}
+    empty_calibration: dict[str, Any] = {
+        "n_anchors": 0,
+        "anchor_span_s": 0.0,
+        "opening": None,
+        "closing": None,
+        "anchors": [],
+    }
+    empty: dict[str, Any] = {
+        "target_time_origin_seconds": None,
+        "calibration": empty_calibration,
+    }
     for m in SYNC_METHODS:
         if m not in comparison:
             continue
@@ -161,7 +171,7 @@ def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
         cal = info.get("calibration")
         return {
             "target_time_origin_seconds": info.get("target_time_origin_seconds"),
-            "calibration": cal if isinstance(cal, dict) else None,
+            "calibration": cal if isinstance(cal, dict) else empty_calibration,
         }
     return empty
 
@@ -169,6 +179,13 @@ def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
 def _shared_fallback_from_qualities(
     qualities: dict[str, SyncMethodQuality],
 ) -> dict[str, Any]:
+    empty_calibration: dict[str, Any] = {
+        "n_anchors": 0,
+        "anchor_span_s": 0.0,
+        "opening": None,
+        "closing": None,
+        "anchors": [],
+    }
     for m in SYNC_METHODS:
         q = qualities[m]
         if not q.available or not q.calibration_anchors:
@@ -193,9 +210,9 @@ def _shared_fallback_from_qualities(
         if q.available and q.target_time_origin_seconds is not None:
             return {
                 "target_time_origin_seconds": q.target_time_origin_seconds,
-                "calibration": None,
+                "calibration": empty_calibration,
             }
-    return {"target_time_origin_seconds": None, "calibration": None}
+    return {"target_time_origin_seconds": None, "calibration": empty_calibration}
 
 
 def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:

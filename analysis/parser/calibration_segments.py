@@ -511,14 +511,6 @@ def _median_peak_index(seg: CalibrationSegment) -> float:
     return float(np.median(np.asarray(seg.peak_indices, dtype=float)))
 
 
-def _segments_overlap(
-    a: CalibrationSegment,
-    b: CalibrationSegment,
-    max_gap_samples: int,
-) -> bool:
-    return a.start_idx <= b.end_idx + max_gap_samples and a.end_idx >= b.start_idx - max_gap_samples
-
-
 def _peak_spans_duplicate_hypothesis(
     a: CalibrationSegment,
     b: CalibrationSegment,

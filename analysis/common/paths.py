@@ -42,8 +42,20 @@ _IMU_VALUE_COLUMNS = [col for col in CSV_COLUMNS if col != "timestamp"]
 
 
 def _looks_like_imu_dataframe(df: pd.DataFrame) -> bool:
+    """Heuristic for raw IMU streams that should be schema-normalized.
+
+    Important: Derived-signal tables (e.g. `*_signals.csv`) often contain
+    `timestamp` plus *derived* columns like `acc_norm`, but **do not** contain
+    the raw axis triplets (`ax/ay/az`, `gx/gy/gz`, `mx/my/mz`).  Normalizing
+    those as if they were raw IMU streams would add missing axis columns as
+    NA and then recompute `*_norm`, overwriting valid derived values with NaNs.
+    """
     columns = set(df.columns)
-    return "timestamp" in columns and any(col in columns for col in _IMU_VALUE_COLUMNS)
+    if "timestamp" not in columns:
+        return False
+
+    axis_cols = set(_ACC_AXIS_COLS) | set(_GYRO_AXIS_COLS) | set(_MAG_AXIS_COLS)
+    return any(col in columns for col in axis_cols)
 
 
 def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:

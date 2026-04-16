@@ -289,16 +289,19 @@ def estimate_signal_only(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
+    recording_name: str = "",
     reference_name: str = "",
     target_name: str = "",
     reference_sensor: str = "sporsa",
+    target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     max_lag_seconds: float = DEFAULT_MAX_LAG_SECONDS,
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Signal-only synchronization using SDA coarse offset and LIDA drift fitting.
 
-    *reference_sensor* is accepted for API parity with anchor-based strategies; it
-    is not used here (no calibration-segment detection).
+    ``recording_name``, ``reference_sensor``, and ``target_sensor`` are accepted for
+    API parity with anchor-based strategies; they are not used here (no
+    calibration-segment detection).
     """
     ref_series = build_alignment_series(
         ref_df,

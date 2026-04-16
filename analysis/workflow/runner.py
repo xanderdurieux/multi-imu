@@ -88,10 +88,16 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     synchronize_recording_chosen_method(rec, cfg.sync_method)
                 result["ok"] += 1
                 if not cfg.no_plots:
-                    try:
-                        plot_recording_pipeline_stage(rec, "synced")
-                    except Exception as exc:
-                        log.warning("sync plots failed for %s: %s", rec, exc)
+                    synced_dir = recording_stage_dir(rec, "synced")
+                    if not synced_dir.is_dir():
+                        # When no sync method succeeded we won't have a synced/ dir.
+                        # Don't treat that as a plotting failure.
+                        log.info("sync plots skipped for %s: missing %s", rec, project_relative_path(synced_dir))
+                    else:
+                        try:
+                            plot_recording_pipeline_stage(rec, "synced")
+                        except Exception as exc:
+                            log.warning("sync plots failed for %s: %s", rec, exc)
             except Exception as exc:
                 log.error("sync failed for %s: %s", rec, exc)
                 result["failed"] += 1

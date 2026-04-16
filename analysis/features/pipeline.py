@@ -285,11 +285,25 @@ def extract_features_for_section(
             skipped_min_samples += 1
             continue
 
+        # Historically, we skipped windows when the derived `acc_norm` was all-NaN.
+        # However `derived/*_signals.csv` can be missing, misaligned, or partially
+        # broken while the calibrated stream is still perfectly valid. Feature
+        # extraction itself can fall back to calibrated `|acc|`, so only skip
+        # when *both* derived and calibrated acceleration are unusable.
         if not w_sporsa_sig.empty and "acc_norm" in w_sporsa_sig.columns:
             acc_norm_arr = w_sporsa_sig["acc_norm"].to_numpy(dtype=float)
             if len(acc_norm_arr) > 0 and np.all(np.isnan(acc_norm_arr)):
-                skipped_all_nan += 1
-                continue
+                # Fallback check on calibrated sample quality.
+                if "acc_norm" in w_sporsa.columns:
+                    cal_acc = w_sporsa["acc_norm"].to_numpy(dtype=float)
+                    if len(cal_acc) > 0 and not np.all(np.isnan(cal_acc)):
+                        pass  # keep window: calibrated stream is usable
+                    else:
+                        skipped_all_nan += 1
+                        continue
+                else:
+                    skipped_all_nan += 1
+                    continue
 
         try:
             feat_dict = extract_window_features(

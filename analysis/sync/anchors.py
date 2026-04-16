@@ -9,15 +9,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from common.signals import find_peaks_simple, smooth_moving_average
 from parser.calibration_segments import (
     CalibrationSegment,
     find_calibration_segments,
     load_calibration_segments_from_json,
 )
 
-from .activity import build_alignment_series
+from .activity import SIGNAL_MODE_ACC_NORM_DIFF, build_alignment_series
 from .stream_io import (
     lowpass_filter,
+    remove_dropouts,
     resample_stream,
 )
 from .xcorr import estimate_lag
@@ -94,7 +96,108 @@ class CalibrationAnchorExtraction:
     coarse_offset_seconds: float
     coarse_method: str
     reference_segments_detected: int
-    reference_segments_matched: int
+    reference_segments_in_range: int
+
+
+# ---------------------------------------------------------------------------
+# Coarse offset from the opening calibration cluster in the target
+# ---------------------------------------------------------------------------
+
+
+def _cluster_peaks(
+    peaks: np.ndarray,
+    ts: np.ndarray,
+    *,
+    min_inter_peak_s: float = 0.3,
+    max_inter_peak_s: float = 2.5,
+    peak_min_count: int = 3,
+    peak_max_count: int = 8,
+    max_cluster_duration_s: float = 20.0,
+) -> list[list[int]]:
+    """Group peaks into timing-consistent clusters."""
+    clusters: list[list[int]] = []
+    current: list[int] = [int(peaks[0])]
+
+    for p in peaks[1:]:
+        gap_s = (ts[int(p)] - ts[current[-1]]) / 1000.0
+        if min_inter_peak_s <= gap_s <= max_inter_peak_s:
+            current.append(int(p))
+        else:
+            if peak_min_count <= len(current) <= peak_max_count:
+                dur = (ts[current[-1]] - ts[current[0]]) / 1000.0
+                if dur <= max_cluster_duration_s:
+                    clusters.append(list(current))
+            current = [int(p)]
+
+    if peak_min_count <= len(current) <= peak_max_count:
+        dur = (ts[current[-1]] - ts[current[0]]) / 1000.0
+        if dur <= max_cluster_duration_s:
+            clusters.append(list(current))
+
+    return clusters
+
+
+def coarse_offset_from_opening_calibration(
+    ref_df: pd.DataFrame,
+    tgt_df_clean: pd.DataFrame,
+    ref_cal: CalibrationSegment,
+    *,
+    search_first_s: float = 180.0,
+    peak_min_height: float = 3.0,
+    peak_min_count: int = 3,
+    peak_max_count: int = 8,
+    min_inter_peak_s: float = 0.3,
+    max_inter_peak_s: float = 2.5,
+    max_cluster_duration_s: float = 20.0,
+) -> float:
+    """Estimate coarse offset by matching the opening calibration cluster."""
+    ts = tgt_df_clean["timestamp"].to_numpy(dtype=float)
+    if len(ts) < 2:
+        raise ValueError("Target DataFrame is too short.")
+
+    dt_ms = float(np.median(np.diff(ts)))
+    actual_sr = max(1.0, 1000.0 / dt_ms)
+    search_end_ms = ts[0] + search_first_s * 1000.0
+    n_search = int(np.sum(ts <= search_end_ms))
+
+    norm = tgt_df_clean["acc_norm"].to_numpy(dtype=float)
+    g = float(np.nanmedian(norm))
+    smooth_win = max(3, int(actual_sr * 0.1))
+    dyn_smooth = np.abs(smooth_moving_average(norm[:n_search], smooth_win) - g)
+
+    dist = max(1, int(actual_sr * min_inter_peak_s))
+    peaks = find_peaks_simple(dyn_smooth, height=peak_min_height, distance=dist)
+    if len(peaks) == 0:
+        raise ValueError(
+            f"No peaks above {peak_min_height} m/s² in first {search_first_s}s of target."
+        )
+
+    clusters = _cluster_peaks(
+        peaks,
+        ts,
+        min_inter_peak_s=min_inter_peak_s,
+        max_inter_peak_s=max_inter_peak_s,
+        peak_min_count=peak_min_count,
+        peak_max_count=peak_max_count,
+        max_cluster_duration_s=max_cluster_duration_s,
+    )
+    if not clusters:
+        raise ValueError(
+            f"No calibration-like cluster ({peak_min_count}-{peak_max_count} peaks, "
+            f"{min_inter_peak_s}-{max_inter_peak_s}s spacing) in first {search_first_s}s."
+        )
+
+    tgt_median_ms = float(np.median(ts[clusters[0]]))
+    ref_peak_ts = ref_df.iloc[ref_cal.peak_indices]["timestamp"].to_numpy(dtype=float)
+    ref_median_ms = float(np.median(ref_peak_ts))
+    coarse_offset_s = (ref_median_ms - tgt_median_ms) / 1000.0
+
+    log.info(
+        "Coarse offset from opening calibration: %.3f s (target cluster at t_tgt=%.1f s)",
+        coarse_offset_s,
+        tgt_median_ms / 1000.0,
+    )
+    return coarse_offset_s
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +273,58 @@ def refine_offset_at_calibration(
 
 
 # ---------------------------------------------------------------------------
-# Anchor extraction: load from JSON, match in order, refine
+# Helpers
 # ---------------------------------------------------------------------------
+
+
+def filter_segments_in_target_range(
+    ref_df: pd.DataFrame,
+    tgt_df: pd.DataFrame,
+    segments: list[CalibrationSegment],
+    *,
+    coarse_offset_s: float,
+    margin_s: float = 15.0,
+) -> list[CalibrationSegment]:
+    """Keep only reference segments whose predicted target centre is in range."""
+    tgt_ts = tgt_df["timestamp"].to_numpy(dtype=float)
+    tgt_lo_ms, tgt_hi_ms = float(tgt_ts[0]), float(tgt_ts[-1])
+    margin_ms = margin_s * 1000.0
+
+    kept: list[CalibrationSegment] = []
+    for seg in segments:
+        ref_center_ms = float(
+            np.median(ref_df.iloc[seg.peak_indices]["timestamp"].to_numpy(dtype=float))
+        )
+        tgt_center_ms = ref_center_ms - coarse_offset_s * 1000.0
+        if tgt_lo_ms - margin_ms <= tgt_center_ms <= tgt_hi_ms + margin_ms:
+            kept.append(seg)
+    return kept
+
+
+def bootstrap_coarse_offset(
+    ref_df: pd.DataFrame,
+    tgt_df: pd.DataFrame,
+    ref_cals: list[CalibrationSegment],
+    *,
+    peak_min_height: float = 3.0,
+    peak_min_count: int = 3,
+    sda_sample_rate_hz: float = 5.0,
+    sda_max_lag_s: float = 120.0,
+    signal_mode: str = SIGNAL_MODE_ACC_NORM_DIFF,
+) -> tuple[float, str]:
+    """Determine coarse offset from the opening calibration only."""
+    if not ref_cals:
+        raise ValueError("No reference calibration sequences found.")
+
+    tgt_clean = remove_dropouts(tgt_df)
+    offset = coarse_offset_from_opening_calibration(
+        ref_df,
+        tgt_clean,
+        ref_cals[0],
+        peak_min_height=peak_min_height,
+        peak_min_count=peak_min_count,
+    )
+    return offset, "opening_calibration"
 
 
 def extract_calibration_anchors(
@@ -185,8 +338,9 @@ def extract_calibration_anchors(
     search_seconds: float = DEFAULT_ANCHOR_SEARCH_SECONDS,
     peak_buffer_seconds: float = DEFAULT_ANCHOR_PEAK_BUFFER_SECONDS,
     lowpass_cutoff_hz: float | None = None,
+    sda_fallback_max_lag_s: float = 120.0,
 ) -> CalibrationAnchorExtraction:
-    """Load compatible calibration segments, match in order, and refine via xcorr.
+    """Load reference calibrations, bootstrap coarse offset, then refine on target.
 
     Recording-level calibration JSON is preferred when its stored indices fit
     the current DataFrame. When syncing a shorter section window, those JSON
@@ -203,86 +357,57 @@ def extract_calibration_anchors(
         recording_name=recording_name,
         sensor=reference_sensor,
     )
-    tgt_cals, tgt_source = _load_segments_for_current_frame(
-        tgt_df,
-        recording_name=recording_name,
-        sensor=target_sensor,
-    )
 
     if not ref_cals:
         raise ValueError(
             f"No calibration segments available for reference sensor {reference_sensor!r}."
         )
-    if not tgt_cals:
-        raise ValueError(
-            f"No calibration segments available for target sensor {target_sensor!r}."
-        )
 
-    n_pairs = min(len(ref_cals), len(tgt_cals))
-    pairs = list(zip(ref_cals[:n_pairs], tgt_cals[:n_pairs]))
-
-    log.debug(
-        "Loaded %d ref segment(s) (%s) and %d tgt segment(s) (%s); "
-        "matching %d pair(s).",
-        len(ref_cals),
-        ref_source,
-        len(tgt_cals),
-        tgt_source,
-        n_pairs,
+    coarse_offset_s, coarse_method = bootstrap_coarse_offset(
+        ref_df,
+        tgt_df,
+        ref_cals,
+        sda_max_lag_s=sda_fallback_max_lag_s,
     )
-
-    # Coarse offset from the first matched pair.
-    ref0_peak_ts = ref_df.iloc[pairs[0][0].peak_indices]["timestamp"].to_numpy(dtype=float)
-    tgt0_peak_ts = tgt_df.iloc[pairs[0][1].peak_indices]["timestamp"].to_numpy(dtype=float)
-    coarse_offset_s = (float(np.median(ref0_peak_ts)) - float(np.median(tgt0_peak_ts))) / 1000.0
-
-    log.info(
-        "Coarse offset from %s/%s segments: %.3f s "
-        "(ref_cal[0] at t_ref=%.1f s, tgt_cal[0] at t_tgt=%.1f s)",
-        ref_source,
-        tgt_source,
-        coarse_offset_s,
-        float(np.median(ref0_peak_ts)) / 1000.0,
-        float(np.median(tgt0_peak_ts)) / 1000.0,
+    in_range = filter_segments_in_target_range(
+        ref_df,
+        tgt_df,
+        ref_cals,
+        coarse_offset_s=coarse_offset_s,
     )
+    if not in_range:
+        raise ValueError("No calibration sequences map into the target stream.")
 
     anchors: list[CalibrationWindowResult] = []
-    for ref_seg, tgt_seg in pairs:
-        # Per-pair coarse offset derived from stored target peak timestamps.
-        ref_peak_ts = ref_df.iloc[ref_seg.peak_indices]["timestamp"].to_numpy(dtype=float)
-        tgt_peak_ts = tgt_df.iloc[tgt_seg.peak_indices]["timestamp"].to_numpy(dtype=float)
-        pair_coarse_s = (float(np.median(ref_peak_ts)) - float(np.median(tgt_peak_ts))) / 1000.0
-
+    current_coarse = coarse_offset_s
+    for ref_seg in in_range:
         try:
             anchor = refine_offset_at_calibration(
                 ref_df,
                 tgt_df,
                 ref_seg,
-                coarse_offset_s=pair_coarse_s,
+                coarse_offset_s=current_coarse,
                 sample_rate_hz=sample_rate_hz,
                 peak_buffer_s=peak_buffer_seconds,
                 search_s=search_seconds,
                 lowpass_cutoff_hz=lowpass_cutoff_hz,
             )
         except Exception as exc:
-            log.warning("Skipping calibration pair during refinement: %s", exc)
+            log.warning("Skipping calibration window during refinement: %s", exc)
             continue
         anchors.append(anchor)
+        current_coarse = anchor.offset_seconds
 
     if not anchors:
-        raise ValueError("No calibration pairs were refined successfully.")
+        raise ValueError("No calibration sequences were refined successfully.")
 
     anchors = sorted(anchors, key=lambda a: (a.t_tgt_seconds, a.t_ref_peak_s))
     return CalibrationAnchorExtraction(
         anchors=anchors,
         coarse_offset_seconds=coarse_offset_s,
-        coarse_method=(
-            "json_calibration_segments"
-            if ref_source == "json_calibration_segments" and tgt_source == "json_calibration_segments"
-            else "local_calibration_detection"
-        ),
+        coarse_method=f"{ref_source}+{coarse_method}",
         reference_segments_detected=len(ref_cals),
-        reference_segments_matched=n_pairs,
+        reference_segments_in_range=len(in_range),
     )
 
 

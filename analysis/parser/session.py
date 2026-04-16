@@ -171,10 +171,14 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
                 segment_records = dataframe_to_json_records(info_df)
 
             total_duration_s = 0.0
+            timestamps_are_ms = "timestamp" in df_work.columns
             for _, row in info_df.iterrows():
-                start_t = float(row.get("start_time_s", 0.0))
-                end_t = float(row.get("end_time_s", start_t))
-                total_duration_s += max(0.0, end_t - start_t)
+                start_t = float(row.get("start_timestamp", row.get("start_time_s", 0.0)))
+                end_t = float(row.get("end_timestamp", row.get("end_time_s", start_t)))
+                duration = max(0.0, end_t - start_t)
+                if timestamps_are_ms:
+                    duration /= 1000.0
+                total_duration_s += duration
 
             calibration_segments_file_payload["sensors"][sensor_name] = {
                 "detection_params": dict(cal_kw),

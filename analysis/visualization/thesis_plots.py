@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import recording_stage_dir
+from common.paths import iter_sections_for_recording, read_csv, recording_stage_dir
 from sync.signals import build_activity_signal
 from sync.stream_io import VECTOR_AXES
 from sync.sync_info_format import flatten_sync_info_dict
@@ -405,6 +405,158 @@ def plot_sync_example_result(
     return save_figure(fig, output_path, dpi=150)
 
 
+def plot_sync_landmarks_and_sections_timeline(
+    recording_name: str,
+    *,
+    output_path: Path | None = None,
+) -> Path:
+    """Single-recording timeline with calibration landmarks and section boundaries.
+
+    The figure overlays:
+    - synced activity traces (SPORSA + Arduino) on a shared timeline,
+    - detected calibration anchors from ``synced/all_methods.json`` (or
+      ``synced/sync_info.json`` fallback),
+    - vertical start/end boundaries of split sections for this recording.
+
+    Output
+    ------
+    ``synced/thesis_sync_landmarks_sections_timeline.png``
+    """
+    synced_dir = recording_stage_dir(recording_name, "synced")
+    if not synced_dir.is_dir():
+        raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
+
+    sporsa_synced = load_sensor_df(synced_dir, "sporsa")
+    arduino_synced = load_sensor_df(synced_dir, "arduino")
+    if sporsa_synced is None or arduino_synced is None:
+        raise FileNotFoundError(f"Missing synced sensor CSVs under {synced_dir}")
+
+    if output_path is None:
+        output_path = synced_dir / "thesis_sync_landmarks_sections_timeline.png"
+
+    # ------------------------------------------------------------------
+    # Activity signals on shared synced timeline
+    # ------------------------------------------------------------------
+    sp_ts_syn, sp_act_syn = _build_activity_signal(sporsa_synced)
+    ar_ts_syn, ar_act_syn = _build_activity_signal(arduino_synced)
+    t0_syn = min(sp_ts_syn[0], ar_ts_syn[0])
+    sp_rel = sp_ts_syn - t0_syn
+    ar_rel = ar_ts_syn - t0_syn
+
+    # ------------------------------------------------------------------
+    # Calibration anchors from all_methods.json (fallback: sync_info.json)
+    # Convert to "seconds from synced start" using t_ref_s.
+    # ------------------------------------------------------------------
+    anchor_times_rel: list[float] = []
+    anchor_scores: list[float | None] = []
+    all_methods_path = synced_dir / "all_methods.json"
+    sync_info_path = synced_dir / "sync_info.json"
+    cal_block: dict | None = None
+
+    if all_methods_path.exists():
+        payload = json.loads(all_methods_path.read_text(encoding="utf-8"))
+        shared = payload.get("shared") if isinstance(payload, dict) else None
+        if isinstance(shared, dict):
+            candidate = shared.get("calibration")
+            if isinstance(candidate, dict):
+                cal_block = candidate
+    if cal_block is None and sync_info_path.exists():
+        payload = flatten_sync_info_dict(json.loads(sync_info_path.read_text(encoding="utf-8"))) or {}
+        candidate = payload.get("calibration")
+        if isinstance(candidate, dict):
+            cal_block = candidate
+
+    if cal_block:
+        anchors = cal_block.get("anchors")
+        if isinstance(anchors, list):
+            for a in anchors:
+                if not isinstance(a, dict):
+                    continue
+                t_ref = a.get("t_ref_s")
+                if t_ref is None:
+                    continue
+                try:
+                    anchor_times_rel.append(float(t_ref) - t0_syn)
+                    score_v = a.get("score")
+                    anchor_scores.append(float(score_v) if score_v is not None else None)
+                except (TypeError, ValueError):
+                    continue
+
+    # ------------------------------------------------------------------
+    # Section boundaries from section CSV extents.
+    # ------------------------------------------------------------------
+    section_bounds: list[tuple[str, float, float]] = []
+    for sec_dir in iter_sections_for_recording(recording_name):
+        sec_sporsa = sec_dir / "sporsa.csv"
+        if not sec_sporsa.exists():
+            continue
+        try:
+            sec_df = read_csv(sec_sporsa)
+            if sec_df.empty or "timestamp" not in sec_df.columns:
+                continue
+            ts = pd.to_numeric(sec_df["timestamp"], errors="coerce").to_numpy(dtype=float)
+            ts = ts[np.isfinite(ts)]
+            if len(ts) < 2:
+                continue
+            section_bounds.append((sec_dir.name, float(ts[0]) / 1000.0 - t0_syn, float(ts[-1]) / 1000.0 - t0_syn))
+        except Exception as exc:
+            log.warning("Failed to read section timestamps for %s: %s", sec_dir.name, exc)
+
+    # ------------------------------------------------------------------
+    # Figure
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(14, 5.5))
+    clip = 5.0
+    lw = 0.75
+    alpha = 0.85
+    sp_color = SENSOR_COLORS["sporsa"]
+    ar_color = SENSOR_COLORS["arduino"]
+
+    xsp, ysp = filter_valid_plot_xy(sp_rel, np.clip(sp_act_syn, -clip, clip))
+    xar, yar = filter_valid_plot_xy(ar_rel, np.clip(ar_act_syn, -clip, clip))
+    ax.plot(xsp, ysp, lw=lw, color=sp_color, alpha=alpha, label="SPORSA (synced)")
+    ax.plot(xar, yar, lw=lw, color=ar_color, alpha=alpha, label="Arduino (synced)")
+
+    # Section boundaries.
+    for i, (sec_name, start_s, end_s) in enumerate(sorted(section_bounds, key=lambda x: x[1])):
+        ax.axvline(start_s, color="#7f8c8d", lw=0.9, alpha=0.45, zorder=2)
+        ax.axvline(end_s, color="#7f8c8d", lw=0.9, alpha=0.45, zorder=2)
+        ax.axvspan(start_s, end_s, color="#95a5a6", alpha=0.06, zorder=1)
+        mid_s = 0.5 * (start_s + end_s)
+        ax.text(mid_s, clip + 0.2, sec_name, fontsize=7, color="#555555", ha="center", va="bottom")
+
+    # Calibration landmarks.
+    for idx, t_anchor in enumerate(anchor_times_rel):
+        score = anchor_scores[idx] if idx < len(anchor_scores) else None
+        lbl = f"cal {idx + 1}"
+        if score is not None and np.isfinite(score):
+            lbl += f" (score {score:.2f})"
+        ax.axvline(t_anchor, color="#d35400", ls="--", lw=1.4, alpha=0.8, zorder=3)
+        ax.text(
+            t_anchor + 0.6,
+            -clip - 0.15,
+            lbl,
+            fontsize=7,
+            color="#d35400",
+            ha="left",
+            va="top",
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.25},
+            zorder=4,
+        )
+
+    ax.set_ylim(-clip - 0.5, clip + 0.7)
+    ax.set_xlabel("Time from recording start (s)")
+    ax.set_ylabel("Activity $s_{\\mathrm{acc}}$")
+    ax.set_title(
+        "Synchronized recording with calibration landmarks and section boundaries",
+        fontsize=11,
+    )
+    ax.grid(alpha=0.22, lw=0.4)
+    ax.legend(fontsize=8, loc="upper right")
+    fig.tight_layout()
+    return save_figure(fig, output_path, dpi=150)
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(
@@ -412,45 +564,54 @@ def main(argv: list[str] | None = None) -> None:
         description=(
             "Thesis figures for the synchronization section.\n\n"
             "Usage:\n"
-            "  hierarchy                          — method comparison table\n"
-            "  sync-example <recording_name>      — 3-panel sync result\n"
-            "  acc <recording_name>               — before/after acc figure\n"
-            "  <recording_name>                   — shorthand for 'acc'"
+            "  --figure hierarchy\n"
+            "  --figure sync-example --recording <recording_name>\n"
+            "  --figure sync-sections --recording <recording_name>\n"
+            "  --figure acc --recording <recording_name>\n"
+            "  --recording <recording_name>   (defaults to --figure acc)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("figure_or_recording",
-                        help="Figure type ('hierarchy', 'sync-example', 'acc') or recording name.")
-    parser.add_argument("recording_name", nargs="?", default=None,
-                        help="Recording folder name (required for sync-example and acc).")
+    parser.add_argument(
+        "--figure",
+        choices=("hierarchy", "sync-example", "sync-sections", "acc"),
+        default="acc",
+        help="Figure type to generate (default: acc).",
+    )
+    parser.add_argument(
+        "--recording",
+        dest="recording_name",
+        default=None,
+        help="Recording folder name (required for sync-example, sync-sections, and acc).",
+    )
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    figure_or_rec = args.figure_or_recording.strip()
-    extra_rec = args.recording_name.strip() if args.recording_name else None
+    figure = args.figure.strip()
+    rec = args.recording_name.strip() if args.recording_name else None
 
-    if figure_or_rec == "hierarchy":
+    if figure == "hierarchy":
         out = plot_sync_method_hierarchy()
         print(f"Saved → {out}")
         return
 
-    if figure_or_rec == "sync-example":
-        rec = extra_rec
+    if figure == "sync-example":
         if not rec:
-            parser.error("sync-example requires a recording_name argument.")
+            parser.error("sync-example requires --recording.")
         out = plot_sync_example_result(rec)
         print(f"Saved → {out}")
         return
 
-    if figure_or_rec == "acc":
-        rec = extra_rec
+    if figure == "sync-sections":
         if not rec:
-            parser.error("acc requires a recording_name argument.")
-    else:
-        # Treat positional as recording name → legacy acc behaviour
-        rec = figure_or_rec
+            parser.error("sync-sections requires --recording.")
+        out = plot_sync_landmarks_and_sections_timeline(rec)
+        print(f"Saved → {out}")
+        return
 
+    if not rec:
+        parser.error("acc requires --recording.")
     out = plot_parsed_vs_synced_imu(rec)
     print(f"Saved → {out}")
 
