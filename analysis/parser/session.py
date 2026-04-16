@@ -7,25 +7,30 @@ import logging
 from pathlib import Path
 import re
 from typing import Optional
-import json
 
 from common import (
-    recording_dir,
+    dataframe_to_json_records,
     recording_stage_dir,
     read_csv,
     session_input_dir,
     write_csv,
+    write_json_file,
 )
 from common.paths import project_relative_path
 
-from visualization.plot_comparison import plot_stage_data
 from visualization.plot_calibration_segments import (
     plot_calibration_segments_from_detection,
 )
+from visualization.plot_sensor import plot_sensor_data
 
+from .calibration_segments import (
+    cal_segment_kwargs_for_sensor,
+    describe_calibration_segments,
+    find_calibration_segments,
+)
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
-from .stats import compute_stream_timing_stats, write_recording_stats
+from .stats import write_recording_stats
 
 log = logging.getLogger(__name__)
 
@@ -47,13 +52,7 @@ def _process_file(sensor_type: str, src: Path, dst: Path):
 
 
 def _extract_recording_number(filename: str) -> Optional[int]:
-    """Extract recording number from a filename.
-
-    Supported patterns (case-insensitive):
-    - ``...session10...``
-    - ``log3...``
-    Falls back to the last integer found in the filename.
-    """
+    """Extract recording number from a filename."""
     lower = filename.lower()
     m = re.search(r"(?:session|log)\s*(\d+)", lower)
     if m:
@@ -67,29 +66,7 @@ def _extract_recording_number(filename: str) -> Optional[int]:
 
 
 def process_session(session_name: str, *, plot: bool = True) -> None:
-    """Parse a session and write processed CSV streams + plots + stats.
-
-    Input layout::
-
-        data/_sessions/<session_name>/{arduino,sporsa}/*.txt
-
-    Output layout (one folder per recording number)::
-
-        data/recordings/<session_name>_r<N>/
-            session_stats.json                 # per-recording stream timing stats
-            parsed/
-                sporsa.csv
-                arduino.csv
-                *.png                          # per-recording sensor/comparison plots
-                <sensor>_calibration_segments.png
-
-    Additionally, a session-wide summary JSON (no file paths) is written to::
-
-        data/_sessions/<session_name>/session_stats.json
-
-    This aggregates per-recording parsed durations, section statistics, and
-    calibration-segment summaries for each sensor.
-    """
+    """Parse a session and write processed CSV streams + calibration segments + plots."""
     in_root = session_input_dir(session_name)
     if not in_root.is_dir():
         log.warning("Sessions input folder not found: %s", project_relative_path(in_root))
@@ -122,8 +99,6 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
         log.warning("parse %s: no recordings found under %s", session_name, project_relative_path(in_root))
         return
 
-    session_summaries: list[dict] = []
-
     for n in sorted(recordings.keys()):
         recording_name = f"{session_name}_r{n}"
         out_dir = recording_stage_dir(recording_name, "parsed")
@@ -146,17 +121,19 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
             df = _process_file(sensor, src, dst)
             parsed_nonempty[sensor] = bool(df is not None and not df.empty)
 
+            if plot:
+                plot_sensor_data(dst, output_path=out_dir / f"{sensor}.png")
+
         # Per-recording timing stats at recording root (see write_recording_stats).
         stats_path = write_recording_stats(recording_name)
         log.info("parse %s: wrote stats %s", recording_name, project_relative_path(stats_path))
 
-        calibration_segments_summary: dict[str, dict] = {}
-        if plot:
-            # Per-recording sensor/comparison plots for the parsed stage.
-            plot_stage_data(out_dir)
+        calibration_segments_file_payload: dict = {
+            "recording_name": recording_name,
+            "sensors": {},
+        }
 
-        # Calibration-segment summaries are always computed for session stats;
-        # image output is optional based on ``plot``.
+        # Calibration-segment metadata for ``calibration_segments.json``; plots optional.
         for sensor_name in ("sporsa", "arduino"):
             csv_path = out_dir / f"{sensor_name}.csv"
             if not csv_path.exists():
@@ -165,141 +142,64 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
             if df_sensor.empty:
                 continue
 
-            # Use slightly more permissive defaults for the diagnostic plots so
-            # that short or early calibration sequences (e.g. at the very start
-            # of the recording) are still visualised.  peak_min_count matches the
-            # shared detector (3): the Arduino stream often yields only four clear
-            # tap peaks in the opening cluster while SPORSA shows five.
-            _, info_df, _ = plot_calibration_segments_from_detection(
-                df_sensor,
-                sample_rate_hz=100.0,
-                static_min_s=2.25,
-                static_threshold=1.5,
-                peak_min_height=2.5,
-                peak_min_count=3,
-                peak_max_count=20,
-                peak_max_gap_s=3.0,
-                static_gap_max_s=8.0,
-                out_path=(out_dir / f"{sensor_name}_calibration_segments.png") if plot else None,
+            df_work = (
+                df_sensor.dropna(subset=["timestamp"])
+                .sort_values("timestamp")
+                .reset_index(drop=True)
             )
-
-            if info_df.empty or "segment_index" not in info_df.columns:
-                calibration_segments_summary[sensor_name] = {
-                    "num_segments": 0,
-                    "total_duration_s": 0.0,
-                    "segments": [],
-                }
+            if df_work.empty:
                 continue
 
-            # Per-segment timing and peak summaries.
-            segments_list: list[dict] = []
+            cal_kw = cal_segment_kwargs_for_sensor(sensor_name)
+            segments = find_calibration_segments(df_work, sensor=sensor_name)
+            info_df = describe_calibration_segments(
+                df_work,
+                segments,
+                sample_rate_hz=float(cal_kw["sample_rate_hz"]),
+            )
+
+            if plot:
+                plot_calibration_segments_from_detection(
+                    df_work,
+                    segments,
+                    out_path=out_dir / f"{sensor_name}_cal_segments.png",
+                    sensor=sensor_name,
+                )
+
+            segment_records: list[dict] = []
+            if not info_df.empty and "segment_index" in info_df.columns:
+                segment_records = dataframe_to_json_records(info_df)
+
             total_duration_s = 0.0
             for _, row in info_df.iterrows():
                 start_t = float(row.get("start_time_s", 0.0))
                 end_t = float(row.get("end_time_s", start_t))
-                duration_s = max(0.0, end_t - start_t)
-                total_duration_s += duration_s
+                total_duration_s += max(0.0, end_t - start_t)
 
-                seg = {
-                    "index": int(row.get("segment_index", 0)),
-                    "start_time_s": start_t,
-                    "end_time_s": end_t,
-                    "duration_s": duration_s,
-                    "n_peaks": int(row.get("n_peaks", 0)),
-                }
-                segments_list.append(seg)
-
-            calibration_segments_summary[sensor_name] = {
-                "num_segments": len(segments_list),
+            calibration_segments_file_payload["sensors"][sensor_name] = {
+                "detection_params": dict(cal_kw),
+                "num_segments": len(segments),
                 "total_duration_s": total_duration_s,
-                "segments": segments_list,
+                "segments": segment_records,
             }
 
-        # Number of sections already created for this recording (if any).
-        from common.paths import iter_sections_for_recording
-
-        section_dirs = iter_sections_for_recording(recording_name)
-        n_sections = len(section_dirs)
-
-        # Extract a compact per-recording summary for the session-wide JSON.
-        stats_json = {}
-        try:
-            stats_json = json.loads(stats_path.read_text(encoding="utf-8"))
-        except Exception:
-            stats_json = {}
-
-        durations_s: dict[str, float | None] = {}
-        num_samples: dict[str, int | None] = {}
-        streams = stats_json.get("streams", {}) or {}
-        for stream_name, stream_stats in streams.items():
-            timing = stream_stats.get("timing", {}) or {}
-            durations_s[stream_name] = timing.get("duration_s")
-            num_samples[stream_name] = stream_stats.get("num_samples")
-
-        rec_summary: dict = {
-            "recording_name": recording_name,
-            "parsed": {
-                "durations_s": durations_s,
-                "num_samples": num_samples,
-            },
-            "sections": {
-                "count": n_sections,
-            },
-        }
-        if calibration_segments_summary:
-            rec_summary["calibration_segments"] = calibration_segments_summary
-
-        session_summaries.append(rec_summary)
-
-        # Optional section-level timing summaries (if sections already exist).
-        if n_sections > 0:
-            section_details: list[dict] = []
-            from common.paths import parse_section_folder_name
-
-            for section_dir in section_dirs:
-                section_streams: dict[str, dict] = {}
-                for sensor_name in ("sporsa", "arduino"):
-                    csv_path = section_dir / f"{sensor_name}.csv"
-                    if not csv_path.exists():
-                        continue
-                    df_sec = read_csv(csv_path)
-                    if df_sec.empty:
-                        continue
-                    timing = compute_stream_timing_stats(df_sec, timestamp_col="timestamp")
-                    section_streams[sensor_name] = {
-                        "num_samples": int(df_sec.shape[0]),
-                        "timing": timing,
-                    }
-
-                if section_streams:
-                    _rec_name, sec_idx = parse_section_folder_name(section_dir.name)
-                    section_details.append(
-                        {
-                            "name": section_dir.name,
-                            "streams": section_streams,
-                        }
-                    )
-
-            if section_details:
-                rec_summary["sections"]["details"] = section_details
-
-    # Write session-wide summary JSON across all recordings (without paths).
-    session_stats = {
-        "session_name": session_name,
-        "num_recordings": len(session_summaries),
-        "recordings": session_summaries,
-    }
-    out_session_stats = in_root / "session_stats.json"
-    out_session_stats.write_text(
-        json.dumps(session_stats, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    log.info("parse %s: wrote session stats %s", session_name, project_relative_path(out_session_stats))
-
+        if calibration_segments_file_payload["sensors"]:
+            cal_json_path = out_dir / "calibration_segments.json"
+            write_json_file(
+                cal_json_path,
+                calibration_segments_file_payload,
+                indent=2,
+                sort_keys=True,
+            )
+            log.info(
+                "parse %s: wrote calibration segments %s",
+                recording_name,
+                project_relative_path(cal_json_path),
+            )
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m parser.session",
+        prog="python -m parser",
         description="Parse all recordings for a session date into CSVs, plots, and stats.",
     )
     parser.add_argument(

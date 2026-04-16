@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import traceback
 from datetime import UTC, datetime
@@ -18,6 +17,7 @@ from common.paths import (
     project_relative_path,
     recording_stage_dir,
     recordings_root,
+    write_json_file,
 )
 from orientation.pipeline import (
     DEFAULT_CANONICAL_ORIENTATION_METHOD,
@@ -365,8 +365,7 @@ def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
 
     # Write run summary.
     out_path = data_root() / "pipeline_run_summary.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    write_json_file(out_path, summary, indent=2, default=str)
     log.info("Wrote pipeline run summary: %s", project_relative_path(out_path))
 
     return summary

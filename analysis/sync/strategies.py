@@ -90,6 +90,7 @@ def estimate_multi_anchor(
     *,
     reference_name: str = "",
     target_name: str = "",
+    reference_sensor: str = "sporsa",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
     sda_fallback_max_lag_s: float = 120.0,
@@ -98,6 +99,7 @@ def estimate_multi_anchor(
     extraction = extract_calibration_anchors(
         ref_df,
         tgt_df,
+        reference_sensor=reference_sensor,
         sample_rate_hz=sample_rate_hz,
         search_seconds=anchor_search_seconds,
         sda_fallback_max_lag_s=sda_fallback_max_lag_s,
@@ -139,6 +141,7 @@ def estimate_one_anchor_adaptive(
     *,
     reference_name: str = "",
     target_name: str = "",
+    reference_sensor: str = "sporsa",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
     sda_fallback_max_lag_s: float = 120.0,
@@ -147,6 +150,7 @@ def estimate_one_anchor_adaptive(
     extraction = extract_calibration_anchors(
         ref_df,
         tgt_df,
+        reference_sensor=reference_sensor,
         sample_rate_hz=sample_rate_hz,
         search_seconds=anchor_search_seconds,
         sda_fallback_max_lag_s=sda_fallback_max_lag_s,
@@ -231,6 +235,7 @@ def estimate_one_anchor_prior(
     *,
     reference_name: str = "",
     target_name: str = "",
+    reference_sensor: str = "sporsa",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     drift_ppm: float = DEFAULT_DRIFT_PPM,
     anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
@@ -240,6 +245,7 @@ def estimate_one_anchor_prior(
     extraction = extract_calibration_anchors(
         ref_df,
         tgt_df,
+        reference_sensor=reference_sensor,
         sample_rate_hz=sample_rate_hz,
         search_seconds=anchor_search_seconds,
         sda_fallback_max_lag_s=sda_fallback_max_lag_s,
@@ -279,10 +285,15 @@ def estimate_signal_only(
     *,
     reference_name: str = "",
     target_name: str = "",
+    reference_sensor: str = "sporsa",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     max_lag_seconds: float = DEFAULT_MAX_LAG_SECONDS,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Signal-only synchronization using SDA coarse offset and LIDA drift fitting."""
+    """Signal-only synchronization using SDA coarse offset and LIDA drift fitting.
+
+    *reference_sensor* is accepted for API parity with anchor-based strategies; it
+    is not used here (no calibration-segment detection).
+    """
     ref_series = build_alignment_series(
         ref_df,
         sample_rate_hz=sample_rate_hz,

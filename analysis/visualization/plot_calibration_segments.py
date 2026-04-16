@@ -4,109 +4,127 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Sequence
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 
-from parser.calibration_segments import find_calibration_segments
+from parser.calibration_segments import (
+    CalibrationSegment,
+    cal_segment_kwargs_for_sensor,
+    prepare_calibration_detection_arrays,
+)
 from visualization._utils import filter_valid_plot_xy, strict_vector_norm
 
 log = logging.getLogger(__name__)
 
-
 def plot_calibration_segments_from_detection(
     df: pd.DataFrame,
+    segments: Sequence[CalibrationSegment],
+    out_path: Path,
     *,
-    sample_rate_hz: float = 100.0,
-    static_min_s: float = 2.25,
-    static_threshold: float = 1.5,
-    peak_min_height: float = 2.5,
-    peak_min_count: int = 5,
-    peak_max_count: int = 20,
-    peak_max_gap_s: float = 3.0,
-    static_gap_max_s: float = 8.0,
-    out_path: Optional[Path] = None,
-) -> tuple[plt.Figure, pd.DataFrame, list]:
-    """Detect calibration segments in *df* and plot them.
+    sensor: str,
+) -> None:
+    """Draw *segments* on *df* and save to *out_path*.
 
-    Returns
-    -------
-    fig : matplotlib.Figure
-    info_df : pd.DataFrame
-        One row per detected segment with columns:
-        segment_index, start_time_s, end_time_s, num_peaks, peak_times_s.
-    segments : list[CalibrationSegment]
-        Raw detected segments.
+    Two stacked panels share the time axis: **|acc|** on top, **smoothed |acc−g|**
+    (same signal as :func:`parser.calibration_segments.find_calibration_segments`)
+    below. Segment shading and peak markers are drawn on both.
+
+    Detection and tabular summaries are the caller's responsibility
+    (:func:`find_calibration_segments`, :func:`describe_calibration_segments`).
     """
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
     ts_s = (ts_ms - ts_ms[0]) / 1000.0 if ts_ms.size > 0 else np.array([])
 
-    acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
-    acc_norm = np.full(len(df), np.nan, dtype=float)
-    if acc_cols:
-        acc_norm = strict_vector_norm(df, acc_cols)
+    seg_list = list(segments)
+    cal_kw = cal_segment_kwargs_for_sensor(sensor)
+    prep = prepare_calibration_detection_arrays(df, sensor=sensor)
+    if prep is None:
+        acc_cols = [c for c in ["ax", "ay", "az"] if c in df.columns]
+        acc_norm = strict_vector_norm(df, acc_cols) if acc_cols else np.full(len(df), np.nan, dtype=float)
+        smooth = np.full(len(df), np.nan, dtype=float)
+    else:
+        acc_norm = prep.norm
+        smooth = prep.dynamic_smooth
 
-    segments = find_calibration_segments(
-        df,
-        sample_rate_hz=sample_rate_hz,
-        static_min_s=static_min_s,
-        static_threshold=static_threshold,
-        peak_min_height=peak_min_height,
-        peak_min_count=peak_min_count,
-        peak_max_gap_s=peak_max_gap_s,
-        static_gap_max_s=static_gap_max_s,
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(16, 6.5), sharex=True)
+
+    def _draw_segment_overlays(ax: Axes, *, legend_labels: bool) -> None:
+        colors = plt.cm.tab10.colors
+        for i, seg in enumerate(seg_list):
+            color = colors[i % len(colors)]
+            s_time = float(ts_s[seg.start_idx]) if seg.start_idx < len(ts_s) else 0.0
+            e_time = float(ts_s[min(seg.end_idx, len(ts_s) - 1)])
+            label = f"Cal {i + 1}" if legend_labels else None
+            ax.axvspan(s_time, e_time, alpha=0.15, color=color, zorder=0, label=label)
+            for p in seg.peak_indices:
+                if p < len(ts_s):
+                    ax.axvline(ts_s[p], color=color, lw=0.5, alpha=0.6, zorder=3)
+
+    x_plot, y_plot = filter_valid_plot_xy(ts_s, acc_norm)
+    ax_top.plot(x_plot, y_plot, lw=0.7, zorder=2, label="|acc|")
+    ax_top.axhline(y=9.81, color="blue", lw=0.5, ls="--", alpha=0.5, zorder=1, label="g")
+
+    ax_top.set_ylabel("|acc| (m/s²)")
+    ax_top.set_title(f"Calibration segments detected: {len(seg_list)} ({sensor})")
+    ax_top.grid(True, alpha=0.25)
+
+    x_s, y_s = filter_valid_plot_xy(ts_s, smooth)
+    ax_bot.plot(
+        x_s,
+        y_s,
+        lw=0.7,
+        zorder=2,
+        label="Smoothed |acc−g|",
+    )
+    pmh = float(cal_kw["peak_min_height"])
+    ax_bot.axhline(
+        pmh,
+        color="blue",
+        lw=0.5,
+        ls="--",
+        alpha=0.5,
+        zorder=1,
+        label=f"Peak min height ({pmh:g})",
     )
 
-    # Build info DataFrame.
-    rows_info: list[dict] = []
-    for i, seg in enumerate(segments):
-        s_time = float(ts_s[seg.start_idx]) if seg.start_idx < len(ts_s) else 0.0
-        e_time = float(ts_s[min(seg.end_idx, len(ts_s) - 1)])
-        peak_times = [float(ts_s[p]) for p in seg.peak_indices if p < len(ts_s)]
-        rows_info.append({
-            "segment_index": i,
-            "start_time_s": s_time,
-            "end_time_s": e_time,
-            "num_peaks": len(seg.peak_indices),
-            "peak_times_s": peak_times,
-        })
-    info_df = pd.DataFrame(rows_info)
+    ax_bot.set_xlabel("Time (s)")
+    ax_bot.set_ylabel("Smoothed |acc−g| (m/s²)")
+    ax_bot.grid(True, alpha=0.25)
 
-    # Plot.
-    fig, ax = plt.subplots(figsize=(14, 4))
+    _draw_segment_overlays(ax_top, legend_labels=True)
+    _draw_segment_overlays(ax_bot, legend_labels=False)
 
-    if ts_s.size > 0:
-        x_plot, y_plot = filter_valid_plot_xy(ts_s, acc_norm)
-        ax.plot(x_plot, y_plot, lw=0.7, color="#555", label="|acc|")
-        ax.axhline(y=9.81, color="blue", lw=0.5, ls="--", alpha=0.5, label="g")
+    def _dedupe_legend(ax: Axes, **kw: object) -> None:
+        handles, labels = ax.get_legend_handles_labels()
+        seen: dict[str, object] = {}
+        for h, lab in zip(handles, labels):
+            if not lab:
+                continue
+            seen[lab] = h
+        if seen:
+            ax.legend(list(seen.values()), list(seen.keys()), **kw)
 
-    colors = plt.cm.tab10.colors
-    for i, seg in enumerate(segments):
-        color = colors[i % len(colors)]
-        s_time = float(ts_s[seg.start_idx]) if seg.start_idx < len(ts_s) else 0.0
-        e_time = float(ts_s[min(seg.end_idx, len(ts_s) - 1)])
-        ax.axvspan(s_time, e_time, alpha=0.15, color=color, label=f"cal {i}")
-        for p in seg.peak_indices:
-            if p < len(ts_s):
-                ax.axvline(ts_s[p], color=color, lw=0.5, alpha=0.6)
+    _dedupe_legend(
+        ax_top,
+        loc="upper right",
+        fontsize=8,
+        framealpha=0.92,
+        ncol=min(4, max(1, len(seg_list) + 2)),
+    )
+    _dedupe_legend(
+        ax_bot,
+        loc="upper right",
+        fontsize=8,
+        framealpha=0.92,
+    )
 
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("|acc| (m/s²)")
-    ax.set_title(f"Calibration segments detected: {len(segments)}")
-    if segments:
-        ax.legend(loc="upper right", fontsize=7, ncol=min(4, len(segments) + 2))
-    fig.tight_layout()
-
-    if out_path is not None:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out_path, dpi=120)
-        log.debug("Saved calibration segments plot → %s", out_path)
-        plt.close(fig)
-
-    return fig, info_df, segments
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    log.debug("Saved calibration segments plot → %s", out_path)

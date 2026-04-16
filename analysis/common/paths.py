@@ -6,6 +6,7 @@ import os
 import re
 import json
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -69,7 +70,7 @@ def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_csv(csv_path: Path | str) -> pd.DataFrame:
-    """Load a CSV from disk using the project's single shared entry point."""
+    """Load a CSV from disk"""
     path = Path(csv_path)
     df = pd.read_csv(path)
     if _looks_like_imu_dataframe(df):
@@ -78,12 +79,50 @@ def read_csv(csv_path: Path | str) -> pd.DataFrame:
 
 
 def write_csv(df: pd.DataFrame, csv_path: Path | str) -> None:
-    """Write a CSV to disk using the project's single shared entry point."""
+    """Write a CSV to disk."""
     path = Path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     out = _normalize_imu_dataframe(df) if _looks_like_imu_dataframe(df) else df.copy()
     out.to_csv(path, index=False)
+
+
+# ---------------------------------------------------------------------------
+# JSON I/O
+# ---------------------------------------------------------------------------
+
+def read_json_file(path: Path | str) -> Any:
+    """Load a JSON file (UTF-8). Returns the decoded object (dict, list, etc.)."""
+    p = Path(path)
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def write_json_file(
+    path: Path | str,
+    data: Any,
+    *,
+    indent: int | None = 2,
+    sort_keys: bool = False,
+    default: Callable[..., Any] | None = None,
+) -> None:
+    """Write *data* as JSON to *path* (UTF-8)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    opts: dict[str, Any] = {}
+    if indent is not None:
+        opts["indent"] = indent
+    if sort_keys:
+        opts["sort_keys"] = True
+    if default is not None:
+        opts["default"] = default
+    p.write_text(json.dumps(data, **opts), encoding="utf-8")
+
+
+def dataframe_to_json_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Convert *df* rows to JSON-native Python objects (handles NumPy scalars)."""
+    if df.empty:
+        return []
+    return json.loads(df.to_json(orient="records"))
 
 
 # ---------------------------------------------------------------------------
@@ -302,10 +341,9 @@ def default_workflow_config_path() -> Path:
     return configs_root() / "workflow.default.json"
 
 
-def read_json_file(path: Path | str) -> dict:
-    """Read a JSON file and return a dictionary payload."""
-    p = Path(path)
-    return json.loads(p.read_text(encoding="utf-8"))
+def cal_segments_config_path() -> Path:
+    """Return the path to per-sensor calibration-segment detection parameters (JSON)."""
+    return configs_root() / "cal_segments_args.json"
 
 
 def load_workflow_config_data(override_path: Path | str | None = None) -> dict:

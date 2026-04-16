@@ -11,13 +11,17 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from common.paths import data_root, default_workflow_config_path, project_relative_path
+from common.paths import (
+    data_root,
+    default_workflow_config_path,
+    project_relative_path,
+    write_json_file,
+)
 from .config import (
     WorkflowConfig,
     known_stages,
@@ -97,9 +101,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.generate_config:
         out = Path(args.generate_config)
-        out.parent.mkdir(parents=True, exist_ok=True)
         cfg = WorkflowConfig()
-        out.write_text(json.dumps(cfg.to_dict(), indent=2), encoding="utf-8")
+        write_json_file(out, cfg.to_dict(), indent=2)
         print(f"Config template written → {project_relative_path(out)}")
         return
 

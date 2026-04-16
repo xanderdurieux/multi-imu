@@ -76,12 +76,6 @@ def split_recording(
     *,
     reference_sensor: str = "sporsa",
     sample_rate_hz: float = 100.0,
-    static_min_s: float = 2.25,
-    static_threshold: float = 1.5,
-    peak_min_height: float = 3.0,
-    peak_min_count: int = 3,
-    peak_max_gap_s: float = 3.0,
-    static_gap_max_s: float = 5.0,
     plot: bool = True,
     sync: bool = True,
 ) -> list[Path]:
@@ -127,16 +121,7 @@ def split_recording(
     ref_df = read_csv(ref_csv)
     ref_df = ref_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-    calibrations = find_calibration_segments(
-        ref_df,
-        sample_rate_hz=sample_rate_hz,
-        static_min_s=static_min_s,
-        static_threshold=static_threshold,
-        peak_min_height=peak_min_height,
-        peak_min_count=peak_min_count,
-        peak_max_gap_s=peak_max_gap_s,
-        static_gap_max_s=static_gap_max_s,
-    )
+    calibrations = find_calibration_segments(ref_df, sensor=reference_sensor)
 
     # Load all sensor DataFrames up-front (skip missing ones with a warning).
     sensor_dfs: dict[str, pd.DataFrame] = {}
@@ -290,6 +275,7 @@ def sync_sections(
                 reference_csv=ref_csv,
                 target_csv=tgt_csv,
                 output_dir=tmp_dir,
+                reference_sensor=reference_sensor,
                 sample_rate_hz=sample_rate_hz,
                 coarse_max_lag_s=coarse_max_lag_s,
                 cal_search_s=cal_search_s,
@@ -349,46 +335,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--sample-rate-hz",
         type=float,
         default=100.0,
-        help="Approximate sampling rate in Hz (default: 100).",
-    )
-    parser.add_argument(
-        "--static-min-s",
-        type=float,
-        default=2.25,
-        help="Minimum duration of flanking static regions in seconds (default: 2.25).",
-    )
-    parser.add_argument(
-        "--static-threshold",
-        type=float,
-        default=1.5,
-        help="Max |acc_norm - g| (m/s²) to classify a sample as static (default: 1.5).",
-    )
-    parser.add_argument(
-        "--peak-min-height",
-        type=float,
-        default=3.0,
-        help="Min |acc_norm - g| (m/s²) for a local maximum to count as a peak (default: 3.0).",
-    )
-    parser.add_argument(
-        "--peak-min-count",
-        type=int,
-        default=3,
-        help="Minimum number of peaks in a cluster to qualify as calibration (default: 3).",
-    )
-    parser.add_argument(
-        "--peak-max-gap-s",
-        type=float,
-        default=3.0,
-        help="Max gap in seconds between consecutive peaks in the same cluster (default: 3.0).",
-    )
-    parser.add_argument(
-        "--static-gap-max-s",
-        type=float,
-        default=5.0,
-        help=(
-            "Max gap in seconds between the flanking static run and the "
-            "first/last peak (default: 5.0)."
-        ),
+        help="Nominal sampling rate (Hz) for per-section sync (default: 100).",
     )
     parser.add_argument(
         "--no-plot",
@@ -418,12 +365,6 @@ def main(argv: list[str] | None = None) -> None:
         sensors=args.sensors,
         reference_sensor=args.reference_sensor,
         sample_rate_hz=args.sample_rate_hz,
-        static_min_s=args.static_min_s,
-        static_threshold=args.static_threshold,
-        peak_min_height=args.peak_min_height,
-        peak_min_count=args.peak_min_count,
-        peak_max_gap_s=args.peak_max_gap_s,
-        static_gap_max_s=args.static_gap_max_s,
         plot=not args.no_plot,
         sync=not args.no_sync,
     )

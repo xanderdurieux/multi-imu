@@ -713,7 +713,9 @@ def plot_sync_methods_comparison(
             transform=ax_off.transAxes,
         )
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    # Avoid tight_layout: ax_tbl uses matplotlib.table, which triggers
+    # "Axes not compatible with tight_layout" on recent Matplotlib.
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.93, bottom=0.05)
     return _save(fig, output_path)
 
 
@@ -1299,7 +1301,22 @@ def plot_sync_anchor_model_fit(
     margin = max(30.0, 0.02 * (t_hi - t_lo))
     t_lo -= margin
     t_hi += margin
-    t_fine = np.linspace(t_lo, t_hi, max(400, int((t_hi - t_lo) * 3)))
+
+    span = float(t_hi - t_lo)
+    # Anchors use reference-clock seconds (often epoch-scale); Arduino bounds are
+    # usually relative / short. Mixing the two yields a bogus multi-year span and
+    # a linspace that allocates tens of GiB.
+    _max_reasonable_span_s = 48.0 * 3600.0
+    if span > _max_reasonable_span_s and anchor_ts:
+        t_lo = float(min(anchor_ts))
+        t_hi = float(max(anchor_ts))
+        m2 = max(30.0, 0.02 * (t_hi - t_lo))
+        t_lo -= m2
+        t_hi += m2
+        span = float(t_hi - t_lo)
+
+    n_pts = max(400, min(12_000, int(max(span, 1e-9) * 3)))
+    t_fine = np.linspace(t_lo, t_hi, n_pts)
 
     fig, ax = plt.subplots(figsize=(14, 6))
     any_line = False

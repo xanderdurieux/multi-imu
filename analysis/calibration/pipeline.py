@@ -176,7 +176,9 @@ def calibrate_section(
 
             # Capture opening sequence from first sensor that yields one
             if opening_sequence is None and sensor in all_intrinsics:
-                seg, _ = detect_protocol_landmarks(df, sample_rate_hz=sample_rate_hz)
+                seg, _ = detect_protocol_landmarks(
+                    df, sensor=sensor, sample_rate_hz=sample_rate_hz
+                )
                 if seg is not None:
                     opening_sequence = _build_opening_sequence(df, seg)
                     protocol_detected_any = True
@@ -251,7 +253,9 @@ def _cal_sensor(
     section_name = section_dir.name
 
     # Detect protocol landmarks
-    opening_seg, static_ranges = detect_protocol_landmarks(df, sample_rate_hz=sample_rate_hz)
+    opening_seg, static_ranges = detect_protocol_landmarks(
+        df, sensor=sensor, sample_rate_hz=sample_rate_hz
+    )
 
     fallback_used = False
     if not static_ranges:

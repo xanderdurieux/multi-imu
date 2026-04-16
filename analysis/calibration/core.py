@@ -455,7 +455,8 @@ def _find_first_stable_window(
 def detect_protocol_landmarks(
     df: pd.DataFrame,
     *,
-    sample_rate_hz: float = 100.0,
+    sensor: str,
+    sample_rate_hz: float | None = None,
 ) -> tuple[CalibrationSegment | None, list[tuple[int, int]]]:
     """Detect opening-routine protocol landmarks in an IMU DataFrame.
 
@@ -467,7 +468,10 @@ def detect_protocol_landmarks(
         ``static_ranges``: list of (start_idx, end_idx) for the static flanks
         of the opening routine (pre-tap and post-tap).  Empty on failure.
     """
-    segs = find_calibration_segments(df, sample_rate_hz=sample_rate_hz)
+    overrides: dict[str, float] = {}
+    if sample_rate_hz is not None:
+        overrides["sample_rate_hz"] = float(sample_rate_hz)
+    segs = find_calibration_segments(df, sensor=sensor, **overrides)
     if not segs:
         return None, []
 

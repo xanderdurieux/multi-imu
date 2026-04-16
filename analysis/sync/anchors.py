@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 
 from common.signals import find_peaks_simple, smooth_moving_average
-from parser.calibration_segments import CalibrationSegment, find_calibration_segments
+from parser.calibration_segments import (
+    CalibrationSegment,
+    cal_segment_kwargs_for_sensor,
+    find_calibration_segments,
+)
 
 from .activity import build_alignment_series, SIGNAL_MODE_ACC_NORM_DIFF
 from .stream_io import (
@@ -26,8 +30,6 @@ log = logging.getLogger(__name__)
 DEFAULT_ANCHOR_SAMPLE_RATE_HZ = 100.0
 DEFAULT_ANCHOR_SEARCH_SECONDS = 5.0
 DEFAULT_ANCHOR_PEAK_BUFFER_SECONDS = 1.0
-DEFAULT_ANCHOR_PEAK_MIN_HEIGHT = 3.0
-DEFAULT_ANCHOR_PEAK_MIN_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -235,10 +237,13 @@ def refine_offset_at_calibration(
 
 
 def detect_reference_calibrations(
-    ref_df: pd.DataFrame, *, sample_rate_hz: float = 100.0, **kwargs
+    ref_df: pd.DataFrame,
+    *,
+    sensor: str,
+    **overrides: Any,
 ) -> list[CalibrationSegment]:
-    """Detect calibration segments in the reference stream."""
-    return find_calibration_segments(ref_df, sample_rate_hz=sample_rate_hz, **kwargs)
+    """Detect calibration segments in the reference stream (config-driven)."""
+    return find_calibration_segments(ref_df, sensor=sensor, **overrides)
 
 
 def filter_segments_in_target_range(
@@ -314,6 +319,7 @@ def extract_calibration_anchors(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
+    reference_sensor: str = "sporsa",
     sample_rate_hz: float = DEFAULT_ANCHOR_SAMPLE_RATE_HZ,
     search_seconds: float = DEFAULT_ANCHOR_SEARCH_SECONDS,
     peak_buffer_seconds: float = DEFAULT_ANCHOR_PEAK_BUFFER_SECONDS,
@@ -321,12 +327,12 @@ def extract_calibration_anchors(
     sda_fallback_max_lag_s: float = 120.0,
 ) -> CalibrationAnchorExtraction:
     """Detect, match, and refine shared calibration anchors once."""
-    ref_cals = detect_reference_calibrations(
+    ref_cals = find_calibration_segments(
         ref_df,
-        sample_rate_hz=sample_rate_hz,
-        peak_min_height=DEFAULT_ANCHOR_PEAK_MIN_HEIGHT,
-        peak_min_count=DEFAULT_ANCHOR_PEAK_MIN_COUNT,
+        sensor=reference_sensor,
+        sample_rate_hz=float(sample_rate_hz),
     )
+    p = cal_segment_kwargs_for_sensor(reference_sensor)
     if not ref_cals:
         raise ValueError("No calibration sequences found in reference stream.")
 
@@ -334,8 +340,8 @@ def extract_calibration_anchors(
         ref_df,
         tgt_df,
         ref_cals,
-        peak_min_height=DEFAULT_ANCHOR_PEAK_MIN_HEIGHT,
-        peak_min_count=DEFAULT_ANCHOR_PEAK_MIN_COUNT,
+        peak_min_height=float(p["peak_min_height"]),
+        peak_min_count=int(p["peak_min_count"]),
         sda_max_lag_s=sda_fallback_max_lag_s,
     )
     in_range = filter_segments_in_target_range(

@@ -3,9 +3,11 @@
 from .paths import (
     CSV_COLUMNS,
     analysis_root,
+    dataframe_to_json_records,
     data_root,
     list_csv_files,
     read_csv,
+    read_json_file,
     resolve_data_dir,
     recording_dir,
     recording_stage_dir,
@@ -16,14 +18,18 @@ from .paths import (
     session_input_dir,
     sessions_root,
     write_csv,
+    write_json_file,
 )
 
 __all__ = [
     "CSV_COLUMNS",
     "analysis_root",
+    "dataframe_to_json_records",
     "data_root",
     "read_csv",
+    "read_json_file",
     "write_csv",
+    "write_json_file",
     "resolve_data_dir",
     "sensor_csv",
     "list_csv_files",
