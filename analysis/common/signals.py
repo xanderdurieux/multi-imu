@@ -18,18 +18,7 @@ def vector_norm(df: pd.DataFrame, columns: Sequence[str]) -> np.ndarray:
 
 
 def add_imu_norms(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy of *df* with ``acc_norm`` and ``gyro_norm`` columns added.
-
-    Both columns are computed from the raw axis columns that must already be
-    present: ``ax/ay/az`` for ``acc_norm`` and ``gx/gy/gz`` for ``gyro_norm``.
-    NaNs in individual axes are treated as zero when summing squares so that a
-    partial row (e.g. when only one sensor type arrived for that timestamp) still
-    gets a meaningful partial norm rather than a full NaN.
-
-    This is the canonical norm calculation shared across all pipeline stages.
-    Calling it at parse time means the result is stored in the CSV and later
-    stages can read it directly instead of recomputing.
-    """
+    """Return a copy of `df` with `acc_norm`, `gyro_norm`, and `mag_norm` columns added."""
     out = df.copy()
     out["acc_norm"] = vector_norm(out, ["ax", "ay", "az"])
     out["gyro_norm"] = vector_norm(out, ["gx", "gy", "gz"])

@@ -190,8 +190,8 @@ def split_recording(
 
     written: list[Path] = []
     for i, (c_open, c_close) in enumerate(zip(calibrations, calibrations[1:]), start=1):
-        ts_start = float(ref_df.iloc[c_open.start_idx]["timestamp"])
-        ts_end = float(ref_df.iloc[c_close.end_idx]["timestamp"])
+        ts_start = c_open.start_ms
+        ts_end = c_close.end_ms
 
         slices: dict[str, pd.DataFrame] = {}
         for sensor, df in sensor_dfs.items():

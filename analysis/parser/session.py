@@ -9,12 +9,10 @@ import re
 from typing import Optional
 
 from common import (
-    dataframe_to_json_records,
     recording_stage_dir,
     read_csv,
     session_input_dir,
     write_csv,
-    write_json_file,
 )
 from common.paths import project_relative_path
 
@@ -24,9 +22,9 @@ from visualization.plot_calibration_segments import (
 from visualization.plot_sensor import plot_sensor_data
 
 from .calibration_segments import (
-    cal_segment_kwargs_for_sensor,
-    describe_calibration_segments,
+    export_calibration_segments_json,
     find_calibration_segments,
+    load_cal_seg_params,
 )
 from .arduino import parse_arduino_log
 from .sporsa import parse_sporsa_log
@@ -128,12 +126,8 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
         stats_path = write_recording_stats(recording_name)
         log.info("parse %s: wrote stats %s", recording_name, project_relative_path(stats_path))
 
-        calibration_segments_file_payload: dict = {
-            "recording_name": recording_name,
-            "sensors": {},
-        }
-
-        # Calibration-segment metadata for ``calibration_segments.json``; plots optional.
+        # Calibration-segment detection and JSON export.
+        cal_json_payload: dict = {"recording_name": recording_name, "sensors": {}}
         for sensor_name in ("sporsa", "arduino"):
             csv_path = out_dir / f"{sensor_name}.csv"
             if not csv_path.exists():
@@ -150,13 +144,8 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
             if df_work.empty:
                 continue
 
-            cal_kw = cal_segment_kwargs_for_sensor(sensor_name)
+            params = load_cal_seg_params(sensor_name)
             segments = find_calibration_segments(df_work, sensor=sensor_name)
-            info_df = describe_calibration_segments(
-                df_work,
-                segments,
-                sample_rate_hz=float(cal_kw["sample_rate_hz"]),
-            )
 
             if plot:
                 plot_calibration_segments_from_detection(
@@ -166,39 +155,13 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
                     sensor=sensor_name,
                 )
 
-            segment_records: list[dict] = []
-            if not info_df.empty and "segment_index" in info_df.columns:
-                segment_records = dataframe_to_json_records(info_df)
-
-            total_duration_s = 0.0
-            timestamps_are_ms = "timestamp" in df_work.columns
-            for _, row in info_df.iterrows():
-                start_t = float(row.get("start_timestamp", row.get("start_time_s", 0.0)))
-                end_t = float(row.get("end_timestamp", row.get("end_time_s", start_t)))
-                duration = max(0.0, end_t - start_t)
-                if timestamps_are_ms:
-                    duration /= 1000.0
-                total_duration_s += duration
-
-            calibration_segments_file_payload["sensors"][sensor_name] = {
-                "detection_params": dict(cal_kw),
-                "num_segments": len(segments),
-                "total_duration_s": total_duration_s,
-                "segments": segment_records,
-            }
-
-        if calibration_segments_file_payload["sensors"]:
-            cal_json_path = out_dir / "calibration_segments.json"
-            write_json_file(
-                cal_json_path,
-                calibration_segments_file_payload,
-                indent=2,
-                sort_keys=True,
+            export_calibration_segments_json(
+                recording_name, sensor_name, segments, params,
+                existing=cal_json_payload,
             )
             log.info(
-                "parse %s: wrote calibration segments %s",
-                recording_name,
-                project_relative_path(cal_json_path),
+                "parse %s: wrote calibration segments for %s (%d found)",
+                recording_name, sensor_name, len(segments),
             )
 
 def _build_arg_parser() -> argparse.ArgumentParser:
