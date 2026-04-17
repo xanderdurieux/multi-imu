@@ -217,25 +217,6 @@ def _cluster_is_near_recording_gap(
     return False
 
 
-def _recording_gap_exists_between(
-    ts_ms: np.ndarray,
-    start_ms: float,
-    end_ms: float,
-    *,
-    min_gap_ms: float,
-) -> bool:
-    """Return whether a large timestamp gap exists within [start_ms, end_ms]."""
-    if len(ts_ms) < 2 or end_ms <= start_ms:
-        return False
-    dts = np.diff(ts_ms)
-    for left_t, right_t, gap_ms in zip(ts_ms[:-1], ts_ms[1:], dts):
-        if not np.isfinite(gap_ms) or gap_ms < min_gap_ms:
-            continue
-        if float(left_t) >= start_ms and float(right_t) <= end_ms:
-            return True
-    return False
-
-
 def _filter_valid_clusters(
     clusters: list[list[float]], params: CalSegParams, ts_ms: np.ndarray
 ) -> list[list[float]]:
@@ -311,7 +292,10 @@ def _segment_for_cluster(
         return None
 
     pre_gap_ms = c_start - pre_run[1]
-    if pre_gap_ms > params.static_flank_gap_max_ms:
+    if (
+        pre_gap_ms > params.static_flank_gap_max_ms
+        and not _recording_gap_exists_between(ts_ms, pre_run[1], c_start, min_gap_ms=params.recording_gap_min_ms)
+    ):
         return None
 
     post_run: tuple[float, float] | None = None
@@ -330,7 +314,10 @@ def _segment_for_cluster(
         return None
 
     post_gap_ms = post_run[0] - c_end
-    if post_gap_ms > params.static_flank_gap_max_ms:
+    if ( 
+        post_gap_ms > params.static_flank_gap_max_ms
+        and not _recording_gap_exists_between(ts_ms, c_end, post_run[0], min_gap_ms=params.recording_gap_min_ms)
+    ):
         return None
 
     strength = 0.0
@@ -383,6 +370,24 @@ def _cluster_is_near_recording_gap(
             return True
     return False
 
+
+def _recording_gap_exists_between(
+    ts_ms: np.ndarray,
+    start_ms: float,
+    end_ms: float,
+    *,
+    min_gap_ms: float,
+) -> bool:
+    """Return whether a large timestamp gap exists within [start_ms, end_ms]."""
+    if len(ts_ms) < 2 or end_ms <= start_ms:
+        return False
+    dts = np.diff(ts_ms)
+    for left_t, right_t, gap_ms in zip(ts_ms[:-1], ts_ms[1:], dts):
+        if not np.isfinite(gap_ms) or gap_ms < min_gap_ms:
+            continue
+        if float(left_t) >= start_ms and float(right_t) <= end_ms:
+            return True
+    return False
 
 
 def _deduplicate_segments(

@@ -78,11 +78,11 @@ def plot_calibration_segments_from_detection(
         t0_ms = ts_ms[0] if ts_ms.size > 0 else 0.0
         for i, seg in enumerate(seg_list):
             color = colors[i % len(colors)]
-            s_time = (seg.start_timestamp - t0_ms) / 1000.0
-            e_time = (seg.end_timestamp - t0_ms) / 1000.0
+            s_time = (seg.start_ms - t0_ms) / 1000.0
+            e_time = (seg.end_ms - t0_ms) / 1000.0
             label = f"Cal {i + 1}" if legend_labels else None
             ax.axvspan(s_time, e_time, alpha=0.15, color=color, zorder=0, label=label)
-            for p_ms in (seg.peak_timestamps or []):
+            for p_ms in (seg.peak_ms or []):
                 ax.axvline((p_ms - t0_ms) / 1000.0, color=color, lw=0.5, alpha=0.6, zorder=3)
 
     x_plot, y_plot = filter_valid_plot_xy(ts_s, acc_norm)
