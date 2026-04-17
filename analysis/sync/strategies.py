@@ -39,14 +39,14 @@ def _build_calibration_meta(
     *,
     fit_r2: float | None = None,
 ) -> dict[str, Any]:
-    sorted_anchors = sorted(anchors, key=lambda a: a.tgt_timestamp_ms)
+    sorted_anchors = sorted(anchors, key=lambda a: a.tgt_ms)
     opening = sorted_anchors[0] if sorted_anchors else None
     closing = sorted_anchors[-1] if sorted_anchors else None
 
     calibration: dict[str, Any] = {
         "n_anchors": len(sorted_anchors),
         "anchor_span_s": (
-            round(float((closing.tgt_timestamp_ms - opening.tgt_timestamp_ms) / 1000.0), 1)
+            round(float((closing.tgt_ms - opening.tgt_ms) / 1000.0), 1)
             if opening is not None and closing is not None and len(sorted_anchors) >= 2
             else 0.0
         ),
@@ -93,7 +93,7 @@ def estimate_multi_anchor(
         )
 
     tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
-    target_times = np.asarray([a.tgt_timestamp_ms / 1000.0 for a in anchors], dtype=float)
+    target_times = np.asarray([a.tgt_ms / 1000.0 for a in anchors], dtype=float)
     offsets = np.asarray([a.offset_s for a in anchors], dtype=float)
     # Equal weights — each anchor is a single tap-cluster median, no quality score
     weights = np.ones(len(anchors), dtype=float)
@@ -141,7 +141,7 @@ def estimate_one_anchor_adaptive(
         tgt_sensor=target_sensor,
     )
     opening_anchor = anchors[0]
-    start_ref_time_s = opening_anchor.ref_timestamp_ms / 1000.0
+    start_ref_time_s = opening_anchor.ref_ms / 1000.0
 
     ref_series = build_alignment_series(
         ref_df,
@@ -238,7 +238,7 @@ def estimate_one_anchor_prior(
     drift_s_per_s = float(drift_ppm) * 1e-6
     offset_at_origin = (
         opening_anchor.offset_s
-        - drift_s_per_s * (opening_anchor.tgt_timestamp_ms / 1000.0 - tgt_origin_s)
+        - drift_s_per_s * (opening_anchor.tgt_ms / 1000.0 - tgt_origin_s)
     )
 
     model = make_sync_model(

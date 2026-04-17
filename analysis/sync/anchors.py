@@ -4,15 +4,21 @@ The synchronisation model needs one time anchor per calibration sequence: a
 point where the reference and target clocks observed the same physical event.
 The recording protocol guarantees that both sensors are tapped simultaneously
 during each calibration sequence, so the **median tap timestamp** in each
-sensor stream is a direct anchor.
+sensor stream is a direct coarse anchor.
 
-Anchor extraction is therefore purely timestamp-based:
+Anchor extraction:
 
 1. Load the calibration-segment JSON for both sensors (written by the parser).
 2. Match segments 1-to-1 in chronological order (equal counts required).
-3. For each pair compute::
+3. For each pair compute a coarse offset from median peak timestamps::
 
-       offset_s = (median(ref_peak_timestamps_ms) − median(tgt_peak_timestamps_ms)) / 1000
+       coarse_offset_s = (median(ref_peak_ms) − median(tgt_peak_ms)) / 1000
+
+4. Refine each anchor by resampling the ``acc_norm`` signal within the
+   peak window at a common rate and maximising cross-correlation (via
+   :func:`sync.xcorr.estimate_lag`) within ±``_REFINE_SEARCH_S`` of the
+   coarse lag. The lag that maximises overlap-normalised correlation
+   converts directly to a sub-sample offset correction.
 
 The result feeds directly into the drift-fitting step in
 :mod:`sync.strategies`.
@@ -21,17 +27,24 @@ The result feeds directly into the drift-fitting step in
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
+from common.paths import recording_stage_dir
 from parser.calibration_segments import (
     CalibrationSegment,
     load_calibration_segments_from_json,
 )
+from .stream_io import load_stream, resample_stream
+from .xcorr import estimate_lag
 
 log = logging.getLogger(__name__)
+
+_REFINE_SAMPLE_RATE_HZ: float = 100.0
+_REFINE_SEARCH_S: float = 1.0   # ± search window around coarse lag
 
 
 @dataclass(frozen=True)
@@ -42,10 +55,73 @@ class CalibrationAnchor:
     **seconds** (consistent with the sync model).
     """
 
-    ref_timestamp_ms: float   # median peak timestamp in reference stream
-    tgt_timestamp_ms: float   # median peak timestamp in target stream (raw)
-    offset_s: float           # (ref_ms − tgt_ms) / 1000
+    ref_ms: float   # median peak timestamp in reference stream
+    tgt_ms: float   # inferred target timestamp (ref_ms − offset_s*1000)
+    offset_s: float           # (ref_ms − tgt_ms) / 1000, refined by xcorr
+    score: float = 0.0        # overlap-normalised xcorr score (NaN if unavailable)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _shake_center_ms(seg: CalibrationSegment) -> float:
+    """Midpoint of the shake zone: between end of pre-static and start of post-static."""
+    shake_start = seg.start_ms + seg.static_pre_ms
+    shake_end = seg.end_ms - seg.static_post_ms
+    return (shake_start + shake_end) / 2.0
+
+
+def _refine_offset_xcorr(
+    ref_df: pd.DataFrame,
+    tgt_df: pd.DataFrame,
+    ref_seg: CalibrationSegment,
+    coarse_offset_s: float,
+) -> tuple[float, float]:
+    """Refine *coarse_offset_s* by maximising acc_norm cross-correlation.
+
+    Uses the full segment span (not just detected peaks) so that partial
+    detections near recording gaps do not bias the window placement.
+    Searches ±``_REFINE_SEARCH_S`` around lag 0.
+    """
+    ref_start = ref_seg.start_ms
+    ref_end = ref_seg.end_ms
+
+    # Corresponding tgt window according to coarse offset.
+    tgt_start = ref_start - coarse_offset_s * 1000.0
+    tgt_end = ref_end - coarse_offset_s * 1000.0
+
+    ref_win = resample_stream(
+        ref_df, _REFINE_SAMPLE_RATE_HZ,
+        start_ms=ref_start, end_ms=ref_end, columns=["acc_norm"],
+    )
+    tgt_win = resample_stream(
+        tgt_df, _REFINE_SAMPLE_RATE_HZ,
+        start_ms=tgt_start, end_ms=tgt_end, columns=["acc_norm"],
+    )
+
+    if "acc_norm" not in ref_win.columns or "acc_norm" not in tgt_win.columns:
+        return coarse_offset_s, float("nan")
+
+    ref_sig = ref_win["acc_norm"].to_numpy(dtype=float)
+    tgt_sig = tgt_win["acc_norm"].to_numpy(dtype=float)
+    if ref_sig.size < 10 or tgt_sig.size < 10:
+        return coarse_offset_s, float("nan")
+
+    search_n = max(1, int(round(_REFINE_SEARCH_S * _REFINE_SAMPLE_RATE_HZ)))
+    lag, score = estimate_lag(ref_sig, tgt_sig, max_lag_samples=search_n)
+
+    if not np.isfinite(score) or score <= 0:
+        return coarse_offset_s, float("nan")
+
+    # Positive lag: ref is lag samples ahead of tgt → offset increases.
+    refined_offset_s = coarse_offset_s + lag / _REFINE_SAMPLE_RATE_HZ
+    return refined_offset_s, float(score)
+
+
+# ---------------------------------------------------------------------------
+# Main API
+# ---------------------------------------------------------------------------
 
 def load_calibration_anchors(
     recording_name: str,
@@ -53,7 +129,7 @@ def load_calibration_anchors(
     ref_sensor: str = "sporsa",
     tgt_sensor: str = "arduino",
 ) -> list[CalibrationAnchor]:
-    """Load calibration segments and produce one anchor per matched pair."""
+    """Load calibration segments and produce one refined anchor per matched pair."""
     ref_segs = load_calibration_segments_from_json(recording_name, ref_sensor)
     tgt_segs = load_calibration_segments_from_json(recording_name, tgt_sensor)
 
@@ -74,29 +150,40 @@ def load_calibration_anchors(
             "Segments must be detected 1-to-1 for anchor matching."
         )
 
+    parsed_dir = recording_stage_dir(recording_name, "parsed")
+    ref_df = load_stream(parsed_dir / f"{ref_sensor}.csv")
+    tgt_df = load_stream(parsed_dir / f"{tgt_sensor}.csv")
+
     anchors: list[CalibrationAnchor] = []
     for i, (ref_seg, tgt_seg) in enumerate(zip(ref_segs, tgt_segs)):
-        if not ref_seg.peak_timestamps:
-            log.warning("Anchor %d: reference segment has no peak timestamps — skipping.", i)
+        if not ref_seg.peak_ms:
+            log.warning("Anchor %d: reference segment has no peaks — skipping.", i)
             continue
-        if not tgt_seg.peak_timestamps:
-            log.warning("Anchor %d: target segment has no peak timestamps — skipping.", i)
+        if not tgt_seg.peak_ms:
+            log.warning("Anchor %d: target segment has no peaks — skipping.", i)
             continue
 
-        ref_med_ms = float(np.median(ref_seg.peak_timestamps))
-        tgt_med_ms = float(np.median(tgt_seg.peak_timestamps))
-        offset_s = (ref_med_ms - tgt_med_ms) / 1000.0
+        ref_center_ms = np.median(ref_seg.peak_ms)
+        tgt_center_ms = np.median(tgt_seg.peak_ms)
+        coarse_offset_s = (ref_center_ms - tgt_center_ms) / 1000.0
 
+        refined_offset_s, score = _refine_offset_xcorr(
+            ref_df, tgt_df, ref_seg, coarse_offset_s,
+        )
+
+        tgt_center_ms = ref_center_ms - refined_offset_s * 1000.0
         anchors.append(
             CalibrationAnchor(
-                ref_timestamp_ms=ref_med_ms,
-                tgt_timestamp_ms=tgt_med_ms,
-                offset_s=offset_s,
+                ref_ms=ref_center_ms,
+                tgt_ms=tgt_center_ms,
+                offset_s=refined_offset_s,
+                score=score,
             )
         )
         log.debug(
-            "Anchor %d: ref=%.1f ms  tgt=%.1f ms  offset=%.4f s",
-            i, ref_med_ms, tgt_med_ms, offset_s,
+            "Anchor %d: ref=%.1f ms  tgt=%.1f ms  coarse=%.4f s  refined=%.4f s  score=%.3f",
+            i, ref_center_ms, tgt_center_ms, coarse_offset_s, refined_offset_s,
+            score if np.isfinite(score) else -1.0,
         )
 
     if not anchors:
@@ -105,7 +192,7 @@ def load_calibration_anchors(
             f"({ref_sensor} / {tgt_sensor})."
         )
 
-    return sorted(anchors, key=lambda a: a.tgt_timestamp_ms)
+    return sorted(anchors, key=lambda a: a.tgt_ms)
 
 
 def calibration_anchor_to_dict(
@@ -116,8 +203,9 @@ def calibration_anchor_to_dict(
     """Serialise one anchor for sync metadata."""
     data: dict[str, Any] = {
         "offset_s": round(float(anchor.offset_s), 6),
-        "ref_timestamp_ms": round(float(anchor.ref_timestamp_ms), 1),
-        "tgt_timestamp_ms": round(float(anchor.tgt_timestamp_ms), 1),
+        "ref_ms": round(float(anchor.ref_ms), 1),
+        "tgt_ms": round(float(anchor.tgt_ms), 1),
+        "score": round(float(anchor.score), 4) if np.isfinite(anchor.score) else None,
     }
     if index is not None:
         data["index"] = int(index)

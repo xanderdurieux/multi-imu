@@ -280,6 +280,14 @@ def draw_sync_model_comparison(
     if anchors is None:
         anchors = _collect_anchors(sync_infos)
 
+    # Compute baseline to normalise y-axis (removes the ~1.77e9 Unix-timestamp component)
+    raw_offsets = [
+        float(info["offset_seconds"])
+        for info in sync_infos.values()
+        if isinstance(info, dict) and info.get("offset_seconds") is not None
+    ]
+    y_baseline = float(np.median(raw_offsets)) if raw_offsets else 0.0
+
     t_range = np.linspace(0.0, duration_s, 500)
     y_values: list[float] = []
     primary_line: tuple[np.ndarray, np.ndarray, str] | None = None
@@ -294,7 +302,7 @@ def draw_sync_model_comparison(
         offset_s = info.get("offset_seconds")
         if offset_s is None:
             continue
-        offset_s = float(offset_s)
+        offset_s = float(offset_s) - y_baseline
         drift    = float(info.get("drift_seconds_per_second") or 0.0)
         color    = _METHOD_COLORS[method]
 
@@ -321,15 +329,15 @@ def draw_sync_model_comparison(
             {
                 "y": offset_s,
                 "color": color,
-                "label": f"{offset_s:+.2f} s",
+                "label": f"{offset_s:+.3f} s",
             }
         )
 
     # Calibration anchors
     if anchors:
-        τ_tgt_arr = np.array([float(a["t_tgt_s"]) - origin_s for a in anchors])
+        τ_tgt_arr = np.array([float(a["tgt_ms"]) / 1000.0 - origin_s for a in anchors])
         offset_arr = np.array(
-            [float(a["t_ref_s"]) - float(a["t_tgt_s"]) for a in anchors],
+            [float(a["offset_s"]) - y_baseline for a in anchors],
             dtype=float,
         )
         anchor_scores = np.array(
@@ -387,19 +395,19 @@ def draw_sync_model_comparison(
 
             residual_specs.sort(key=lambda item: (item["x"], item["y_anchor"]))
             if residual_specs:
-                y_min_now = min(y_values)
-                y_max_now = max(y_values)
-                y_span = max(y_max_now - y_min_now, 0.02)
-                min_gap = 0.04 * y_span
+                # Span from anchor range only — not global y_values which can be
+                # dominated by signal_only's offset.
+                anchor_ys = [s["y_anchor"] for s in residual_specs]
+                anchor_span = max(max(anchor_ys) - min(anchor_ys), 0.02)
+                min_gap = max(0.04 * anchor_span, 0.005)
                 placed_y: list[float] = []
                 for spec in residual_specs:
                     direction = 1.0 if spec["residual_ms"] >= 0.0 else -1.0
-                    base_y = spec["y_anchor"] + direction * (0.015 * y_span)
+                    base_y = spec["y_anchor"] + direction * (0.015 * anchor_span)
                     text_y = base_y
                     while any(abs(text_y - prev_y) < min_gap for prev_y in placed_y):
                         text_y += direction * min_gap
                     placed_y.append(text_y)
-                    y_values.append(text_y)
                     va = "bottom" if direction > 0 else "top"
                     ax.text(
                         spec["x"] + 3.0,
@@ -410,6 +418,7 @@ def draw_sync_model_comparison(
                         va=va,
                         ha="left",
                         zorder=7,
+                        clip_on=True,
                         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.4},
                     )
         if show_anchor_scorebar and finite_scores.size:
@@ -419,41 +428,59 @@ def draw_sync_model_comparison(
 
     if intercept_specs:
         intercept_specs.sort(key=lambda item: float(item["y"]))
-        y_min_now = min(y_values) if y_values else min(float(item["y"]) for item in intercept_specs)
-        y_max_now = max(y_values) if y_values else max(float(item["y"]) for item in intercept_specs)
-        y_span = max(y_max_now - y_min_now, 0.02)
-        min_gap = 0.035 * y_span
+        # Use a tight y-span (without signal_only outliers) for min_gap so labels
+        # don't get pushed far outside the axes.
+        core_ys = [float(item["y"]) for item in intercept_specs]
+        if len(core_ys) >= 3:
+            q25, q75 = float(np.percentile(core_ys, 25)), float(np.percentile(core_ys, 75))
+            iqr = max(q75 - q25, 1e-6)
+            core_ys_filtered = [v for v in core_ys if abs(v - np.median(core_ys)) <= 3 * iqr]
+        else:
+            core_ys_filtered = core_ys
+        core_span = max(
+            max(core_ys_filtered) - min(core_ys_filtered) if core_ys_filtered else 0.02,
+            0.02,
+        )
+        min_gap = 0.08 * core_span
         placed_y: list[float] = []
         for spec in intercept_specs:
             text_y = float(spec["y"])
             while any(abs(text_y - prev_y) < min_gap for prev_y in placed_y):
                 text_y += min_gap
             placed_y.append(text_y)
-            y_values.append(text_y)
             ax.annotate(
                 str(spec["label"]),
                 xy=(0.0, float(spec["y"])),
-                xytext=(8, (text_y - float(spec["y"])) * 72.0),
-                textcoords="offset points",
+                xytext=(duration_s * 0.015, text_y),
+                textcoords="data",
                 fontsize=7,
                 color=str(spec["color"]),
                 va="center",
+                annotation_clip=True,
+                arrowprops={"arrowstyle": "-", "color": str(spec["color"]), "lw": 0.5},
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.4},
             )
 
     if drift_label_specs:
         drift_label_specs.sort(key=lambda item: float(item["y"]))
-        y_min_now = min(y_values) if y_values else min(float(item["y"]) for item in drift_label_specs)
-        y_max_now = max(y_values) if y_values else max(float(item["y"]) for item in drift_label_specs)
-        y_span = max(y_max_now - y_min_now, 0.02)
-        min_gap = 0.04 * y_span
+        # Use only the drift-label y positions themselves for min_gap, ignoring
+        # outlier methods (signal_only) so close methods don't get pushed off-screen.
+        drift_ys = [float(s["y"]) for s in drift_label_specs]
+        if len(drift_ys) >= 2:
+            dq25 = float(np.percentile(drift_ys, 25))
+            dq75 = float(np.percentile(drift_ys, 75))
+            d_iqr = max(dq75 - dq25, 1e-6)
+            drift_ys_core = [v for v in drift_ys if abs(v - np.median(drift_ys)) <= 3 * d_iqr]
+        else:
+            drift_ys_core = drift_ys
+        drift_span = max(max(drift_ys_core) - min(drift_ys_core) if drift_ys_core else 0.02, 0.02)
+        min_gap = max(0.06 * drift_span, 0.005)
         placed_y: list[float] = []
         for spec in drift_label_specs:
             text_y = float(spec["y"])
             while any(abs(text_y - prev_y) < min_gap for prev_y in placed_y):
                 text_y += min_gap
             placed_y.append(text_y)
-            y_values.append(text_y)
             ax.text(
                 float(spec["x"]),
                 text_y,
@@ -463,16 +490,25 @@ def draw_sync_model_comparison(
                 va="center",
                 ha="left",
                 zorder=7,
+                clip_on=True,
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.4},
             )
 
     ax.set_xlabel("Target time from origin (s)")
-    ax.set_ylabel("Offset t_ref - t_tgt (s)")
+    ax.set_ylabel(f"Δ offset (s)  [ref ≈ {y_baseline:.2f} s]")
     if y_values:
-        y_min = min(y_values)
-        y_max = max(y_values)
-        margin = max(0.01, 0.08 * max(y_max - y_min, 0.02))
-        ax.set_ylim(y_min - margin, y_max + margin)
+        # Tukey IQR fence: clip extreme outliers (e.g. signal_only diverging by
+        # tens of seconds) so calibration methods remain visible.
+        arr = np.array(y_values, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size:
+            q25, q75 = float(np.percentile(arr, 25)), float(np.percentile(arr, 75))
+            iqr = max(q75 - q25, 0.05)   # floor at 50 ms so axis never collapses
+            lo = q25 - 2.0 * iqr
+            hi = q75 + 2.0 * iqr
+            span = max(hi - lo, 0.1)
+            margin = max(0.02, 0.15 * span)
+            ax.set_ylim(lo - margin, hi + margin)
     ax.grid(alpha=0.25, lw=0.4)
     ax.legend(fontsize=8, loc="upper left")
     return ax
@@ -844,12 +880,148 @@ def plot_sync_method_metrics(
 # CLI
 # ---------------------------------------------------------------------------
 
+def plot_anchor_fits(
+    recording_name: str,
+    *,
+    output_path: Path | None = None,
+) -> Path:
+    """Per-anchor acc_norm alignment: ref vs tgt under coarse and refined offset.
+
+    One panel per calibration anchor.  Each panel overlays:
+
+    - **ref** (blue): acc_norm over the full segment window.
+    - **tgt coarse** (orange dashed): tgt acc_norm shifted by the shake-center offset.
+    - **tgt refined** (orange solid): tgt acc_norm shifted by the xcorr-refined offset.
+    - Detected peaks for both sensors as vertical dashed lines.
+    - Shake zone shaded in light grey.
+
+    Output: ``synced/anchor_fits.png``.
+    """
+    from parser.calibration_segments import load_calibration_segments_from_json
+    from sync.stream_io import load_stream, resample_stream
+
+    _RATE = 100.0
+    _REF_SENSOR = "sporsa"
+    _TGT_SENSOR = "arduino"
+    _COLOR_REF = SENSOR_COLORS.get(_REF_SENSOR, "#1f77b4")
+    _COLOR_TGT = SENSOR_COLORS.get(_TGT_SENSOR, "#ff7f0e")
+
+    ref_segs = load_calibration_segments_from_json(recording_name, _REF_SENSOR)
+    tgt_segs = load_calibration_segments_from_json(recording_name, _TGT_SENSOR)
+
+    if len(ref_segs) != len(tgt_segs):
+        raise ValueError(
+            f"Segment count mismatch for {recording_name!r}: "
+            f"{_REF_SENSOR}={len(ref_segs)}, {_TGT_SENSOR}={len(tgt_segs)}"
+        )
+
+    payload = _load_all_methods_payload(recording_name)
+    anchors_data = (
+        payload.get("shared", {}).get("calibration", {}).get("anchors", [])
+    )
+
+    parsed_dir = recording_stage_dir(recording_name, "parsed")
+    ref_df = load_stream(parsed_dir / f"{_REF_SENSOR}.csv")
+    tgt_df = load_stream(parsed_dir / f"{_TGT_SENSOR}.csv")
+
+    def _shake_center(seg) -> float:
+        return (seg.start_ms + seg.static_pre_ms + seg.end_ms - seg.static_post_ms) / 2.0
+
+    n = len(ref_segs)
+    fig, axes = imu_figure(n, row_height=2.6, width=14.0, sharex=False)
+
+    for i, (ref_seg, tgt_seg) in enumerate(zip(ref_segs, tgt_segs)):
+        ax = axes[i]
+
+        ref_center = _shake_center(ref_seg)
+        tgt_center = _shake_center(tgt_seg)
+        coarse_offset_s = (ref_center - tgt_center) / 1000.0
+
+        if i < len(anchors_data):
+            refined_offset_s = float(anchors_data[i]["offset_s"])
+            score_raw = anchors_data[i].get("score")
+            score_str = f"{score_raw:.3f}" if score_raw is not None else "n/a"
+        else:
+            refined_offset_s = coarse_offset_s
+            score_str = "n/a"
+
+        ref_start = ref_seg.start_ms
+        ref_end = ref_seg.end_ms
+
+        # Reference signal on its natural timeline
+        ref_win = resample_stream(
+            ref_df, _RATE, start_ms=ref_start, end_ms=ref_end, columns=["acc_norm"]
+        )
+        ref_t_s = (ref_win["timestamp"].to_numpy(dtype=float) - ref_start) / 1000.0
+        ref_y = ref_win["acc_norm"].to_numpy(dtype=float) if "acc_norm" in ref_win.columns else np.full(len(ref_t_s), np.nan)
+
+        # Target signal fetched in a common window, then shifted to ref timeline
+        # Use the refined-offset window (slightly wider via coarse margin if large delta)
+        delta_s = abs(refined_offset_s - coarse_offset_s)
+        margin_ms = max(200.0, delta_s * 1500.0)
+        tgt_fetch_start = ref_start - refined_offset_s * 1000.0 - margin_ms
+        tgt_fetch_end = ref_end - refined_offset_s * 1000.0 + margin_ms
+
+        tgt_win = resample_stream(
+            tgt_df, _RATE, start_ms=tgt_fetch_start, end_ms=tgt_fetch_end, columns=["acc_norm"]
+        )
+        tgt_raw_t_ms = tgt_win["timestamp"].to_numpy(dtype=float)
+        tgt_y = tgt_win["acc_norm"].to_numpy(dtype=float) if "acc_norm" in tgt_win.columns else np.full(len(tgt_raw_t_ms), np.nan)
+
+        # Shift tgt timestamps to ref timeline for each alignment
+        tgt_coarse_t_s = (tgt_raw_t_ms + coarse_offset_s * 1000.0 - ref_start) / 1000.0
+        tgt_refined_t_s = (tgt_raw_t_ms + refined_offset_s * 1000.0 - ref_start) / 1000.0
+
+        duration_s = (ref_end - ref_start) / 1000.0
+
+        # Shade shake zone
+        shake_start_s = ref_seg.static_pre_ms / 1000.0
+        shake_end_s = duration_s - ref_seg.static_post_ms / 1000.0
+        ax.axvspan(shake_start_s, shake_end_s, color="#e8e8e8", alpha=0.6, zorder=0, label="shake zone")
+
+        # Draw signals
+        draw_signal(ax, ref_t_s, ref_y, label=f"{_REF_SENSOR} (ref)", color=_COLOR_REF, lw=1.0, alpha=0.9)
+        draw_signal(ax, tgt_coarse_t_s, tgt_y, label=f"{_TGT_SENSOR} coarse ({coarse_offset_s:+.3f}s)", color=_COLOR_TGT, lw=0.8, alpha=0.45)
+        draw_signal(ax, tgt_refined_t_s, tgt_y, label=f"{_TGT_SENSOR} refined ({refined_offset_s:+.3f}s)", color=_COLOR_TGT, lw=1.0, alpha=0.9)
+
+        # Ref peaks
+        for peak_ms in ref_seg.peak_ms:
+            peak_rel_s = (peak_ms - ref_start) / 1000.0
+            ax.axvline(peak_rel_s, color=_COLOR_REF, lw=0.7, linestyle=":", alpha=0.8, zorder=4)
+
+        # Tgt peaks shifted to ref timeline (refined)
+        for peak_ms in tgt_seg.peak_ms:
+            peak_rel_s = (peak_ms + refined_offset_s * 1000.0 - ref_start) / 1000.0
+            ax.axvline(peak_rel_s, color=_COLOR_TGT, lw=0.7, linestyle=":", alpha=0.8, zorder=4)
+
+        ax.set_xlim(-0.5, duration_s + 0.5)
+        ax.set_ylabel("|acc| (m/s²)", fontsize=8)
+        ax.legend(fontsize=7, loc="upper right", ncol=3)
+        ax.grid(alpha=0.2, lw=0.35)
+
+        delta_str = f"Δ={refined_offset_s - coarse_offset_s:+.3f}s"
+        ax.set_title(
+            f"Anchor {i}  |  coarse={coarse_offset_s:+.4f}s  refined={refined_offset_s:+.4f}s  {delta_str}  score={score_str}",
+            fontsize=9,
+        )
+
+    axes[-1].set_xlabel("Time from ref segment start (s)")
+    fig.suptitle(f"{recording_name} — calibration anchor fits", fontsize=12, y=0.999)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.995))
+
+    if output_path is None:
+        output_path = recording_stage_dir(recording_name, "synced") / "anchor_fits.png"
+
+    return save_figure(fig, output_path, dpi=150)
+
+
 def plot_sync_stage(recording_name: str, output_path: Path | None = None):
     """Plot the sync stage for a recording."""
     plot_before_after_imu(recording_name, output_path=output_path)
     plot_sync_offset_drift_model_comparison(recording_name, output_path=output_path)
     plot_sync_zoomed_comparison(recording_name, output_path=output_path)
     plot_sync_method_metrics(recording_name, output_path=output_path)
+    plot_anchor_fits(recording_name, output_path=output_path)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -865,10 +1037,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("recording_name", nargs="?", help="Recording folder name")
     parser.add_argument(
-        "--plot", 
-        choices=["before-after", "offset-drift-model", "zoomed", "method-metrics", "all"], 
-        default="all", 
-        help="Plot only this plot: before-after, offset-drift-model, zoomed, method-metrics, or all."
+        "--plot",
+        choices=["before-after", "offset-drift-model", "zoomed", "method-metrics", "anchor-fits", "all"],
+        default="all",
+        help="Plot only this plot: before-after, offset-drift-model, zoomed, method-metrics, anchor-fits, or all.",
     )
     parser.add_argument(
         "--output",
@@ -898,6 +1070,8 @@ def main(argv: list[str] | None = None) -> None:
         plot_sync_zoomed_comparison(recording_name, output_path=output_name)
     elif args.plot == "method-metrics":
         plot_sync_method_metrics(recording_name, output_path=output_name)
+    elif args.plot == "anchor-fits":
+        plot_anchor_fits(recording_name, output_path=output_name)
 
 
 if __name__ == "__main__":
