@@ -1,4 +1,4 @@
-"""Calibration-sequence detection: ~5 s static → 4–6 sharp taps → ~5 s static.
+"""Calibration-sequence detection: static pre period → some peaks → static post period.
 
 All timestamps in milliseconds throughout. No sample-index arithmetic is
 exposed in the public API; parameter windows are computed from the median
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pickletools import float8
 from typing import Any
 
 import numpy as np
@@ -30,6 +29,7 @@ _G = 9.81
 _SMOOTH_MS = 100.0
 _MIN_PEAK_DISTANCE_MS = 150.0
 _PROMINENCE_WLEN_MS = 1200.0
+_DEDUP_SEGMENT_GAP_MS = 1500.0
 
 
 # ---------------------------------------------------------------------------
@@ -45,20 +45,8 @@ class CalibrationSegment:
     end_ms: float
     peak_ms: list[float]
     peak_strength: float = 0.0
-
-    # Downstream code uses these names; keep as aliases.
-    @property
-    def start_timestamp(self) -> float:
-        return self.start_ms
-
-    @property
-    def end_timestamp(self) -> float:
-        return self.end_ms
-
-    @property
-    def peak_timestamps(self) -> list[float]:
-        return self.peak_ms
-
+    static_pre_ms: float = 0.0
+    static_post_ms: float = 0.0
 
 @dataclass(frozen=True)
 class CalSegParams:
@@ -69,10 +57,12 @@ class CalSegParams:
     peak_min_count: int
     peak_max_count: int
     static_gap_max_ms: float
+    static_flank_gap_max_ms: float
     static_overlap_max_ms: float
     static_min_start_fraction: float
     static_min_pre_ms: float
     static_min_post_ms: float
+    recording_gap_min_ms: float
     burst_max_span_ms: float
     peak_pair_max_gap_ms: float
     transient_baseline_ms: float
@@ -98,10 +88,12 @@ def load_cal_seg_params(sensor: str, **overrides: Any) -> CalSegParams:
         peak_min_count=int(block["peak_min_count"]),
         peak_max_count=int(block["peak_max_count"]),
         static_gap_max_ms=float(block["static_gap_max_s"]) * 1000.0,
+        static_flank_gap_max_ms=float(block["static_flank_gap_max_s"]) * 1000.0,
         static_overlap_max_ms=float(block["static_overlap_max_s"]) * 1000.0,
         static_min_start_fraction=float(block["static_min_start_fraction"]),
         static_min_pre_ms=float(block["static_min_pre_s"]) * 1000.0,
         static_min_post_ms=float(block["static_min_post_s"]) * 1000.0,
+        recording_gap_min_ms=float(block["recording_gap_min_s"]) * 1000.0,
         burst_max_span_ms=float(block["burst_max_span_s"]) * 1000.0,
         peak_pair_max_gap_ms=float(block["peak_pair_max_gap_s"]) * 1000.0,
         transient_baseline_ms=float(block["transient_baseline_s"]) * 1000.0,
@@ -133,12 +125,12 @@ def _find_candidate_peaks(
     ts_ms: np.ndarray,
     acc: np.ndarray,
     params: CalSegParams,
-) -> tuple[list[float], np.ndarray, np.ndarray]:
-    """Return (peak_ms, dynamic_smooth, is_static) for the given signal."""
+) -> tuple[list[float], np.ndarray, np.ndarray, np.ndarray]:
+    """Return candidate peaks and intermediate detection signals."""
     finite = np.isfinite(acc)
     if not finite.any():
         z = np.zeros(len(acc))
-        return [], z, np.ones(len(acc), dtype=bool)
+        return [], z, z, np.ones(len(acc), dtype=bool)
 
     x = acc.copy()
     if not finite.all():
@@ -167,10 +159,17 @@ def _find_candidate_peaks(
         wlen=max(7, _to_samples(_PROMINENCE_WLEN_MS, dt)),
     )
 
-    keep = np.isfinite(dynamic_smooth[peak_idx]) & (
-        dynamic_smooth[peak_idx] >= params.peak_min_height * 0.5
-    )
-    return [float(ts_ms[i]) for i in peak_idx[keep]], dynamic_smooth, is_static
+    kept_peak_ms: list[float] = []
+    min_dynamic_height = params.peak_min_height * 0.5
+    for peak_i in peak_idx:
+        peak_t = float(ts_ms[peak_i])
+        peak_dynamic = float(dynamic_smooth[peak_i]) if np.isfinite(dynamic_smooth[peak_i]) else float("nan")
+        if not np.isfinite(dynamic_smooth[peak_i]):
+            continue
+        if peak_dynamic < min_dynamic_height:
+            continue
+        kept_peak_ms.append(peak_t)
+    return kept_peak_ms, dynamic_smooth, transient, is_static
 
 
 def _cluster_peaks(peak_ms: list[float], params: CalSegParams) -> list[list[float]]:
@@ -189,16 +188,79 @@ def _cluster_peaks(peak_ms: list[float], params: CalSegParams) -> list[list[floa
     return clusters
 
 
+def _cluster_is_near_recording_gap(
+    cluster_ms: list[float],
+    ts_ms: np.ndarray,
+    *,
+    nearby_window_ms: float,
+    min_gap_ms: float,
+) -> bool:
+    """Return whether *cluster_ms* is adjacent to a large timestamp gap.
+
+    This is a small heuristic for recordings with dropped samples inside a
+    calibration routine. We only use it to slightly relax the minimum peak
+    count for otherwise calibration-like bursts near a clear acquisition gap.
+    """
+    if len(cluster_ms) == 0 or len(ts_ms) < 2:
+        return False
+
+    cluster_start = cluster_ms[0]
+    cluster_end = cluster_ms[-1]
+    dts = np.diff(ts_ms)
+    for left_t, right_t, gap_ms in zip(ts_ms[:-1], ts_ms[1:], dts):
+        if not np.isfinite(gap_ms) or gap_ms < min_gap_ms:
+            continue
+        if (cluster_start - nearby_window_ms) <= float(right_t) <= (cluster_end + nearby_window_ms):
+            return True
+        if (cluster_start - nearby_window_ms) <= float(left_t) <= (cluster_end + nearby_window_ms):
+            return True
+    return False
+
+
+def _recording_gap_exists_between(
+    ts_ms: np.ndarray,
+    start_ms: float,
+    end_ms: float,
+    *,
+    min_gap_ms: float,
+) -> bool:
+    """Return whether a large timestamp gap exists within [start_ms, end_ms]."""
+    if len(ts_ms) < 2 or end_ms <= start_ms:
+        return False
+    dts = np.diff(ts_ms)
+    for left_t, right_t, gap_ms in zip(ts_ms[:-1], ts_ms[1:], dts):
+        if not np.isfinite(gap_ms) or gap_ms < min_gap_ms:
+            continue
+        if float(left_t) >= start_ms and float(right_t) <= end_ms:
+            return True
+    return False
+
+
 def _filter_valid_clusters(
-    clusters: list[list[float]], params: CalSegParams
+    clusters: list[list[float]], params: CalSegParams, ts_ms: np.ndarray
 ) -> list[list[float]]:
     """Keep clusters with valid peak count and burst span."""
-    return [
-        c
-        for c in clusters
-        if params.peak_min_count <= len(c) <= params.peak_max_count
-        and c[-1] - c[0] <= params.burst_max_span_ms
-    ]
+    valid: list[list[float]] = []
+    for cluster in clusters:
+        n_peaks = len(cluster)
+        span_ms = cluster[-1] - cluster[0]
+
+        # Reject clusters that are too long or have too many peaks.
+        if n_peaks > params.peak_max_count or span_ms > params.burst_max_span_ms:
+            continue
+
+        # Relax the minimum peak count for clusters that are near a recording gap.
+        min_count = params.peak_min_count
+        if (_cluster_is_near_recording_gap(cluster, ts_ms, nearby_window_ms=params.static_gap_max_ms, min_gap_ms=params.recording_gap_min_ms)):
+            min_count = max(2, params.peak_min_count - 2)
+
+        # Reject clusters that have too few peaks.
+        if n_peaks < min_count:
+            continue
+
+        # Pass clusters that are valid.
+        valid.append(cluster)
+    return valid
 
 
 def _detect_static_periods(
@@ -218,7 +280,7 @@ def _detect_static_periods(
         prev_t = t
     if run_start is not None:
         periods.append((run_start, float(ts_ms[-1])))
-    return periods
+    return [period for period in periods if period[1] > period[0]]
 
 
 def _segment_for_cluster(
@@ -248,6 +310,10 @@ def _segment_for_cluster(
     if pre_run is None:
         return None
 
+    pre_gap_ms = c_start - pre_run[1]
+    if pre_gap_ms > params.static_flank_gap_max_ms:
+        return None
+
     post_run: tuple[float, float] | None = None
     for s_start, s_end in static_periods:
         if s_end < c_end:
@@ -263,28 +329,70 @@ def _segment_for_cluster(
     if post_run is None:
         return None
 
+    post_gap_ms = post_run[0] - c_end
+    if post_gap_ms > params.static_flank_gap_max_ms:
+        return None
+
     strength = 0.0
     for p_ms in cluster_ms:
         i = min(int(np.searchsorted(ts_ms, p_ms)), len(dynamic_smooth) - 1)
         if np.isfinite(dynamic_smooth[i]):
             strength += float(dynamic_smooth[i])
 
-    return CalibrationSegment(
+    segment = CalibrationSegment(
         start_ms=pre_run[0],
         end_ms=post_run[1],
         peak_ms=cluster_ms,
         peak_strength=strength,
+        static_pre_ms=max(0.0, pre_run[1] - pre_run[0]),
+        static_post_ms=max(0.0, post_run[1] - post_run[0]),
     )
+    return segment
+
+
+# ---------------------------------------------------------------------------
+# Heuristic helers
+# ---------------------------------------------------------------------------
+
+
+def _cluster_is_near_recording_gap(
+    cluster_ms: list[float],
+    ts_ms: np.ndarray,
+    *,
+    nearby_window_ms: float,
+    min_gap_ms: float,
+) -> bool:
+    """Return whether *cluster_ms* is adjacent to a large timestamp gap.
+
+    This is a small heuristic for recordings with dropped samples inside a
+    calibration routine. We only use it to slightly relax the minimum peak
+    count for otherwise calibration-like bursts near a clear acquisition gap.
+    """
+    if len(cluster_ms) == 0 or len(ts_ms) < 2:
+        return False
+
+    cluster_start = cluster_ms[0]
+    cluster_end = cluster_ms[-1]
+    dts = np.diff(ts_ms)
+    for left_t, right_t, gap_ms in zip(ts_ms[:-1], ts_ms[1:], dts):
+        if not np.isfinite(gap_ms) or gap_ms < min_gap_ms:
+            continue
+        if (cluster_start - nearby_window_ms) <= float(right_t) <= (cluster_end + nearby_window_ms):
+            return True
+        if (cluster_start - nearby_window_ms) <= float(left_t) <= (cluster_end + nearby_window_ms):
+            return True
+    return False
+
 
 
 def _deduplicate_segments(
     segments: list[CalibrationSegment],
 ) -> list[CalibrationSegment]:
-    """Remove duplicate detections sharing the same tap burst; keep strongest."""
+    """Remove duplicate detections that overlap or nearly overlap; keep longest static periods."""
     if len(segments) <= 1:
         return list(segments)
 
-    segs = sorted(segments, key=lambda s: s.peak_ms[0] if s.peak_ms else s.start_ms)
+    segs = sorted(segments, key=lambda s: s.start_ms)
     n = len(segs)
     parent = list(range(n))
 
@@ -293,13 +401,11 @@ def _deduplicate_segments(
             parent[i] = parent[parent[i]]
             i = parent[i]
         return i
-
+        
     for i in range(n):
         for j in range(i + 1, n):
             a, b = segs[i], segs[j]
-            if not (a.peak_ms and b.peak_ms):
-                continue
-            if b.peak_ms[0] > a.peak_ms[-1]:
+            if b.start_ms > a.end_ms + _DEDUP_SEGMENT_GAP_MS:
                 break
             ri, rj = find(i), find(j)
             if ri != rj:
@@ -309,7 +415,7 @@ def _deduplicate_segments(
     for i, seg in enumerate(segs):
         buckets.setdefault(find(i), []).append(seg)
 
-    kept = [max(g, key=lambda s: s.peak_strength) for g in buckets.values()]
+    kept = [max(g, key=lambda s: s.static_pre_ms + s.static_post_ms) for g in buckets.values()]
     return sorted(kept, key=lambda s: s.start_ms)
 
 
@@ -330,17 +436,17 @@ def find_calibration_segments(
     """
     params = load_cal_seg_params(sensor, **overrides)
 
-    norm = df["acc_norm"].to_numpy(dtype=float8)
+    norm = df["acc_norm"].to_numpy(dtype=float)
     if norm is None or len(norm) == 0:
         return []
 
     ts_ms = df["timestamp"].to_numpy(dtype=float)
-
-    peak_ms, dynamic_smooth, is_static = _find_candidate_peaks(ts_ms, norm, params)
+    peak_ms, dynamic_smooth, _transient, is_static = _find_candidate_peaks(ts_ms, norm, params)
     if len(peak_ms) < params.peak_min_count:
         return []
 
-    clusters = _filter_valid_clusters(_cluster_peaks(peak_ms, params), params)
+    all_clusters = _cluster_peaks(peak_ms, params)
+    clusters = _filter_valid_clusters(all_clusters, params, ts_ms)
     if not clusters:
         return []
 
@@ -348,7 +454,13 @@ def find_calibration_segments(
 
     segments = []
     for cluster in clusters:
-        seg = _segment_for_cluster(cluster, static_periods, ts_ms, dynamic_smooth, params)
+        seg = _segment_for_cluster(
+            cluster,
+            static_periods,
+            ts_ms,
+            dynamic_smooth,
+            params,
+        )
         if seg is not None:
             segments.append(seg)
 
@@ -377,10 +489,12 @@ def export_calibration_segments_json(
             "peak_min_count": params.peak_min_count,
             "peak_max_count": params.peak_max_count,
             "static_gap_max_s": params.static_gap_max_ms / 1000.0,
+            "static_flank_gap_max_s": params.static_flank_gap_max_ms / 1000.0,
             "static_overlap_max_s": params.static_overlap_max_ms / 1000.0,
             "static_min_start_fraction": params.static_min_start_fraction,
             "static_min_pre_s": params.static_min_pre_ms / 1000.0,
             "static_min_post_s": params.static_min_post_ms / 1000.0,
+            "recording_gap_min_s": params.recording_gap_min_ms / 1000.0,
             "burst_max_span_s": params.burst_max_span_ms / 1000.0,
             "peak_pair_max_gap_s": params.peak_pair_max_gap_ms / 1000.0,
             "transient_baseline_s": params.transient_baseline_ms / 1000.0,
@@ -395,6 +509,9 @@ def export_calibration_segments_json(
                 "end_ms": seg.end_ms,
                 "n_peaks": len(seg.peak_ms),
                 "peak_ms": seg.peak_ms,
+                "static_pre_ms": seg.static_pre_ms,
+                "static_post_ms": seg.static_post_ms,
+                "peak_strength": seg.peak_strength,
             }
             for i, seg in enumerate(segments)
         ],
@@ -412,22 +529,21 @@ def load_calibration_segments_from_json(
 ) -> list[CalibrationSegment]:
     """Load pre-detected calibration segments for *sensor* from the recording JSON.
 
-    Supports both the current format (``start_ms``/``end_ms``/``peak_ms``) and
-    the legacy format (``start_timestamp``/``end_timestamp``/``peak_timestamp``).
+    Supports both the current format (``start_ms``/``end_ms``/``peak_ms``).
     """
     path = recording_stage_dir(recording_name, "parsed") / "calibration_segments.json"
     data = read_json_file(path)
     sensor_data = data["sensors"][sensor]
     segments: list[CalibrationSegment] = []
     for rec in sensor_data.get("segments", []):
-        start = float(rec.get("start_ms", rec.get("start_timestamp", 0.0)))
-        end = float(rec.get("end_ms", rec.get("end_timestamp", 0.0)))
-        peaks_raw = rec.get("peak_ms", rec.get("peak_timestamp", []))
         segments.append(
             CalibrationSegment(
-                start_ms=start,
-                end_ms=end,
-                peak_ms=[float(p) for p in peaks_raw],
+                start_ms=float(rec.get("start_ms", 0.0)),
+                end_ms=float(rec.get("end_ms", 0.0)),
+                peak_ms=[float(p) for p in rec.get("peak_ms", [])],
+                peak_strength=float(rec.get("peak_strength", 0.0)),
+                static_pre_ms=float(rec.get("static_pre_ms", rec.get("pre_static_ms", 0.0))),
+                static_post_ms=float(rec.get("static_post_ms", rec.get("post_static_ms", 0.0))),
             )
         )
     return segments

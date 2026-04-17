@@ -35,10 +35,18 @@ def _parse_log_date(line: str) -> dt.date | None:
 def _parse_time_of_day_ms(time_str: str) -> int | None:
     """Parse 'HH:MM:SS.mmm' and return milliseconds since midnight."""
     try:
-        t = dt.datetime.strptime(time_str, "%H:%M:%S.%f").time()
-    except ValueError:
+        hhmmss, dot, frac = time_str.strip().partition(".")
+        hour_str, minute_str, second_str = hhmmss.split(":")
+        hour = int(hour_str)
+        minute = int(minute_str)
+        second = int(second_str)
+        if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
+            return None
+        frac_digits = (frac if dot else "")[:6].ljust(6, "0")
+        microsecond = int(frac_digits) if frac_digits else 0
+    except (TypeError, ValueError):
         return None
-    return (t.hour * 3600 + t.minute * 60 + t.second) * 1000 + (t.microsecond // 1000)
+    return (hour * 3600 + minute * 60 + second) * 1000 + (microsecond // 1000)
 
 
 def _parse_arduino_line(line: str) -> Optional[tuple[int, int, float, float, float]]:
@@ -109,7 +117,8 @@ def parse_arduino_log(txt_path: Path) -> pd.DataFrame:
             received_epoch_ms: int | None = None
             parts = raw_line.split("\t")
             if log_date is not None and len(parts) >= 2:
-                tod_ms = _parse_time_of_day_ms(parts[1].strip())
+                received_time_str = parts[1].strip()
+                tod_ms = _parse_time_of_day_ms(received_time_str)
                 if tod_ms is not None:
                     if last_tod_ms is not None and tod_ms + 1000 < last_tod_ms:
                         # Time-of-day went backwards significantly => crossed midnight.
@@ -117,11 +126,17 @@ def parse_arduino_log(txt_path: Path) -> pd.DataFrame:
                     last_tod_ms = tod_ms
 
                     d = log_date + dt.timedelta(days=day_offset)
-                    # Build datetime in local time (mktime applies TZ + DST rules for that date).
-                    # (Re-parse time properly to keep microseconds).
-                    t = dt.datetime.strptime(parts[1].strip(), "%H:%M:%S.%f")
+                    total_seconds, ms_part = divmod(tod_ms, 1000)
+                    hour, rem = divmod(total_seconds, 3600)
+                    minute, second = divmod(rem, 60)
                     received_local = dt.datetime(
-                        d.year, d.month, d.day, t.hour, t.minute, t.second, t.microsecond
+                        d.year,
+                        d.month,
+                        d.day,
+                        int(hour),
+                        int(minute),
+                        int(second),
+                        int(ms_part) * 1000,
                     )
                     received_epoch_ms = int(time.mktime(received_local.timetuple()) * 1000) + (
                         received_local.microsecond // 1000
