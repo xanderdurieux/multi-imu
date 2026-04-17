@@ -7,3 +7,11 @@ docs/
 
 # Arduino
 arduino/libraries/*
+
+
+# Coding assistants
+.claude/
+.cursor/
+AGENTS.md
+CLAUDE.md
+CONTEXT.md

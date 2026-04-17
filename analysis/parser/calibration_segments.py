@@ -5,24 +5,6 @@ recording. A calibration sequence has the pattern::
 
     ~5 s static  →  4–6 short, sharp acceleration peaks (a tight burst)
     →  ~5 s static
-
-Detection is **peak-first**: candidate taps are found on a transient emphasis
-of the smoothed |acc−g| envelope, split into bursts where consecutive peaks
-are separated by at most *peak_pair_max_gap_s*, and each burst must fit
-within *burst_max_span_s*.  Pre- and post-static requirements are **asymmetric**
-(*static_min_pre_s* / *static_min_post_s*) so the Arduino stream can admit a
-shorter “static” lead-in while the helmet is handled, while Sporsa can demand
-longer true stillness.
-
-The detection logic is used by:
-
-- :mod:`parser.split_sections` to form calibration-bounded recording sections.
-- :mod:`sync.methods` to locate calibration anchors for
-  calibration-based time synchronisation.
-- :mod:`visualization.plot_calibration_segments` for diagnostic figures.
-
-Centralising this logic keeps the definition of a "calibration sequence"
-consistent across all stages of the thesis pipeline.
 """
 
 from __future__ import annotations

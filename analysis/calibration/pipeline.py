@@ -8,9 +8,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import re
+
 import pandas as pd
 
 from common.paths import iter_sections_for_recording, project_relative_path, read_csv, write_csv
+from parser.calibration_segments import CalibrationSegment, load_calibration_segments_from_json
 from .core import (
     OpeningSequence,
     SensorIntrinsics,
@@ -20,7 +23,6 @@ from .core import (
     estimate_sensor_intrinsics,
     estimate_sensor_alignment,
     _find_first_stable_window,
-    _ms_from_idx,
     apply_calibration,
 )
 
@@ -36,32 +38,28 @@ _SPORSA_SENSOR = "sporsa"
 
 
 def _build_opening_sequence(
-    df: pd.DataFrame,
     seg: Any,  # CalibrationSegment
 ) -> OpeningSequence:
-    pre_end = seg.peak_indices[0] if seg.peak_indices else seg.end_idx
-    post_start = seg.peak_indices[-1] if seg.peak_indices else seg.start_idx
-    tap_times_ms = [_ms_from_idx(df, idx) for idx in seg.peak_indices]
+    peak_ts = list(seg.peak_timestamps) if seg.peak_timestamps else []
+    pre_end_ms = peak_ts[0] if peak_ts else seg.end_timestamp
+    post_start_ms = peak_ts[-1] if peak_ts else seg.start_timestamp
     return OpeningSequence(
-        pre_static_range=[seg.start_idx, pre_end],
-        tap_cluster=list(seg.peak_indices),
-        tap_times_ms=tap_times_ms,
-        post_static_range=[post_start, seg.end_idx],
-        pre_static_start_ms=_ms_from_idx(df, seg.start_idx),
-        pre_static_end_ms=_ms_from_idx(df, pre_end),
-        post_static_start_ms=_ms_from_idx(df, post_start),
-        post_static_end_ms=_ms_from_idx(df, seg.end_idx),
-        n_taps=len(seg.peak_indices),
+        tap_times_ms=peak_ts,
+        pre_static_start_ms=seg.start_timestamp,
+        pre_static_end_ms=pre_end_ms,
+        post_static_start_ms=post_start_ms,
+        post_static_end_ms=seg.end_timestamp,
+        n_taps=len(peak_ts),
     )
 
 
 def calibrate_section(
     section_dir: Path,
     *,
-    sample_rate_hz: float = 100.0,
     force: bool = False,
     output_subdir: str = "calibrated",
     static_calibration_path: Path | None = None,
+    sample_rate_hz: float | None = None,  # kept for CLI compat, no longer used
 ) -> SectionCalibration:
     """Calibrate both sensors for one section and write outputs.
 
@@ -85,8 +83,6 @@ def calibrate_section(
     ----------
     section_dir:
         Path to the section directory (e.g. ``data/sections/2026-02-26_r1s1``).
-    sample_rate_hz:
-        Approximate sampling rate for calibration-segment detection.
     force:
         If True, overwrite existing outputs.
     output_subdir:
@@ -127,6 +123,9 @@ def calibrate_section(
         except Exception as exc:
             log.warning("Could not load static calibration reference: %s", exc)
 
+    # Derive recording name from section directory name (e.g. "2026-02-26_r5s1" → "2026-02-26_r5")
+    recording_name = re.sub(r"s\d+$", "", section_dir.name)
+
     # Per-sensor calibration
     all_intrinsics: dict[str, SensorIntrinsics] = {}
     all_alignment: dict[str, SensorAlignment] = {}
@@ -156,31 +155,23 @@ def calibrate_section(
         sensor_static_cal = static_cal if sensor == _ARDUINO_SENSOR else None
 
         try:
-            _cal_sensor(
+            opening_seg = _cal_sensor(
                 df=df,
                 sensor=sensor,
                 section_dir=section_dir,
                 cal_dir=cal_dir,
-                sample_rate_hz=sample_rate_hz,
                 static_cal=sensor_static_cal,
                 all_intrinsics=all_intrinsics,
                 all_alignment=all_alignment,
                 all_quality_tags=all_quality_tags,
+                recording_name=recording_name,
             )
-            # Record protocol detection result and opening sequence
-            # (use whichever sensor successfully detected the protocol first)
-            if not protocol_detected_any and all_intrinsics.get(sensor):
+            if opening_seg is not None and opening_sequence is None:
+                opening_sequence = _build_opening_sequence(opening_seg)
+                protocol_detected_any = True
+            elif not protocol_detected_any and all_intrinsics.get(sensor):
                 intrin = all_intrinsics[sensor]
                 if "fallback_static" not in intrin.quality_tags:
-                    protocol_detected_any = True
-
-            # Capture opening sequence from first sensor that yields one
-            if opening_sequence is None and sensor in all_intrinsics:
-                seg, _ = detect_protocol_landmarks(
-                    df, sensor=sensor, sample_rate_hz=sample_rate_hz
-                )
-                if seg is not None:
-                    opening_sequence = _build_opening_sequence(df, seg)
                     protocol_detected_any = True
 
         except Exception as exc:
@@ -243,29 +234,35 @@ def _cal_sensor(
     sensor: str,
     section_dir: Path,
     cal_dir: Path,
-    sample_rate_hz: float,
     static_cal: dict[str, Any] | None,
     all_intrinsics: dict,
     all_alignment: dict,
     all_quality_tags: list,
-) -> None:
-    """Estimate intrinsics and alignment for one sensor and update the dicts."""
+    recording_name: str,
+) -> CalibrationSegment | None:
+    """Estimate intrinsics and alignment for one sensor and update the dicts.
+
+    Returns the opening :class:`CalibrationSegment` if one was found, else ``None``.
+    """
     section_name = section_dir.name
 
-    # Detect protocol landmarks
-    opening_seg, static_ranges = detect_protocol_landmarks(
-        df, sensor=sensor, sample_rate_hz=sample_rate_hz
-    )
+    # Load pre-detected calibration segments from the parser-stage JSON.
+    try:
+        segs = load_calibration_segments_from_json(recording_name, sensor)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        log.warning("%s/%s: could not load calibration segments (%s) — using fallback", section_name, sensor, exc)
+        segs = []
+
+    opening_seg, static_ranges = detect_protocol_landmarks(segs)
 
     fallback_used = False
     if not static_ranges:
-        # Fallback: use first 5 s as static
+        # Fallback: use first 5 s as a static window
         ts = df["timestamp"].to_numpy(dtype=float)
         if ts.size > 0:
-            mask = ts <= ts[0] + 5000.0
-            n = int(mask.sum())
-            if n > 10:
-                static_ranges = [(0, n)]
+            end_ms = ts[0] + 5000.0
+            if int((ts <= end_ms).sum()) > 10:
+                static_ranges = [(float(ts[0]), float(end_ms))]
                 fallback_used = True
                 all_quality_tags.append(f"fallback_static_{sensor}")
                 log.debug(
@@ -280,7 +277,7 @@ def _cal_sensor(
                 quality="poor", quality_tags=["no_static_found"]
             )
             all_alignment[sensor] = SensorAlignment()
-            return
+            return None
 
     # Intrinsics
     intrinsics = estimate_sensor_intrinsics(df, static_ranges, static_cal=static_cal)
@@ -291,23 +288,21 @@ def _cal_sensor(
 
     # Alignment window
     if sensor == _ARDUINO_SENSOR and opening_seg is not None:
-        # Arduino: find first stable post-mount window
-        after_idx = opening_seg.end_idx
+        # Arduino: find first stable post-mount window after the opening routine
         post_mount_window = _find_first_stable_window(
             df,
-            after_idx=after_idx,
-            sample_rate_hz=sample_rate_hz,
-            min_duration_s=3.0,
+            after_ms=opening_seg.end_timestamp,
+            min_duration_ms=3000.0,
             threshold_ms2=1.5,
         )
         if post_mount_window is not None:
             alignment_window = post_mount_window
             log.debug(
-                "%s/%s: using post-mount window [%d, %d] for alignment",
+                "%s/%s: using post-mount window [%.1f, %.1f] ms for alignment",
                 section_name, sensor, *alignment_window,
             )
         else:
-            # Fallback: use opening static ranges for alignment
+            # Fallback: use opening static range for alignment
             alignment_window = static_ranges[0]
             all_quality_tags.append(f"no_post_mount_window_{sensor}")
             log.warning(
@@ -315,15 +310,10 @@ def _cal_sensor(
                 section_name, sensor,
             )
     else:
-        # Sporsa (no mount change): use opening static windows for alignment
+        # Sporsa (no mount change): use opening static window for alignment
         alignment_window = static_ranges[0]
 
-    alignment = estimate_sensor_alignment(
-        df,
-        alignment_window,
-        sample_rate_hz=sample_rate_hz,
-        full_df=df,  # use full section for PCA
-    )
+    alignment = estimate_sensor_alignment(df, alignment_window, full_df=df)
     all_alignment[sensor] = alignment
 
     log.info(
@@ -331,6 +321,7 @@ def _cal_sensor(
         section_name, sensor, intrinsics.quality,
         alignment.yaw_source, alignment.gravity_residual_ms2,
     )
+    return opening_seg
 
 
 # ---------------------------------------------------------------------------
@@ -341,10 +332,10 @@ def _cal_sensor(
 def calibrate_recording_sections(
     recording_name: str,
     *,
-    sample_rate_hz: float = 100.0,
     force: bool = False,
     output_subdir: str = "calibrated",
     static_calibration_path: Path | None = None,
+    sample_rate_hz: float | None = None,  # kept for CLI compat, no longer used
 ) -> list[SectionCalibration]:
     """Calibrate all sections for a recording."""
     section_dirs = iter_sections_for_recording(recording_name)
@@ -358,7 +349,6 @@ def calibrate_recording_sections(
         try:
             cal = calibrate_section(
                 sec_dir,
-                sample_rate_hz=sample_rate_hz,
                 force=force,
                 output_subdir=output_subdir,
                 static_calibration_path=static_calibration_path,

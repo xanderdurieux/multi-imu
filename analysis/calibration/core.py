@@ -37,7 +37,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from parser.calibration_segments import CalibrationSegment, find_calibration_segments
+from parser.calibration_segments import CalibrationSegment
 from common.signals import add_imu_norms
 
 log = logging.getLogger(__name__)
@@ -52,12 +52,12 @@ _G = 9.81  # m/s²
 
 @dataclass
 class OpeningSequence:
-    """Protocol-detected opening routine in a section."""
+    """Protocol-detected opening routine in a section.
 
-    pre_static_range: list[int]    # [start_idx, end_idx]
-    tap_cluster: list[int]         # peak indices
-    tap_times_ms: list[float]      # tap timestamps for cross-sensor plotting
-    post_static_range: list[int]   # [start_idx, end_idx]
+    All range fields are millisecond timestamps.
+    """
+
+    tap_times_ms: list[float]      # tap timestamps
     pre_static_start_ms: float
     pre_static_end_ms: float
     post_static_start_ms: float
@@ -70,10 +70,7 @@ class OpeningSequence:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "OpeningSequence":
         return cls(
-            pre_static_range=list(d.get("pre_static_range", [0, 0])),
-            tap_cluster=list(d.get("tap_cluster", [])),
             tap_times_ms=[float(v) for v in d.get("tap_times_ms", [])],
-            post_static_range=list(d.get("post_static_range", [0, 0])),
             pre_static_start_ms=float(d.get("pre_static_start_ms", 0.0)),
             pre_static_end_ms=float(d.get("pre_static_end_ms", 0.0)),
             post_static_start_ms=float(d.get("post_static_start_ms", 0.0)),
@@ -203,9 +200,14 @@ class SectionCalibration:
 
 def _gravity_from_ranges(
     df: pd.DataFrame,
-    ranges: list[tuple[int, int]],
+    ranges: list[tuple[float, float]],
 ) -> tuple[np.ndarray, float]:
-    """Estimate body-frame gravity vector from static sample ranges.
+    """Estimate body-frame gravity vector from static timestamp ranges (ms).
+
+    Parameters
+    ----------
+    ranges:
+        List of ``(start_ms, end_ms)`` timestamp pairs defining static windows.
 
     Returns (gravity_vector_body, residual_ms2).
     """
@@ -213,9 +215,11 @@ def _gravity_from_ranges(
     if not acc_cols or not ranges:
         return np.array([0.0, 0.0, _G]), float("nan")
 
+    ts = df["timestamp"].to_numpy(dtype=float)
     chunks: list[np.ndarray] = []
-    for s, e in ranges:
-        chunk = df.iloc[s:e][acc_cols].to_numpy(dtype=float)
+    for s_ms, e_ms in ranges:
+        mask = (ts >= s_ms) & (ts <= e_ms)
+        chunk = df.loc[mask, acc_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
             chunks.append(chunk[finite])
@@ -236,15 +240,18 @@ def _gravity_from_ranges(
 
 def _gyro_bias_from_ranges(
     df: pd.DataFrame,
-    ranges: list[tuple[int, int]],
+    ranges: list[tuple[float, float]],
 ) -> np.ndarray:
+    """Estimate gyroscope bias from static timestamp ranges (ms)."""
     gyro_cols = [c for c in ("gx", "gy", "gz") if c in df.columns]
     if not gyro_cols or not ranges:
         return np.zeros(3)
 
+    ts = df["timestamp"].to_numpy(dtype=float)
     chunks: list[np.ndarray] = []
-    for s, e in ranges:
-        chunk = df.iloc[s:e][gyro_cols].to_numpy(dtype=float)
+    for s_ms, e_ms in ranges:
+        mask = (ts >= s_ms) & (ts <= e_ms)
+        chunk = df.loc[mask, gyro_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
             chunks.append(chunk[finite])
@@ -284,15 +291,18 @@ def _gravity_alignment_rotation(g_body: np.ndarray) -> np.ndarray:
 
 def _mag_from_ranges(
     df: pd.DataFrame,
-    ranges: list[tuple[int, int]],
+    ranges: list[tuple[float, float]],
 ) -> np.ndarray:
+    """Estimate mean magnetometer vector over timestamp ranges (ms)."""
     mag_cols = [c for c in ("mx", "my", "mz") if c in df.columns]
     if not mag_cols or not ranges:
         return np.zeros(3)
 
+    ts = df["timestamp"].to_numpy(dtype=float)
     chunks: list[np.ndarray] = []
-    for s, e in ranges:
-        chunk = df.iloc[s:e][mag_cols].to_numpy(dtype=float)
+    for s_ms, e_ms in ranges:
+        mask = (ts >= s_ms) & (ts <= e_ms)
+        chunk = df.loc[mask, mag_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
             chunks.append(chunk[finite])
@@ -304,7 +314,7 @@ def _mag_from_ranges(
 
 def _assess_mag_reliability(
     df: pd.DataFrame,
-    ranges: list[tuple[int, int]],
+    ranges: list[tuple[float, float]],
     *,
     field_min: float = 1.0,
     field_max: float = 200.0,
@@ -314,9 +324,11 @@ def _assess_mag_reliability(
     if len(mag_cols) < 3:
         return False, ["mag_columns_missing"]
 
+    ts = df["timestamp"].to_numpy(dtype=float)
     mags: list[np.ndarray] = []
-    for s, e in ranges:
-        chunk = df.iloc[s:e][mag_cols].to_numpy(dtype=float)
+    for s_ms, e_ms in ranges:
+        mask = (ts >= s_ms) & (ts <= e_ms)
+        chunk = df.loc[mask, mag_cols].to_numpy(dtype=float)
         finite = np.all(np.isfinite(chunk), axis=1)
         if finite.any():
             mags.append(np.linalg.norm(chunk[finite], axis=1))
@@ -400,9 +412,6 @@ def _apply_yaw(R_gravity: np.ndarray, yaw_angle_rad: float) -> np.ndarray:
     return R_yaw @ R_gravity
 
 
-def _ms_from_idx(df: pd.DataFrame, idx: int) -> float:
-    ts = df["timestamp"].to_numpy(dtype=float)
-    return float(ts[max(0, min(idx, len(ts) - 1))])
 
 
 # ---------------------------------------------------------------------------
@@ -412,81 +421,85 @@ def _ms_from_idx(df: pd.DataFrame, idx: int) -> float:
 
 def _find_first_stable_window(
     df: pd.DataFrame,
-    after_idx: int,
+    after_ms: float,
     *,
-    sample_rate_hz: float = 100.0,
-    min_duration_s: float = 3.0,
+    min_duration_ms: float = 3000.0,
     threshold_ms2: float = 1.5,
-) -> tuple[int, int] | None:
-    """Find the first stable (low-motion) window of at least ``min_duration_s`` seconds
-    that starts at or after ``after_idx``.
+) -> tuple[float, float] | None:
+    """Find the first stable (low-motion) window that starts at or after *after_ms*.
 
-    A sample is stable if ``||acc_norm| - g| < threshold_ms2``.
-    Returns (start_idx, end_idx) or None.
+    A sample is stable when ``||acc_norm| - g| < threshold_ms2``.  Duration
+    is measured in milliseconds from the timestamp column.
+
+    Returns ``(start_ms, end_ms)`` or ``None`` when no window is found.
     """
     acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
-    if not acc_cols or after_idx >= len(df):
+    if not acc_cols:
         return None
 
-    acc = df.iloc[after_idx:][acc_cols].to_numpy(dtype=float)
+    ts = df["timestamp"].to_numpy(dtype=float)
+    mask_after = ts >= after_ms
+    if not np.any(mask_after):
+        return None
+
+    ts_after = ts[mask_after]
+    acc = df.loc[mask_after, acc_cols].to_numpy(dtype=float)
     norm = np.sqrt(np.nansum(acc ** 2, axis=1))
     is_stable = np.abs(norm - _G) < threshold_ms2
 
-    min_samples = int(sample_rate_hz * min_duration_s)
     run_start: int | None = None
-
     for i, flag in enumerate(is_stable):
         if flag and run_start is None:
             run_start = i
         elif not flag and run_start is not None:
-            length = i - run_start
-            if length >= min_samples:
-                return after_idx + run_start, after_idx + i - 1
+            if ts_after[i - 1] - ts_after[run_start] >= min_duration_ms:
+                return float(ts_after[run_start]), float(ts_after[i - 1])
             run_start = None
 
     if run_start is not None:
-        length = len(is_stable) - run_start
-        if length >= min_samples:
-            return after_idx + run_start, after_idx + len(is_stable) - 1
+        if ts_after[-1] - ts_after[run_start] >= min_duration_ms:
+            return float(ts_after[run_start]), float(ts_after[-1])
 
     return None
 
 
 def detect_protocol_landmarks(
-    df: pd.DataFrame,
-    *,
-    sensor: str,
-    sample_rate_hz: float | None = None,
-) -> tuple[CalibrationSegment | None, list[tuple[int, int]]]:
-    """Detect opening-routine protocol landmarks in an IMU DataFrame.
+    segments: list[CalibrationSegment],
+) -> tuple[CalibrationSegment | None, list[tuple[float, float]]]:
+    """Derive opening-routine static ranges from pre-detected calibration segments.
+
+    The first detected segment is the opening routine.  Its peak timestamps
+    split the segment into a pre-tap static window and a post-tap static window.
+
+    Parameters
+    ----------
+    segments:
+        Pre-detected calibration segments loaded from JSON (parser output).
+        Pass an empty list if none were found.
 
     Returns
     -------
     (opening_segment, static_ranges)
-        ``opening_segment``: the detected CalibrationSegment for the opening
-        routine, or None if not found.
-        ``static_ranges``: list of (start_idx, end_idx) for the static flanks
-        of the opening routine (pre-tap and post-tap).  Empty on failure.
+        ``opening_segment``: the first :class:`CalibrationSegment`, or ``None``.
+        ``static_ranges``: list of ``(start_ms, end_ms)`` timestamp pairs for
+        the static flanks.  Empty when no segments were found.
     """
-    overrides: dict[str, float] = {}
-    if sample_rate_hz is not None:
-        overrides["sample_rate_hz"] = float(sample_rate_hz)
-    segs = find_calibration_segments(df, sensor=sensor, **overrides)
-    if not segs:
+    if not segments:
         return None, []
 
-    seg = segs[0]  # opening routine = first detected calibration sequence
-    static_ranges: list[tuple[int, int]] = []
+    seg = segments[0]  # opening routine = first calibration sequence
+    static_ranges: list[tuple[float, float]] = []
 
-    # Pre-tap static
-    pre_end = seg.peak_indices[0] if seg.peak_indices else seg.end_idx
-    if pre_end > seg.start_idx:
-        static_ranges.append((seg.start_idx, pre_end))
+    if seg.peak_timestamps:
+        pre_end_ms = seg.peak_timestamps[0]
+        if pre_end_ms > seg.start_timestamp:
+            static_ranges.append((seg.start_timestamp, pre_end_ms))
 
-    # Post-tap static
-    post_start = seg.peak_indices[-1] if seg.peak_indices else seg.start_idx
-    if seg.end_idx > post_start:
-        static_ranges.append((post_start, seg.end_idx))
+        post_start_ms = seg.peak_timestamps[-1]
+        if seg.end_timestamp > post_start_ms:
+            static_ranges.append((post_start_ms, seg.end_timestamp))
+    else:
+        static_ranges.append((seg.start_timestamp, seg.end_timestamp))
 
     return seg, static_ranges
 
@@ -498,7 +511,7 @@ def detect_protocol_landmarks(
 
 def estimate_sensor_intrinsics(
     df: pd.DataFrame,
-    static_ranges: list[tuple[int, int]],
+    static_ranges: list[tuple[float, float]],
     *,
     static_cal: dict[str, Any] | None = None,
 ) -> SensorIntrinsics:
@@ -509,7 +522,7 @@ def estimate_sensor_intrinsics(
     df:
         Raw IMU DataFrame.
     static_ranges:
-        (start_idx, end_idx) pairs of static samples to use.
+        ``(start_ms, end_ms)`` timestamp pairs of static windows to use.
     static_cal:
         Optional static hardware calibration reference dict.  Must contain
         ``accelerometer.bias`` and/or ``accelerometer.scale`` and
@@ -580,9 +593,8 @@ def estimate_sensor_intrinsics(
 
 def estimate_sensor_alignment(
     df: pd.DataFrame,
-    window_range: tuple[int, int],
+    window_range: tuple[float, float],
     *,
-    sample_rate_hz: float = 100.0,
     full_df: pd.DataFrame | None = None,
 ) -> SensorAlignment:
     """Estimate body-to-world alignment from a stable window.
@@ -598,26 +610,18 @@ def estimate_sensor_alignment(
     df:
         Raw IMU DataFrame.
     window_range:
-        (start_idx, end_idx) of the stable window to use for gravity and
-        magnetometer estimation.
-    sample_rate_hz:
-        Sample rate for temporal calculations.
+        ``(start_ms, end_ms)`` timestamp range of the stable window to use
+        for gravity and magnetometer estimation.
     full_df:
         Full section DataFrame (used for PCA forward-direction estimation).
         Falls back to ``df`` when not provided.
     """
     quality_tags: list[str] = []
-    s, e = window_range
-    window_df = df.iloc[s:e]
+    win_start_ms, win_end_ms = float(window_range[0]), float(window_range[1])
 
     # Gravity estimate from alignment window
-    g_body, residual = _gravity_from_ranges(df, [(s, e)])
+    g_body, residual = _gravity_from_ranges(df, [(win_start_ms, win_end_ms)])
     R_gravity = _gravity_alignment_rotation(g_body)
-
-    # Window timestamps
-    ts = df["timestamp"].to_numpy(dtype=float)
-    win_start_ms = float(ts[max(0, min(s, len(ts) - 1))])
-    win_end_ms = float(ts[max(0, min(e, len(ts) - 1))])
 
     # --- Yaw resolution ---
     R_final = R_gravity
@@ -625,7 +629,7 @@ def estimate_sensor_alignment(
     yaw_confidence = 0.0
 
     # Priority 1: magnetometer
-    mag_ranges = [(s, e)]
+    mag_ranges = [(win_start_ms, win_end_ms)]
     mag_reliable, mag_tags = _assess_mag_reliability(df, mag_ranges)
     quality_tags.extend(mag_tags)
 

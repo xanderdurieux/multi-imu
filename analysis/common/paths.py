@@ -11,7 +11,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from common.signals import vector_norm
+from common.signals import add_imu_norms
 
 
 # ---------------------------------------------------------------------------
@@ -71,15 +71,8 @@ def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for col in CSV_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    if all(c in out.columns for c in _ACC_AXIS_COLS):
-        out["acc_norm"] = vector_norm(out, _ACC_AXIS_COLS)
-    if all(c in out.columns for c in _GYRO_AXIS_COLS):
-        out["gyro_norm"] = vector_norm(out, _GYRO_AXIS_COLS)
-    if all(c in out.columns for c in _MAG_AXIS_COLS):
-        out["mag_norm"] = vector_norm(out, _MAG_AXIS_COLS)
-      
-    return out
-
+    return add_imu_norms(out)
+ 
 
 def read_csv(csv_path: Path | str) -> pd.DataFrame:
     """Load a CSV from disk"""
@@ -345,7 +338,7 @@ def section_labels_csv(sec_dir: Path | str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Config path helpers
+# Config JSON helpers
 # ---------------------------------------------------------------------------
 
 def default_workflow_config_path() -> Path:
@@ -353,14 +346,9 @@ def default_workflow_config_path() -> Path:
     return configs_root() / "workflow.default.json"
 
 
-def cal_segments_config_path() -> Path:
+def default_calibration_segments_config_path() -> Path:
     """Return the path to per-sensor calibration-segment detection parameters (JSON)."""
-    return configs_root() / "cal_segments_args.json"
-
-
-def calibration_segments_json_path(recording_name: str) -> Path:
-    """Return the path to the calibration-segments JSON for a recording."""
-    return recording_stage_dir(recording_name, "parsed") / "calibration_segments.json"
+    return configs_root() / "calibration_segments_args.json"
 
 
 def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
@@ -377,3 +365,17 @@ def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
     merged.update(override_payload)
     return merged
 
+
+def load_calibration_segments_config_data(override_path: Path | str | None = None) -> dict:
+    """Load calibration-segments config data with default-as-base merging.
+
+    When ``override_path`` is provided, its keys overwrite keys from the
+    default calibration-segments config.
+    """
+    default_payload = read_json_file(default_calibration_segments_config_path())
+    if override_path is None:
+        return dict(default_payload)
+    override_payload = read_json_file(override_path)
+    merged = dict(default_payload)
+    merged.update(override_payload)
+    return merged

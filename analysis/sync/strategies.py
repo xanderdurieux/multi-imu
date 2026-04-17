@@ -1,4 +1,4 @@
-"""Four synchronization strategies built on a shared anchor extraction step."""
+"""Four synchronization strategies built on calibration-anchor extraction."""
 
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ import pandas as pd
 
 from .activity import SIGNAL_MODE_ACC_NORM_DIFF, build_alignment_series
 from .anchors import (
-    CalibrationAnchorExtraction,
-    CalibrationWindowResult,
+    CalibrationAnchor,
     calibration_anchor_to_dict,
-    extract_calibration_anchors,
+    load_calibration_anchors,
 )
 from .model import SyncModel, make_sync_model
 from .xcorr import (
@@ -31,57 +30,40 @@ DEFAULT_SAMPLE_RATE_HZ = 100.0
 DEFAULT_MAX_LAG_SECONDS = 60.0
 DEFAULT_DRIFT_PPM = 300.0
 
-_DEFAULT_ANCHOR_SEARCH_SECONDS = 5.0
 _DEFAULT_ADAPTIVE_SIGNAL_MODE = SIGNAL_MODE_ACC_NORM_DIFF
 _DEFAULT_MIN_VALID_FRACTION = 0.5
 
 
 def _build_calibration_meta(
-    extraction: CalibrationAnchorExtraction,
+    anchors: list[CalibrationAnchor],
     *,
-    anchors: list[CalibrationWindowResult] | None = None,
     fit_r2: float | None = None,
 ) -> dict[str, Any]:
-    matched = extraction.anchors if anchors is None else anchors
-    matched = sorted(matched, key=lambda anchor: (anchor.t_tgt_seconds, anchor.t_ref_peak_s))
-    opening = matched[0] if matched else None
-    closing = matched[-1] if matched else None
+    sorted_anchors = sorted(anchors, key=lambda a: a.tgt_timestamp_ms)
+    opening = sorted_anchors[0] if sorted_anchors else None
+    closing = sorted_anchors[-1] if sorted_anchors else None
 
     calibration: dict[str, Any] = {
-        "n_anchors": len(matched),
+        "n_anchors": len(sorted_anchors),
         "anchor_span_s": (
-            round(float(closing.t_tgt_seconds - opening.t_tgt_seconds), 1)
-            if opening is not None and closing is not None and len(matched) >= 2
+            round(float((closing.tgt_timestamp_ms - opening.tgt_timestamp_ms) / 1000.0), 1)
+            if opening is not None and closing is not None and len(sorted_anchors) >= 2
             else 0.0
         ),
         "opening": calibration_anchor_to_dict(opening, index=0) if opening is not None else None,
         "closing": (
-            calibration_anchor_to_dict(closing, index=len(matched) - 1)
-            if closing is not None and len(matched) >= 2
+            calibration_anchor_to_dict(closing, index=len(sorted_anchors) - 1)
+            if closing is not None and len(sorted_anchors) >= 2
             else None
         ),
         "anchors": [
-            calibration_anchor_to_dict(anchor, index=index)
-            for index, anchor in enumerate(matched)
+            calibration_anchor_to_dict(anchor, index=i)
+            for i, anchor in enumerate(sorted_anchors)
         ],
     }
     if fit_r2 is not None:
         calibration["fit_r2"] = round(float(fit_r2), 4)
     return calibration
-
-
-def _require_anchor_count(
-    extraction: CalibrationAnchorExtraction,
-    *,
-    min_count: int,
-    method: str,
-) -> list[CalibrationWindowResult]:
-    if len(extraction.anchors) < min_count:
-        raise ValueError(
-            f"{method} requires at least {min_count} matched anchor(s), "
-            f"found {len(extraction.anchors)}."
-        )
-    return extraction.anchors
 
 
 def estimate_multi_anchor(
@@ -94,24 +76,27 @@ def estimate_multi_anchor(
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Fit offset and drift from all matched calibration anchors."""
-    extraction = extract_calibration_anchors(
-        ref_df,
-        tgt_df,
-        recording_name=recording_name,
-        reference_sensor=reference_sensor,
-        target_sensor=target_sensor,
-        sample_rate_hz=sample_rate_hz,
-        search_seconds=anchor_search_seconds,
+    """Fit offset and drift from all matched calibration anchors.
+
+    Each anchor is derived from the median peak timestamp of a matched
+    calibration sequence pair (reference vs target).  Requires ≥ 2 anchors.
+    """
+    anchors = load_calibration_anchors(
+        recording_name,
+        ref_sensor=reference_sensor,
+        tgt_sensor=target_sensor,
     )
-    anchors = _require_anchor_count(extraction, min_count=2, method="multi_anchor")
+    if len(anchors) < 2:
+        raise ValueError(
+            f"multi_anchor requires at least 2 anchors, found {len(anchors)}."
+        )
 
     tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
-    target_times = np.asarray([anchor.t_tgt_seconds for anchor in anchors], dtype=float)
-    offsets = np.asarray([anchor.offset_seconds for anchor in anchors], dtype=float)
-    weights = np.clip(np.asarray([anchor.correlation_score for anchor in anchors], dtype=float), 0.0, None)
+    target_times = np.asarray([a.tgt_timestamp_ms / 1000.0 for a in anchors], dtype=float)
+    offsets = np.asarray([a.offset_s for a in anchors], dtype=float)
+    # Equal weights — each anchor is a single tap-cluster median, no quality score
+    weights = np.ones(len(anchors), dtype=float)
     offset_at_origin, drift, fit_r2 = fit_offset_drift(
         target_times,
         offsets,
@@ -126,13 +111,13 @@ def estimate_multi_anchor(
         offset_seconds=offset_at_origin,
         drift_seconds_per_second=drift,
         sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=float(anchor_search_seconds + 1.0),
+        max_lag_seconds=5.0,
     )
     meta: dict[str, Any] = {
         "sync_method": "multi_anchor",
         "drift_source": "anchor_fit",
         "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
-        "calibration": _build_calibration_meta(extraction, fit_r2=fit_r2),
+        "calibration": _build_calibration_meta(anchors, fit_r2=fit_r2),
     }
     return model, meta
 
@@ -147,20 +132,16 @@ def estimate_one_anchor_adaptive(
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
+    anchor_search_seconds: float = 5.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Use the first anchor for offset, then refine causally from signal windows."""
-    extraction = extract_calibration_anchors(
-        ref_df,
-        tgt_df,
-        recording_name=recording_name,
-        reference_sensor=reference_sensor,
-        target_sensor=target_sensor,
-        sample_rate_hz=sample_rate_hz,
-        search_seconds=anchor_search_seconds,
+    """Use the opening anchor for initial offset, then refine causally from signal."""
+    anchors = load_calibration_anchors(
+        recording_name,
+        ref_sensor=reference_sensor,
+        tgt_sensor=target_sensor,
     )
-    anchors = _require_anchor_count(extraction, min_count=1, method="one_anchor_adaptive")
     opening_anchor = anchors[0]
+    start_ref_time_s = opening_anchor.ref_timestamp_ms / 1000.0
 
     ref_series = build_alignment_series(
         ref_df,
@@ -177,7 +158,7 @@ def estimate_one_anchor_adaptive(
     target_times, offsets, scores, win_stats = adaptive_windowed_refinement(
         ref_series,
         tgt_series,
-        initial_offset_seconds=opening_anchor.offset_seconds,
+        initial_offset_seconds=opening_anchor.offset_s,
         initial_drift_seconds_per_second=0.0,
         target_origin_seconds=tgt_origin_s,
         window_seconds=DEFAULT_WINDOW_SECONDS,
@@ -185,11 +166,11 @@ def estimate_one_anchor_adaptive(
         local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
         min_window_score=DEFAULT_MIN_WINDOW_SCORE,
         min_valid_fraction=_DEFAULT_MIN_VALID_FRACTION,
-        start_ref_time_seconds=opening_anchor.t_ref_peak_s,
+        start_ref_time_seconds=start_ref_time_s,
     )
 
     fit_r2 = 0.0
-    final_offset = opening_anchor.offset_seconds
+    final_offset = opening_anchor.offset_s
     final_drift = 0.0
     drift_source = "opening_anchor"
     if offsets.size:
@@ -203,7 +184,7 @@ def estimate_one_anchor_adaptive(
         if fit_r2 >= DEFAULT_MIN_FIT_R2:
             drift_source = "adaptive_signal_fit"
         else:
-            final_offset = opening_anchor.offset_seconds
+            final_offset = opening_anchor.offset_s
             final_drift = 0.0
             drift_source = "opening_anchor"
 
@@ -220,7 +201,7 @@ def estimate_one_anchor_adaptive(
         "sync_method": "one_anchor_adaptive",
         "drift_source": drift_source,
         "signal_mode": _DEFAULT_ADAPTIVE_SIGNAL_MODE,
-        "calibration": _build_calibration_meta(extraction),
+        "calibration": _build_calibration_meta(anchors),
         "adaptive": {
             "opening_anchor": calibration_anchor_to_dict(opening_anchor, index=0),
             "accepted_windows": int(win_stats["accepted_windows"]),
@@ -244,26 +225,20 @@ def estimate_one_anchor_prior(
     target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     drift_ppm: float = DEFAULT_DRIFT_PPM,
-    anchor_search_seconds: float = _DEFAULT_ANCHOR_SEARCH_SECONDS,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Use the first anchor for offset and a fixed drift prior afterwards."""
-    extraction = extract_calibration_anchors(
-        ref_df,
-        tgt_df,
-        recording_name=recording_name,
-        reference_sensor=reference_sensor,
-        target_sensor=target_sensor,
-        sample_rate_hz=sample_rate_hz,
-        search_seconds=anchor_search_seconds,
+    """Use the opening anchor for offset and a fixed drift prior."""
+    anchors = load_calibration_anchors(
+        recording_name,
+        ref_sensor=reference_sensor,
+        tgt_sensor=target_sensor,
     )
-    anchors = _require_anchor_count(extraction, min_count=1, method="one_anchor_prior")
     opening_anchor = anchors[0]
 
     tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
     drift_s_per_s = float(drift_ppm) * 1e-6
     offset_at_origin = (
-        opening_anchor.offset_seconds
-        - drift_s_per_s * (opening_anchor.t_tgt_seconds - tgt_origin_s)
+        opening_anchor.offset_s
+        - drift_s_per_s * (opening_anchor.tgt_timestamp_ms / 1000.0 - tgt_origin_s)
     )
 
     model = make_sync_model(
@@ -273,14 +248,14 @@ def estimate_one_anchor_prior(
         offset_seconds=offset_at_origin,
         drift_seconds_per_second=drift_s_per_s,
         sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=float(anchor_search_seconds + 1.0),
+        max_lag_seconds=5.0,
     )
     meta: dict[str, Any] = {
         "sync_method": "one_anchor_prior",
         "drift_source": "prior_ppm",
         "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
         "drift_ppm_prior": float(drift_ppm),
-        "calibration": _build_calibration_meta(extraction),
+        "calibration": _build_calibration_meta(anchors),
     }
     return model, meta
 
@@ -299,9 +274,8 @@ def estimate_signal_only(
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Signal-only synchronization using SDA coarse offset and LIDA drift fitting.
 
-    ``recording_name``, ``reference_sensor``, and ``target_sensor`` are accepted for
-    API parity with anchor-based strategies; they are not used here (no
-    calibration-segment detection).
+    ``recording_name``, ``reference_sensor``, and ``target_sensor`` are
+    accepted for API parity; no calibration segments are used here.
     """
     ref_series = build_alignment_series(
         ref_df,
