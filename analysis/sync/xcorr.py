@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .activity import AlignmentSeries
+from .model import reference_to_target_seconds
 
 # ---------------------------------------------------------------------------
 # Primitives
@@ -274,10 +275,13 @@ def adaptive_windowed_refinement(
             continue
 
         # Predict where this ref window maps in target time.
-        t_tgt_pred = (
-            t_ref_center
-            - cur_offset
-            - cur_drift * (t_ref_center - cur_offset - target_origin_seconds)
+        t_tgt_pred = float(
+            reference_to_target_seconds(
+                t_ref_center,
+                offset_seconds=cur_offset,
+                drift_seconds_per_second=cur_drift,
+                target_origin_seconds=target_origin_seconds,
+            )
         )
         pred_tgt_idx = int(
             np.clip(np.searchsorted(tgt_ts, t_tgt_pred), 0, n_tgt - 1)

@@ -1,4 +1,4 @@
-"""SyncModel dataclass and linear time transform helpers."""
+"""SyncModel dataclass and linear clock-transform helpers."""
 
 from __future__ import annotations
 
@@ -45,6 +45,41 @@ def make_sync_model(
     )
 
 
+
+
+def target_to_reference_seconds(
+    target_seconds: pd.Series | np.ndarray | float,
+    *,
+    offset_seconds: float,
+    drift_seconds_per_second: float,
+    target_origin_seconds: float,
+) -> np.ndarray:
+    """Apply model equation in seconds: ``t_ref = t_tgt + b + a*(t_tgt - t0)``."""
+    t_tgt = np.asarray(target_seconds, dtype=float)
+    return (
+        t_tgt
+        + float(offset_seconds)
+        + float(drift_seconds_per_second) * (t_tgt - float(target_origin_seconds))
+    )
+
+
+def reference_to_target_seconds(
+    reference_seconds: pd.Series | np.ndarray | float,
+    *,
+    offset_seconds: float,
+    drift_seconds_per_second: float,
+    target_origin_seconds: float,
+) -> np.ndarray:
+    """Invert the linear model: solve ``t_ref = t_tgt + b + a*(t_tgt - t0)`` for ``t_tgt``."""
+    t_ref = np.asarray(reference_seconds, dtype=float)
+    a = float(drift_seconds_per_second)
+    denom = 1.0 + a
+    if abs(denom) < 1e-9:
+        raise ValueError("Invalid drift model: 1 + drift_seconds_per_second is near zero.")
+
+    num = t_ref - float(offset_seconds) + a * float(target_origin_seconds)
+    return num / denom
+
 def apply_linear_time_transform(
     timestamp_ms: pd.Series | np.ndarray,
     *,
@@ -54,10 +89,11 @@ def apply_linear_time_transform(
 ) -> np.ndarray:
     """Map target timestamps (ms) to reference time via offset + linear drift."""
     ts_sec = np.asarray(timestamp_ms, dtype=float) / 1000.0
-    aligned_sec = (
-        ts_sec
-        + float(offset_seconds)
-        + float(drift_seconds_per_second) * (ts_sec - float(target_origin_seconds))
+    aligned_sec = target_to_reference_seconds(
+        ts_sec,
+        offset_seconds=offset_seconds,
+        drift_seconds_per_second=drift_seconds_per_second,
+        target_origin_seconds=target_origin_seconds,
     )
     return aligned_sec * 1000.0
 

@@ -7,7 +7,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from common.signals import add_vector_norms
+from common.signals import add_vector_norms, first_difference, zscore_finite
 
 SIGNAL_MODE_ACC_NORM_DIFF = "acc_norm_diff"
 SIGNAL_MODE_GYRO_NORM_DIFF = "gyro_norm_diff"
@@ -17,23 +17,6 @@ SIGNAL_MODES: tuple[str, ...] = (
     SIGNAL_MODE_GYRO_NORM_DIFF,
     SIGNAL_MODE_ACC_GYRO_FUSED_DIFF,
 )
-
-
-def zscore(signal: np.ndarray) -> np.ndarray:
-    """Return a finite z-scored copy of *signal*."""
-    x = np.asarray(signal, dtype=float)
-    finite = np.isfinite(x)
-    if finite.sum() == 0:
-        return np.zeros_like(x, dtype=float)
-    mu = float(np.nanmean(x[finite]))
-    sigma = float(np.nanstd(x[finite]))
-    if sigma < 1e-9:
-        out = np.zeros_like(x, dtype=float)
-        out[~finite] = 0.0
-        return out
-    out = (x - mu) / sigma
-    out[~finite] = 0.0
-    return out
 
 
 def resolve_signal_mode(
@@ -47,7 +30,9 @@ def resolve_signal_mode(
     """Resolve the effective signal mode from explicit or legacy options."""
     if signal_mode is not None:
         if signal_mode not in SIGNAL_MODES:
-            raise ValueError(f"Unknown signal_mode {signal_mode!r}; expected one of {SIGNAL_MODES}.")
+            raise ValueError(
+                f"Unknown signal_mode {signal_mode!r}; expected one of {SIGNAL_MODES}."
+            )
         return signal_mode
 
     if differentiate and use_acc and not use_gyro and not use_mag:
@@ -59,10 +44,8 @@ def resolve_signal_mode(
     return None
 
 
-def _differentiate(signal: np.ndarray) -> np.ndarray:
-    if signal.size <= 1:
-        return signal.copy()
-    return np.diff(signal, prepend=signal[0])
+def _norm_diff(signal: np.ndarray) -> np.ndarray:
+    return zscore_finite(first_difference(zscore_finite(signal)))
 
 
 def build_activity_signal(
@@ -86,18 +69,15 @@ def build_activity_signal(
     )
 
     if resolved_mode == SIGNAL_MODE_ACC_NORM_DIFF:
-        signal = _differentiate(zscore(base["acc_norm"].to_numpy(dtype=float)))
-        return zscore(signal), resolved_mode
+        return _norm_diff(base["acc_norm"].to_numpy(dtype=float)), resolved_mode
 
     if resolved_mode == SIGNAL_MODE_GYRO_NORM_DIFF:
-        signal = _differentiate(zscore(base["gyro_norm"].to_numpy(dtype=float)))
-        return zscore(signal), resolved_mode
+        return _norm_diff(base["gyro_norm"].to_numpy(dtype=float)), resolved_mode
 
     if resolved_mode == SIGNAL_MODE_ACC_GYRO_FUSED_DIFF:
-        acc = _differentiate(zscore(base["acc_norm"].to_numpy(dtype=float)))
-        gyro = _differentiate(zscore(base["gyro_norm"].to_numpy(dtype=float)))
-        stacked = np.vstack([zscore(acc), zscore(gyro)])
-        return zscore(np.nanmean(stacked, axis=0)), resolved_mode
+        acc = _norm_diff(base["acc_norm"].to_numpy(dtype=float))
+        gyro = _norm_diff(base["gyro_norm"].to_numpy(dtype=float))
+        return zscore_finite(np.nanmean(np.vstack([acc, gyro]), axis=0)), resolved_mode
 
     components: list[np.ndarray] = []
 
@@ -118,8 +98,7 @@ def build_activity_signal(
     if not components:
         raise ValueError("No valid activity channels selected for alignment.")
 
-    stacked = np.vstack([zscore(c) for c in components])
-    signal = np.nanmean(stacked, axis=0)
+    signal = np.nanmean(np.vstack([zscore_finite(c) for c in components]), axis=0)
     if differentiate:
-        signal = _differentiate(signal)
-    return zscore(signal), "legacy"
+        signal = first_difference(signal)
+    return zscore_finite(signal), "legacy"
