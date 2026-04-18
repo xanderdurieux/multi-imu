@@ -73,42 +73,34 @@ def _load_sync_infos(recording_name: str) -> dict[str, dict | None]:
     """Load sync model info for every method.
 
     Your pipeline produces a consistent layout:
-    - ``synced/all_methods.json`` contains per-method estimates and shared calibration.
+    - ``synced/sync_info.json`` contains the selected model plus per-method summaries.
     """
     synced_root = recording_stage_dir(recording_name, "synced")
-    all_methods_path = synced_root / "all_methods.json"
-    if not all_methods_path.exists():
-        raise FileNotFoundError(f"Missing all_methods.json under {synced_root}")
+    sync_info_path = synced_root / "sync_info.json"
+    if not sync_info_path.exists():
+        raise FileNotFoundError(f"Missing sync_info.json under {synced_root}")
 
-    payload = json.loads(all_methods_path.read_text(encoding="utf-8"))
-    shared = payload.get("shared") if isinstance(payload, dict) else None
-    methods = payload.get("methods") if isinstance(payload, dict) else None
-    if not isinstance(shared, dict):
-        raise ValueError(f"Invalid all_methods.json: missing 'shared' under {all_methods_path}")
+    payload = json.loads(sync_info_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid sync_info.json: expected object at {sync_info_path}")
 
-    target_time_origin_seconds = shared.get("target_time_origin_seconds")
-    calibration = shared.get("calibration")
+    target_time_origin_seconds = payload.get("target_time_origin_seconds")
+    calibration = payload.get("calibration")
+    methods = payload.get("methods")
     if target_time_origin_seconds is None or not isinstance(calibration, dict):
-        raise ValueError(f"Invalid all_methods.json: missing shared origin/calibration under {all_methods_path}")
+        raise ValueError(f"Invalid sync_info.json: missing origin/calibration under {sync_info_path}")
 
     result: dict[str, dict | None] = {}
 
     # Build the flattened shape expected by the plotting code.
     for method in _ALL_METHODS:
-        estimate = None
-        if isinstance(methods, dict):
-            m = methods.get(method)
-            if isinstance(m, dict):
-                est = m.get("estimate")
-                if isinstance(est, dict):
-                    estimate = est
-
-        if not isinstance(estimate, dict):
+        method_summary = methods.get(method) if isinstance(methods, dict) else None
+        if not isinstance(method_summary, dict):
             result[method] = None
             continue
 
-        offset_s = estimate.get("offset_seconds")
-        drift_s = estimate.get("drift_seconds_per_second")
+        offset_s = method_summary.get("offset_seconds")
+        drift_s = method_summary.get("drift_seconds_per_second")
         if offset_s is None or drift_s is None:
             result[method] = None
             continue
@@ -123,21 +115,21 @@ def _load_sync_infos(recording_name: str) -> dict[str, dict | None]:
     return result
 
 
-def _load_all_methods_payload(recording_name: str) -> dict:
-    """Load the raw ``all_methods.json`` payload for *recording_name*."""
+def _load_sync_info_payload(recording_name: str) -> dict:
+    """Load the raw ``sync_info.json`` payload for *recording_name*."""
     synced_root = recording_stage_dir(recording_name, "synced")
-    all_methods_path = synced_root / "all_methods.json"
-    if not all_methods_path.exists():
-        raise FileNotFoundError(f"Missing all_methods.json under {synced_root}")
+    sync_info_path = synced_root / "sync_info.json"
+    if not sync_info_path.exists():
+        raise FileNotFoundError(f"Missing sync_info.json under {synced_root}")
 
-    payload = json.loads(all_methods_path.read_text(encoding="utf-8"))
+    payload = json.loads(sync_info_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError(f"Invalid all_methods.json: expected object at {all_methods_path}")
+        raise ValueError(f"Invalid sync_info.json: expected object at {sync_info_path}")
     return payload
 
 
 def _method_metrics_rows(payload: dict) -> list[dict[str, object]]:
-    """Build per-method metric rows from an ``all_methods.json`` payload."""
+    """Build per-method metric rows from a ``sync_info.json`` payload."""
     methods = payload.get("methods")
     selected_method = str(payload.get("selected_method") or "")
     rows: list[dict[str, object]] = []
@@ -158,23 +150,25 @@ def _method_metrics_rows(payload: dict) -> list[dict[str, object]]:
             )
             continue
 
-        estimate = method_block.get("estimate") if isinstance(method_block.get("estimate"), dict) else {}
-        scores = method_block.get("scores") if isinstance(method_block.get("scores"), dict) else {}
         rows.append(
             {
                 "method": method,
                 "label": _METHOD_LABELS[method],
                 "available": bool(method_block.get("available", False)),
                 "selected": method == selected_method,
-                "offset_seconds": float(estimate["offset_seconds"]) if estimate.get("offset_seconds") is not None else np.nan,
+                "offset_seconds": (
+                    float(method_block["offset_seconds"])
+                    if method_block.get("offset_seconds") is not None
+                    else np.nan
+                ),
                 "drift_seconds_per_second": (
-                    float(estimate["drift_seconds_per_second"])
-                    if estimate.get("drift_seconds_per_second") is not None
+                    float(method_block["drift_seconds_per_second"])
+                    if method_block.get("drift_seconds_per_second") is not None
                     else np.nan
                 ),
                 "correlation": (
-                    float(scores["corr_offset_and_drift"])
-                    if scores.get("corr_offset_and_drift") is not None
+                    float(method_block["corr_offset_and_drift"])
+                    if method_block.get("corr_offset_and_drift") is not None
                     else np.nan
                 ),
             }
@@ -743,7 +737,7 @@ def plot_sync_method_metrics(
     if not synced_dir.is_dir():
         raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
 
-    payload = _load_all_methods_payload(recording_name)
+    payload = _load_sync_info_payload(recording_name)
     rows = _method_metrics_rows(payload)
     selected_method = str(payload.get("selected_method") or "")
 
@@ -915,9 +909,9 @@ def plot_anchor_fits(
             f"{_REF_SENSOR}={len(ref_segs)}, {_TGT_SENSOR}={len(tgt_segs)}"
         )
 
-    payload = _load_all_methods_payload(recording_name)
+    payload = _load_sync_info_payload(recording_name)
     anchors_data = (
-        payload.get("shared", {}).get("calibration", {}).get("anchors", [])
+        payload.get("calibration", {}).get("anchors", [])
     )
 
     parsed_dir = recording_stage_dir(recording_name, "parsed")

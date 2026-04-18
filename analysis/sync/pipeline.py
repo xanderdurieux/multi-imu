@@ -8,7 +8,8 @@ import logging
 import shutil
 import sys
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,7 +33,6 @@ from .orchestrate import (
 )
 from .quality import compute_sync_correlations
 from .stream_io import load_stream
-from .sync_info_format import build_sync_info_dict
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,73 @@ def _drop_alignment_columns(df):
     drop = [c for c in ("timestamp_orig", "timestamp_aligned", "timestamp_received")
             if c in df.columns]
     return df.drop(columns=drop) if drop else df
+
+
+def _method_summary_block(
+    model,
+    meta: dict[str, Any],
+    correlation: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "available": True,
+        "offset_seconds": model.offset_seconds,
+        "drift_seconds_per_second": model.drift_seconds_per_second,
+        "drift_ppm": model.drift_seconds_per_second * 1e6,
+        "drift_source": meta.get("drift_source"),
+        "corr_offset_and_drift": (correlation or {}).get("offset_and_drift"),
+        "calibration_span_s": ((meta.get("calibration") or {}).get("anchor_span_s")),
+        "calibration_n_anchors": ((meta.get("calibration") or {}).get("n_anchors")),
+        "calibration_fit_r2": ((meta.get("calibration") or {}).get("fit_r2")),
+    }
+
+
+def _build_method_sync_info(
+    *,
+    method: str,
+    model,
+    meta: dict[str, Any],
+    correlation: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "selected_method": method,
+        "target_time_origin_seconds": model.target_time_origin_seconds,
+        "offset_seconds": model.offset_seconds,
+        "drift_seconds_per_second": model.drift_seconds_per_second,
+        "drift_ppm": model.drift_seconds_per_second * 1e6,
+        "drift_source": meta.get("drift_source"),
+        "correlation": dict(correlation),
+        "methods": {
+            method: _method_summary_block(model, meta, correlation),
+        },
+    }
+    calibration = meta.get("calibration")
+    if isinstance(calibration, dict):
+        payload["calibration"] = calibration
+    return payload
+
+
+def _build_sync_metadata(
+    *,
+    reference_csv: Path | str,
+    target_csv: Path | str,
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "reference_csv": str(reference_csv),
+        "target_csv": str(target_csv),
+        "sync_method": meta.get("sync_method"),
+    }
+    hyperparameters = meta.get("hyperparameters")
+    if isinstance(hyperparameters, dict):
+        payload["hyperparameters"] = hyperparameters
+
+    for key in ("signal_mode", "drift_ppm_prior", "sda_score", "windowed", "adaptive"):
+        value = meta.get(key)
+        if value is not None:
+            payload[key] = value
+
+    return payload
 
 
 def _run_method(
@@ -126,25 +193,37 @@ def _run_method(
     )
 
     aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
+    hyperparameters = meta.get("hyperparameters") if isinstance(meta.get("hyperparameters"), dict) else {}
+    sample_rate_hz = float(hyperparameters.get("sample_rate_hz", 100.0))
 
     correlation = compute_sync_correlations(
-        ref_df, tgt_df, model, sample_rate_hz=model.sample_rate_hz,
+        ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz,
     )
-    payload = build_sync_info_dict(
-        model=asdict(model),
+    payload = _build_method_sync_info(
+        method=method,
+        model=model,
         meta=meta,
         correlation=correlation,
+    )
+    metadata_payload = _build_sync_metadata(
+        reference_csv=ref_csv,
+        target_csv=tgt_csv,
+        meta=meta,
     )
 
     # Write outputs.
     ref_out = out_dir / f"{reference_sensor}.csv"
     tgt_out = out_dir / f"{target_sensor}.csv"
     sync_json = out_dir / "sync_info.json"
+    sync_metadata_json = out_dir / "sync_metadata.json"
 
     shutil.copy2(ref_csv, ref_out)
     write_csv(_drop_alignment_columns(aligned_df), tgt_out)
     sync_json.write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    sync_metadata_json.write_text(
+        json.dumps(metadata_payload, indent=2), encoding="utf-8"
     )
     return ref_out, tgt_out, sync_json
 
@@ -178,14 +257,14 @@ def _apply_selection(
     for filename in (
         f"{reference_sensor}.csv",
         f"{target_sensor}.csv",
-        "sync_info.json",
+        "sync_metadata.json",
     ):
         src = src_dir / filename
         if src.exists():
             shutil.copy2(src, out_dir / filename)
 
-    all_methods_path = out_dir / "all_methods.json"
-    all_methods_path.write_text(
+    sync_info_path = out_dir / "sync_info.json"
+    sync_info_path.write_text(
         json.dumps(result.metrics, indent=2), encoding="utf-8"
     )
 
@@ -344,18 +423,26 @@ def synchronize_from_calibration(
         anchor_search_seconds=cal_search_s,
     )
 
-    correlation = compute_sync_correlations(
-        ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz,
-    )
-    payload = build_sync_info_dict(
-        model=asdict(model),
+    correlation = compute_sync_correlations(ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz)
+    payload = _build_method_sync_info(
+        method="multi_anchor",
+        model=model,
         meta=meta,
         correlation=correlation,
+    )
+    metadata_payload = _build_sync_metadata(
+        reference_csv=ref_path,
+        target_csv=tgt_path,
+        meta=meta,
     )
 
     sync_json_path = out_dir / "sync_info.json"
     sync_json_path.write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    sync_metadata_path = out_dir / "sync_metadata.json"
+    sync_metadata_path.write_text(
+        json.dumps(metadata_payload, indent=2), encoding="utf-8"
     )
 
     aligned_df = _drop_alignment_columns(

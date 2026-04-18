@@ -23,7 +23,6 @@ import pandas as pd
 from common.paths import iter_sections_for_recording, read_csv, recording_stage_dir
 from sync.signals import build_activity_signal
 from sync.stream_io import VECTOR_AXES
-from sync.sync_info_format import flatten_sync_info_dict
 from visualization._utils import (
     SENSOR_COLORS,
     filter_valid_plot_xy,
@@ -246,9 +245,9 @@ def plot_sync_example_result(
         if df is None:
             raise FileNotFoundError(f"Missing sensor CSV: {name}")
 
-    info = flatten_sync_info_dict(
-        json.loads(sync_json.read_text(encoding="utf-8"))
-    ) or {}
+    info = json.loads(sync_json.read_text(encoding="utf-8"))
+    if not isinstance(info, dict):
+        info = {}
     offset_s = float(info.get("offset_seconds", 0.0))
     drift_sps = float(info.get("drift_seconds_per_second", 0.0))
     cal_block = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
@@ -415,8 +414,7 @@ def plot_sync_landmarks_and_sections_timeline(
 
     The figure overlays:
     - synced activity traces (SPORSA + Arduino) on a shared timeline,
-    - detected calibration anchors from ``synced/all_methods.json`` (or
-      ``synced/sync_info.json`` fallback),
+    - detected calibration anchors from ``synced/sync_info.json``,
     - vertical start/end boundaries of split sections for this recording.
 
     Output
@@ -445,24 +443,18 @@ def plot_sync_landmarks_and_sections_timeline(
     ar_rel = ar_ts_syn - t0_syn
 
     # ------------------------------------------------------------------
-    # Calibration anchors from all_methods.json (fallback: sync_info.json)
-    # Convert to "seconds from synced start" using t_ref_s.
+    # Calibration anchors from sync_info.json. Convert to "seconds from
+    # synced start" using t_ref_s.
     # ------------------------------------------------------------------
     anchor_times_rel: list[float] = []
     anchor_scores: list[float | None] = []
-    all_methods_path = synced_dir / "all_methods.json"
     sync_info_path = synced_dir / "sync_info.json"
     cal_block: dict | None = None
 
-    if all_methods_path.exists():
-        payload = json.loads(all_methods_path.read_text(encoding="utf-8"))
-        shared = payload.get("shared") if isinstance(payload, dict) else None
-        if isinstance(shared, dict):
-            candidate = shared.get("calibration")
-            if isinstance(candidate, dict):
-                cal_block = candidate
-    if cal_block is None and sync_info_path.exists():
-        payload = flatten_sync_info_dict(json.loads(sync_info_path.read_text(encoding="utf-8"))) or {}
+    if sync_info_path.exists():
+        payload = json.loads(sync_info_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
         candidate = payload.get("calibration")
         if isinstance(candidate, dict):
             cal_block = candidate

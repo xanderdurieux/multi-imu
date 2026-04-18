@@ -61,6 +61,4 @@ def compute_sync_correlations(
     return {
         "offset_only": round(corr_offset, 4) if corr_offset is not None else None,
         "offset_and_drift": round(corr_full, 4) if corr_full is not None else None,
-        "signal": "acc_norm",
-        "sample_rate_hz": sample_rate_hz,
     }

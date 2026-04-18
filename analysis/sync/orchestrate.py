@@ -10,8 +10,6 @@ from typing import Any, Literal, Optional
 
 from common.paths import recording_stage_dir
 
-from .sync_info_format import flatten_sync_info_dict
-
 log = logging.getLogger(__name__)
 
 # Ordered from strongest to weakest tier.
@@ -76,7 +74,6 @@ class SyncMethodQuality:
     calibration_anchors: Optional[list[dict[str, Any]]]
     target_time_origin_seconds: Optional[float]
     drift_seconds_per_second: Optional[float]
-    adaptive_opening_anchor: Optional[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -91,37 +88,45 @@ class SyncSelectionResult:
 
     @property
     def metrics(self) -> dict[str, Any]:
+        selected_info = self._selected_info()
         shared = build_shared_sync_context(self.comparison or {})
-        if shared["calibration"] is None and shared["target_time_origin_seconds"] is None:
+        if shared["target_time_origin_seconds"] is None:
             shared = _shared_fallback_from_qualities(self.qualities)
 
         methods_out: dict[str, Any] = {}
         for m, q in self.qualities.items():
-            block: dict[str, Any] = {
-                "stage": q.stage,
+            methods_out[m] = {
                 "available": q.available,
-                "estimate": {
-                    "offset_seconds": q.offset_seconds,
-                    "drift_seconds_per_second": q.drift_seconds_per_second,
-                    "drift_ppm": q.drift_ppm,
-                    "drift_source": q.drift_source,
-                },
-                "scores": {
-                    "corr_offset_and_drift": q.corr_offset_and_drift,
-                    "calibration_fit_r2": q.calibration_fit_r2,
-                },
+                "offset_seconds": q.offset_seconds,
+                "drift_seconds_per_second": q.drift_seconds_per_second,
+                "drift_ppm": q.drift_ppm,
+                "drift_source": q.drift_source,
+                "corr_offset_and_drift": q.corr_offset_and_drift,
+                "calibration_span_s": q.calibration_span_s,
+                "calibration_n_anchors": q.calibration_n_windows,
+                "calibration_fit_r2": q.calibration_fit_r2,
             }
-            if q.adaptive_opening_anchor is not None:
-                block["adaptive_opening_anchor"] = q.adaptive_opening_anchor
-            methods_out[m] = block
 
-        return {
-            "recording": self.recording_name,
+        payload: dict[str, Any] = {
             "selected_method": self.method,
-            "selected_stage": self.stage,
-            "shared": shared,
+            "target_time_origin_seconds": selected_info.get("target_time_origin_seconds"),
+            "offset_seconds": selected_info.get("offset_seconds"),
+            "drift_seconds_per_second": selected_info.get("drift_seconds_per_second"),
+            "drift_ppm": self.qualities[self.method].drift_ppm,
+            "drift_source": self.qualities[self.method].drift_source,
             "methods": methods_out,
         }
+        correlation = selected_info.get("correlation")
+        if isinstance(correlation, dict):
+            payload["correlation"] = correlation
+        calibration = shared.get("calibration")
+        if isinstance(calibration, dict):
+            payload["calibration"] = calibration
+        return payload
+
+    def _selected_info(self) -> dict[str, Any]:
+        info = (self.comparison or {}).get(self.method)
+        return info if isinstance(info, dict) else {}
 
 
 def _load_sync_info(recording_name: str, stage: str) -> Optional[dict]:
@@ -129,10 +134,10 @@ def _load_sync_info(recording_name: str, stage: str) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        info = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    return flatten_sync_info_dict(raw)
+    return info if isinstance(info, dict) else None
 
 
 def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
@@ -218,15 +223,11 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
             calibration_fit_r2=None, calibration_anchors=None,
             target_time_origin_seconds=None,
             drift_seconds_per_second=None,
-            adaptive_opening_anchor=None,
         )
 
     corr = (info.get("correlation") or {}).get("offset_and_drift")
     drift = info.get("drift_seconds_per_second")
     cal = info.get("calibration") if isinstance(info.get("calibration"), dict) else None
-    adap = info.get("adaptive") if isinstance(info.get("adaptive"), dict) else None
-    oa = adap.get("opening_anchor") if adap else None
-    oa = oa if isinstance(oa, dict) else None
 
     return SyncMethodQuality(
         method=method, stage=stage, available=True,
@@ -240,7 +241,6 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
         calibration_anchors=cal.get("anchors") if cal else None,
         target_time_origin_seconds=info.get("target_time_origin_seconds"),
         drift_seconds_per_second=float(drift) if drift is not None else None,
-        adaptive_opening_anchor=dict(oa) if oa else None,
     )
 
 

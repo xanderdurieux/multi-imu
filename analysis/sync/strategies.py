@@ -59,22 +59,14 @@ def _build_series_pair(
 
 def _build_model(
     *,
-    reference_name: str,
-    target_name: str,
     target_origin_seconds: float,
     offset_seconds: float,
     drift_seconds_per_second: float,
-    sample_rate_hz: float,
-    max_lag_seconds: float,
 ) -> SyncModel:
     return make_sync_model(
-        reference_name=reference_name,
-        target_name=target_name,
         target_origin_seconds=target_origin_seconds,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift_seconds_per_second,
-        sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=max_lag_seconds,
     )
 
 
@@ -182,19 +174,20 @@ def estimate_multi_anchor(
     )
 
     model = _build_model(
-        reference_name=reference_name,
-        target_name=target_name,
         target_origin_seconds=target_origin_s,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift,
-        sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=float(anchor_search_seconds + 1.0),
     )
     return model, {
         "sync_method": "multi_anchor",
         "drift_source": "anchor_fit",
         "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
         "calibration": _build_calibration_meta(anchors, fit_r2=fit_r2),
+        "hyperparameters": {
+            "sample_rate_hz": float(sample_rate_hz),
+            "max_lag_seconds": float(anchor_search_seconds + 1.0),
+            "anchor_search_seconds": float(anchor_search_seconds),
+        },
     }
 
 
@@ -247,13 +240,9 @@ def estimate_one_anchor_adaptive(
     )
 
     model = _build_model(
-        reference_name=reference_name,
-        target_name=target_name,
         target_origin_seconds=target_origin_s,
         offset_seconds=final_offset,
         drift_seconds_per_second=final_drift,
-        sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=float(anchor_search_seconds + 1.0),
     )
     return model, {
         "sync_method": "one_anchor_adaptive",
@@ -263,6 +252,15 @@ def estimate_one_anchor_adaptive(
         "adaptive": {
             "opening_anchor": calibration_anchor_to_dict(opening_anchor, index=0),
             **_window_stats_payload(win_stats, fit_r2=fit_r2, scores=scores),
+        },
+        "hyperparameters": {
+            "sample_rate_hz": float(sample_rate_hz),
+            "max_lag_seconds": float(anchor_search_seconds + 1.0),
+            "anchor_search_seconds": float(anchor_search_seconds),
+            "window_seconds": float(DEFAULT_WINDOW_SECONDS),
+            "window_step_seconds": float(DEFAULT_WINDOW_STEP_SECONDS),
+            "local_search_seconds": float(DEFAULT_LOCAL_SEARCH_SECONDS),
+            "min_window_score": float(DEFAULT_MIN_WINDOW_SCORE),
         },
     }
 
@@ -295,13 +293,9 @@ def estimate_one_anchor_prior(
     )
 
     model = _build_model(
-        reference_name=reference_name,
-        target_name=target_name,
         target_origin_seconds=target_origin_s,
         offset_seconds=offset_at_origin,
         drift_seconds_per_second=drift_s_per_s,
-        sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=5.0,
     )
     return model, {
         "sync_method": "one_anchor_prior",
@@ -309,6 +303,11 @@ def estimate_one_anchor_prior(
         "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
         "drift_ppm_prior": float(drift_ppm),
         "calibration": _build_calibration_meta(anchors),
+        "hyperparameters": {
+            "sample_rate_hz": float(sample_rate_hz),
+            "max_lag_seconds": 5.0,
+            "drift_ppm_prior": float(drift_ppm),
+        },
     }
 
 
@@ -367,13 +366,9 @@ def estimate_signal_only(
     )
 
     model = _build_model(
-        reference_name=reference_name,
-        target_name=target_name,
         target_origin_seconds=target_origin_s,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift,
-        sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=max_lag_seconds,
     )
     return model, {
         "sync_method": "signal_only",
@@ -381,4 +376,12 @@ def estimate_signal_only(
         "signal_mode": _DEFAULT_SIGNAL_MODE,
         "sda_score": round(float(coarse_score), 4),
         "windowed": _window_stats_payload(win_stats, fit_r2=fit_r2, scores=scores),
+        "hyperparameters": {
+            "sample_rate_hz": float(sample_rate_hz),
+            "max_lag_seconds": float(max_lag_seconds),
+            "window_seconds": float(DEFAULT_WINDOW_SECONDS),
+            "window_step_seconds": float(DEFAULT_WINDOW_STEP_SECONDS),
+            "local_search_seconds": float(DEFAULT_LOCAL_SEARCH_SECONDS),
+            "min_window_score": float(DEFAULT_MIN_WINDOW_SCORE),
+        },
     }
