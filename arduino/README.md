@@ -1,81 +1,73 @@
-# master-thesis/arduino
+# `arduino/` — Arduino Nano 33 BLE Sensor Firmware
 
-This folder contains the Arduino sketches that are uploaded to the Arduino board(s) used in this thesis.
+This folder contains the Arduino sketches used to stream IMU data from an Arduino Nano 33 BLE over Bluetooth Low Energy.
 
 ## Hardware
 
-The board used is the **Arduino Nano 33 BLE**, which provides:
+The target board is the `Arduino Nano 33 BLE`, using its onboard BMI270 + BMM150 IMU stack through `Arduino_BMI270_BMM150`.
 
-- **Bluetooth Low Energy (BLE)** connectivity
-- An onboard **9‑axis IMU** (BMI270 + BMM150) for accelerometer, gyroscope and magnetometer data
+## Shared BLE design
+
+All sketches advertise the same BLE service family:
+
+- Service UUID: `0x696d7530`
+- Magnetometer UUID: `0x696d7533`
+
+They differ in how accelerometer and gyroscope samples are packed and transmitted.
 
 ## Sketches
 
 ### `ble_imu_advertising/ble_imu_advertising.ino`
 
-This sketch turns the Nano 33 BLE into a **BLE IMU peripheral**. It:
+Baseline sketch with one BLE characteristic per sensor:
 
-- Initializes the onboard IMU via `Arduino_BMI270_BMM150`
-- Initializes BLE via `ArduinoBLE`
-- Exposes a single IMU service and three characteristics (one per sensor type)
-- Continuously reads:
-  - Accelerometer
-  - Gyroscope
-  - Magnetometer
-- Sends readings as BLE notifications to a connected central device
+- accelerometer characteristic: `0x696d7531`
+- gyroscope characteristic: `0x696d7532`
+- magnetometer characteristic: `0x696d7533`
 
-Each packet is encoded in a `SensorData` struct:
+Each notification sends a `SensorData` struct with:
 
-- `sensorType` (`uint8_t`): identifies whether the packet is accel, gyro or mag
-- `x`, `y`, `z` (`float`): sensor values
-- `timestamp` (`uint32_t`): `millis()` at the time of sampling
+- sensor type flag
+- `x`, `y`, `z` as floats
+- shared `millis()` timestamp
 
-This structure is 17 bytes and is designed to fit in a single BLE notification (20‑byte MTU including ATT header).
+This is the layout expected by `analysis/parser/arduino.py`.
 
-## BLE Service & Characteristics
+### `imu_mag_advertising/imu_mag_advertising.ino`
 
-The sketch uses the following UUIDs:
+Bandwidth-reduced variant:
 
-- **Service UUID**: `0x696d7530`
-- **Accelerometer characteristic UUID**: `0x696d7531`
-- **Gyroscope characteristic UUID**: `0x696d7532`
-- **Magnetometer characteristic UUID**: `0x696d7533`
+- packs accelerometer and gyroscope into one `ImuSamplePacked` notification on UUID `0x696d7534`
+- keeps magnetometer as a separate low-rate float packet on UUID `0x696d7533`
+- targets high-rate accel/gyro streaming with low-rate magnetometer updates
 
-All three characteristics:
+### `imu_mag_batched/imu_mag_batched.ino`
 
-- Support **`BLERead`** and **`BLENotify`**
-- Have a fixed size of `sizeof(SensorData)` (17 bytes)
+Higher-throughput batched variant:
 
-Any BLE central (e.g. a Python script, desktop tool, or mobile app) that knows these UUIDs can subscribe to notifications and reconstruct the IMU data stream.
+- uses the same packed accel/gyro format as `imu_mag_advertising`
+- batches multiple packed IMU samples into one BLE notification
+- keeps the magnetometer on the separate low-rate characteristic
+- requires a larger negotiated MTU for the full batch payload
 
-## Software Requirements
+## Tooling requirements
 
-On the host machine running the Arduino IDE:
-
-- **Arduino IDE** (1.8.x or 2.x)
-- **Boards package**: *Arduino Mbed OS Nano Boards* (for Arduino Nano 33 BLE)
-- **Libraries** (via Library Manager):
+- Arduino IDE 1.8.x or 2.x
+- Board package: `Arduino Mbed OS Nano Boards`
+- Libraries:
   - `ArduinoBLE`
   - `Arduino_BMI270_BMM150`
 
-## Uploading the Sketch
+## Uploading
 
-1. Open `ble_imu_advertising/ble_imu_advertising.ino` in the Arduino IDE.
-2. In **Tools → Board**, select **Arduino Nano 33 BLE**.
-3. In **Tools → Port**, select the serial port corresponding to the Nano 33 BLE.
-4. Ensure the required libraries are installed (see above).
-5. Click **Upload**.
+1. Open the desired `.ino` file in the Arduino IDE.
+2. Select `Arduino Nano 33 BLE` in the board menu.
+3. Select the correct serial port.
+4. Ensure the required libraries are installed.
+5. Upload the sketch.
 
-After a successful upload, the board will:
+## Notes
 
-- Start advertising the IMU service with local name **"Nano 33 BLE"**
-- Accept connections from a BLE central
-- Stream accelerometer, gyroscope and magnetometer data via notifications
-
-## Debugging
-
-Serial output in the sketch is currently commented out. To debug:
-
-1. Uncomment the `Serial.begin` and related `Serial.print` lines in `ble_imu_advertising.ino`.
-2. Open the **Serial Monitor** in the Arduino IDE.
-3. Re‑upload the sketch and observe the initialization messages and optional IMU value prints.
+- All sketches timestamp samples with device `millis()`.
+- The thesis analysis pipeline currently parses the baseline float-per-sensor `SensorData` format directly.
+- The packed and batched variants are experimental throughput-oriented firmware variants and may require matching host-side parsers before they can be used in the main pipeline.

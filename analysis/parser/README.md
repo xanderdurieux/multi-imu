@@ -13,15 +13,15 @@
 - Transfers recording-level interval labels to section-level label files during splitting.
 - Provides GPS parsers for GPX, CSV, and NMEA files.
 
-## Package layout
+## Package layout and file status
 
-- `session.py`: session-level parser/orchestrator and the main `python -m parser` entry point.
-- `arduino.py`: raw Arduino BLE log parser.
-- `sporsa.py`: raw Sporsa log parser.
-- `stats.py`: timing, rate, jitter, and drift summaries for parsed CSVs.
-- `calibration_segments.py`: calibration-sequence detection and JSON export/loading.
-- `split_sections.py`: split recordings into sections and optionally re-sync each section.
-- `gps.py`: GPS parsers for GPX, CSV, and NMEA text sources.
+- `session.py` (FINAL): session-level parser/orchestrator and the main `python -m parser` entry point.
+- `arduino.py` (FINAL): raw Arduino BLE log parser.
+- `sporsa.py` (FINAL): raw Sporsa log parser.
+- `stats.py` (FINAL): timing, rate, jitter, and drift summaries for parsed CSVs.
+- `calibration_segments.py` (FINAL): calibration-sequence detection and JSON export/loading.
+- `split_sections.py` (STALE): split recordings into sections and optionally re-sync each section.
+- `gps.py` (UNUSED): GPS parsers for GPX, CSV, and NMEA text sources.
 
 ## CLI usage
 

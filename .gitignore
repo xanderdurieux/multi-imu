@@ -1,17 +1,20 @@
 data/
 docs/
 
+# IDE
+.vscode/
+.idea/
+.cursor/
+.claude/
+.cursor/
+AGENTS.md
+CLAUDE.md
+CONTEXT.md
+
+
 # Python 
 **/__pycache__/
 **/.venv/
 
 # Arduino
 arduino/libraries/*
-
-
-# Coding assistants
-.claude/
-.cursor/
-AGENTS.md
-CLAUDE.md
-CONTEXT.md

@@ -20,12 +20,12 @@ The fitted model is a linear offset-plus-drift correction applied to the Arduino
 
 All methods write method-specific outputs first, then the selected one is copied into the flat `synced/` directory.
 
-## Main files
+## Main files and status
 
 - `model.py`: `SyncModel` plus timestamp transform helpers
 - `stream_io.py`: stream loading, resampling, dropout handling
 - `signals.py` and `activity.py`: activity-signal construction for alignment
-- `anchors.py`: calibration-anchor extraction
+- `anchors.py` (FINAL): calibration-anchor extraction
 - `xcorr.py`: lag search and drift fitting helpers
 - `strategies.py`: the four sync estimators
 - `quality.py`: correlation scoring for aligned streams
