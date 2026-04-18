@@ -325,7 +325,19 @@ def run_evaluation(
     for fs_name, feat_cols in active_sets.items():
         # NaN handling happens inside the CV pipeline (SimpleImputer) so that
         # imputation statistics are fit on the training fold only.
-        X = df[feat_cols].to_numpy(dtype=float)
+        sub = df[feat_cols].apply(pd.to_numeric, errors="coerce")
+        all_nan = [c for c in feat_cols if sub[c].isna().all()]
+        if all_nan:
+            log.warning(
+                "Feature set '%s': dropping %d all-NaN columns: %s",
+                fs_name, len(all_nan), all_nan,
+            )
+            feat_cols = [c for c in feat_cols if c not in all_nan]
+            if not feat_cols:
+                log.warning("Feature set '%s': no usable columns remain, skipping", fs_name)
+                continue
+            sub = sub[feat_cols]
+        X = sub.to_numpy(dtype=float)
 
         # Use available n_splits (capped at n_groups)
         n_groups = len(np.unique(groups_all)) if groups_all is not None else len(y_all)

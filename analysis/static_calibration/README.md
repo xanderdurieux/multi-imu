@@ -1,68 +1,75 @@
-# Static calibration
+# `static_calibration/` — Arduino Hardware Calibration
 
-Estimate **accelerometer bias and per-axis scale** and **gyroscope bias** from **six short, stationary** Arduino IMU logs—one pose per axis direction so gravity aligns approximately with **+X, −X, +Y, −Y, +Z, −Z** in the sensor frame.
+This package estimates Arduino accelerometer bias/scale and gyroscope bias from stationary calibration logs. It is a hardware-level calibration step for the Arduino sensor only and writes a JSON file that the section-level `calibration/` stage can reuse.
 
-Raw logs are parsed with [`parser.arduino.parse_arduino_log`](../parser/arduino.py) (same BLE hex format as session recordings). Means are taken over the **central** part of each file (default **5%** trimmed from each end by time) to reduce edge transients.
+## Expected input
 
-## Data layout
+Place raw Arduino BLE logs under:
 
-All paths are under **`analysis/data/calibrations/`** (see `calibration_data_dir()` in `imu_static.py`).
+- `analysis/data/_calibrations/raw/*.txt`
 
-| Location | Contents |
-|----------|----------|
-| `raw/*.txt` | Raw Arduino text logs (default input) |
-| `parsed/*.csv` | Parsed IMU CSVs (`calib_<face>.csv` from inferred dominant axis) |
-| `arduino_imu_calibration.json` | Estimated parameters + per-recording summaries |
-| `plots/` | Diagnostic figures (see below) |
+If `raw/` is empty, the code also falls back to `analysis/data/_calibrations/*.txt`.
 
-If `raw/` is empty, the pipeline falls back to `*.txt` directly under the calibrations root.
+Each log should be stationary with the board held in an approximately axis-aligned orientation so gravity mainly points along one of:
 
-## Run the pipeline
+- `x+`, `x-`, `y+`, `y-`, `z+`, `z-`
 
-From the **`analysis`** directory (with the project environment, e.g. `uv run`):
+The code infers the dominant face from the measured mean acceleration; the filenames do not have to encode the face.
+
+## Run it
+
+From `analysis/`:
 
 ```bash
-uv run python -m static_calibration
+uv run -m static_calibration
 ```
 
-This CLI uses the module defaults (inputs/outputs under `analysis/data/calibrations/`).
+The default pipeline:
 
-If you want to override paths or trimming in code, call
-`static_calibration.run.run_calibration_pipeline(raw_log_paths=..., ...)`.
+- parses each raw Arduino BLE log
+- writes parsed CSVs under `data/_calibrations/parsed/`
+- trims a small fraction from each recording edge before summarizing
+- estimates accelerometer bias/scale and gyroscope bias
+- writes `data/_calibrations/arduino_imu_calibration.json`
+- writes overview, detail, and parameter plots under `data/_calibrations/plots/`
 
 ## Outputs
 
-### JSON (`arduino_imu_calibration.json`)
+### JSON
 
-- **`accelerometer`**: `bias` and `scale` per axis (`x`, `y`, `z`)
-- **`gyroscope`**: `bias_deg_s` per axis
-- **`gravity_m_s2`**, **`face_counts`**, **`warnings`**
-- **`source_logs`**, **`per_recording`** (stem, `dominant_face`, window times, means, sample counts)
+`arduino_imu_calibration.json` includes:
 
-### Plots (`plots/`)
+- `gravity_m_s2`
+- `accelerometer.bias`
+- `accelerometer.scale`
+- `gyroscope.bias_deg_s`
+- `face_counts`
+- `warnings`
+- `source_logs`
+- `per_recording`
 
-- **`recordings_overview.png`** — per recording: accelerometer **one subplot per axis** (independent y-scale) plus gyro XYZ
-- **`recordings/<dominant_face>/`** — one detailed figure per recording (same acc layout + gyro)
-- **`calibration_parameters.png`** — fitted parameters, face counts, per-recording means, and boxplots of samples inside each analysis window
+### Parsed CSVs
 
-## Apply calibration elsewhere
+The parsed files are written as `logN(<face>).csv` using the normal parser schema.
 
-```python
-from pathlib import Path
+### Plots
 
-import pandas as pd
-from common import load_dataframe, write_dataframe
-from static_calibration import calibration_data_dir, apply_calibration_to_dataframe, load_calibration
+- `plots/recordings_overview.png`
+- `plots/recordings/<...>.png`
+- `plots/calibration_parameters.png`
 
-cal = load_calibration(calibration_data_dir() / "arduino_imu_calibration.json")
-df = load_dataframe(Path("…/some_parsed.csv"))
-out = apply_calibration_to_dataframe(df, cal)
-write_dataframe(out, Path("…/some_calibrated.csv"))
+## Main modules
+
+- `imu_static.py`: parsing summaries, face inference, parameter estimation, and apply/load helpers
+- `plotting.py`: calibration plots
+- `run.py`: default pipeline and CLI entry point
+
+## Reuse in the main pipeline
+
+The section-level `calibration/` stage automatically looks for:
+
+```text
+data/_calibrations/arduino_imu_calibration.json
 ```
 
-## Package layout
-
-- **`imu_static.py`** — trimming, summarization, estimation, CSV export, load/apply helpers
-- **`run.py`** — `run_calibration_pipeline`, `main`
-- **`plotting.py`** — overview, per-recording, parameter/boxplot figures
-- **`__main__.py`** — entrypoint for `python -m static_calibration`
+When found, it uses those accelerometer and gyroscope calibration values for the Arduino intrinsics. Sporsa does not use this static accelerometer calibration path.

@@ -1,188 +1,87 @@
-# `parser/` — Raw Log Parsing and Section Splitting
+# `parser/` — Raw Log Parsing, Timing Stats, and Section Splitting
 
-This package converts raw device logs from the Sporsa and Arduino IMUs into
-standardized per-recording CSV files, computes timing quality statistics, and
-splits synchronized recordings into calibration-bounded sections.
+`parser/` converts raw session logs into normalized IMU CSVs, computes basic stream-quality statistics, detects the opening/closing calibration routines, and splits recordings into section folders.
 
----
+## What it does
+
+- Parses raw `Sporsa` text logs into standardized IMU CSVs.
+- Parses raw Arduino BLE logs and merges accel/gyro/mag packets by device timestamp.
+- Writes per-recording parsed outputs under `data/recordings/<recording>/parsed/`.
+- Computes timing and gap statistics in `session_stats.json`.
+- Detects calibration sequences and stores them in `parsed/calibration_segments.json`.
+- Splits synchronized or parsed recordings into `data/sections/<recording>s<section>/`.
+- Transfers recording-level interval labels to section-level label files during splitting.
+- Provides GPS parsers for GPX, CSV, and NMEA files.
 
 ## Package layout
 
-```
-parser/
-├── __init__.py          public API
-├── calibration_segments.py shared calibration-sequence detection
-├── arduino.py           Arduino BLE log parser
-├── sporsa.py            Sporsa log parser
-├── stats.py             timing and quality statistics
-├── split_sections.py    section splitting from calibration sequences
-└── session.py           session-level orchestrator + CLI
-```
+- `session.py`: session-level parser/orchestrator and the main `python -m parser` entry point.
+- `arduino.py`: raw Arduino BLE log parser.
+- `sporsa.py`: raw Sporsa log parser.
+- `stats.py`: timing, rate, jitter, and drift summaries for parsed CSVs.
+- `calibration_segments.py`: calibration-sequence detection and JSON export/loading.
+- `split_sections.py`: split recordings into sections and optionally re-sync each section.
+- `gps.py`: GPS parsers for GPX, CSV, and NMEA text sources.
 
----
+## CLI usage
 
-## Modules
-
-### `session.py` — session-level orchestrator
-
-The top-level entry point. Discovers all raw log files for a session,
-matches them into recording pairs (one Sporsa + one Arduino file per
-recording index), parses each pair, writes normalized CSVs, generates
-initial diagnostic plots, and records timing statistics.
+From `analysis/`:
 
 ```bash
-uv run -m parser.session 2026-02-26
+uv run -m parser 2026-02-26
+uv run -m parser 2026-02-26 --no-plot
+uv run -m parser.stats 2026-02-26_r5
+uv run -m parser.split_sections 2026-02-26_r5/synced
 ```
 
-- **Input**: `data/sessions/2026-02-26/{arduino,sporsa}/*.txt`
-- **Output** per recording `2026-02-26_r<k>`:
-  - `session_stats.json` — stream timing stats (recording root)
-  - `parsed/sporsa.csv`
-  - `parsed/arduino.csv`
-  - `parsed/*.png` — diagnostic plots (acc_norm, calibration segments, timing)
-- **Output** for the whole session:
-  - `data/sessions/2026-02-26/session_stats.json` — compact summary across recordings
+## Session parsing outputs
 
-**File matching:** recording numbers are extracted from filenames using patterns
-like `session10`, `log3`, or the last integer found. Sporsa and Arduino files
-with the same number are paired into one recording.
+For a session folder `data/_sessions/<date>/` containing `arduino/*.txt` and `sporsa/*.txt`, `process_session()`:
 
----
+- matches files into recording pairs like `<date>_r1`, `<date>_r2`, ...
+- writes `parsed/sporsa.csv` and `parsed/arduino.csv`
+- writes parsed-stage plots when enabled
+- writes `parsed/session_stats.json`
+- writes `parsed/calibration_segments.json`
 
-### `sporsa.py` — Sporsa log parser
+## Parsed sensor outputs
 
-Parses the Sporsa (bicycle) raw text log into a normalized DataFrame.
+Both parsers emit the shared IMU schema with millisecond timestamps in the `timestamp` column:
 
-**Output columns:**
-
-| Column | Units | Description |
-|---|---|---|
-| `timestamp` | ms | Unix epoch milliseconds |
-| `ax, ay, az` | m/s² | Accelerometer (body frame) |
-| `gx, gy, gz` | deg/s | Gyroscope (body frame) |
-| `mx, my, mz` | µT | Magnetometer (body frame) |
-
----
-
-### `arduino.py` — Arduino log parser
-
-Parses the Arduino (helmet) BLE log (one sensor payload per notification line;
-acc/gyro/mag rows are merged by device timestamp).
-
-**Output columns:**
-
-| Column | Units | Description |
-|---|---|---|
-| `timestamp` | ms | Host-received BLE timestamp (wall clock, epoch ms) |
-| `ax, ay, az` | m/s² | Accelerometer (body frame) |
-| `gx, gy, gz` | deg/s | Gyroscope (body frame) |
-| `mx, my, mz` | µT | Magnetometer (body frame, NaN when BMM150 not ready) |
-
-**Arduino-specific artefacts:**
-- **Dropout packets**: occasional near-zero BLE packets (`‖acc‖ ≈ 0`) caused
-  by failed transmissions. The calibration and sync packages detect and remove
-  these.
-- **Clock drift**: the Arduino uses `millis()` (device uptime), which drifts
-  relative to the host wall clock by 200–500 ppm. Corrected during
-  synchronisation.
-- **BMM150 startup delay**: the magnetometer takes ≈ 1.5 s to stabilize after
-  power-on, so the first few seconds of `mx/my/mz` may be NaN.
-
----
-
-### `stats.py` — timing and quality statistics
-
-```python
-from parser.stats import compute_stream_timing_stats, write_recording_stats
-
-write_recording_stats("2026-02-26_r5")  # reads parsed/*.csv, writes recording/session_stats.json
+```text
+timestamp, ax, ay, az, acc_norm, gx, gy, gz, gyro_norm, mx, my, mz, mag_norm
 ```
 
-Computes per-sensor timing quality metrics and writes them to
-`data/recordings/<recording>/session_stats.json`.
+Arduino parsing also keeps `timestamp_received` when the host-side receive time can be recovered from the BLE log. That extra column is used for drift estimation in `stats.py`.
 
-**Key metrics:**
+## Sensor-specific behavior
 
-| Metric | Description |
-|---|---|
-| `median_interval_ms` | Median inter-sample interval (nominal: 10 ms Sporsa, 17 ms Arduino) |
-| `std_ms` | Interval standard deviation (jitter) |
-| `gap_count` | Number of intervals > 1.5× median (packet loss events) |
-| `missing_samples` | Estimated total missing samples from gap events |
-| `arduino_drift_ppm` | Fitted clock drift from host vs device timestamp comparison |
-| `arduino_drift_r2` | R² of the linear drift fit (quality indicator) |
+- `sporsa.py` parses comma-separated integer samples and rescales them to SI-like units used by the pipeline.
+- `arduino.py` decodes BLE payloads matching the Arduino `SensorData` struct and merges packets with the same device `millis()` timestamp into one row.
+- Magnetometer values may be missing at the start of Arduino recordings and remain `NaN`.
 
-**Interpreting `session_stats.json`:**
-- `gap_count` > 10% of samples → moderate packet loss; inspect `plot_timing` plots.
-- `std_ms` > 5 ms → significant jitter; may affect sync quality.
-- `arduino_drift_r2` < 0.9 → poor drift fit; drift correction may be unreliable.
+## Timing stats
 
----
+`stats.py` summarizes each CSV stream with:
 
-### `split_sections.py` — section splitting
+- sample count
+- start/end timestamps and duration
+- median and standard deviation of inter-sample intervals
+- estimated sampling rate
+- simple gap and missing-sample heuristics
+- Arduino device-to-received drift summary when `timestamp_received` is available
 
-Detects calibration sequences in a synchronized recording and splits all
-sensor CSVs into calibration-bounded **sections**.
+## Section splitting
 
-```bash
-uv run -m parser.split_sections 2026-02-26_r5/synced_cal
-uv run -m parser.split_sections 2026-02-26_r5/synced_cal --no-plot
-```
+`split_sections.py` detects calibration segments in a reference sensor, slices every requested sensor into matching section windows, and writes section folders like:
 
-```python
-from parser.split_sections import split_recording_into_sections
-
-section_dirs = split_recording_into_sections(
-    recording_name="2026-02-26_r5",
-    stage_in="synced_cal",
-    sensors=["sporsa", "arduino"],
-    reference_sensor="sporsa",
-    plot=True,
-)
-```
-
-**How it works:**
-1. Detect calibration segments in the reference sensor (Sporsa) using
-   `parser.calibration_segments.find_calibration_segments`.
-2. For a recording with N calibration segments, produce N−1 sections.
-   Section `k` spans from the end of calibration segment `k` to the start
-   of calibration segment `k+1`, including a small overlap with each flanking
-   calibration for context.
-3. Write `data/sections/<recording_name>s<section_k>/sporsa.csv` and
-   `data/sections/<recording_name>s<section_k>/arduino.csv`
-   for each section.
-4. Optionally generate per-section sensor and comparison plots.
-
-**Output layout:**
-
-```
+```text
 data/sections/<recording_name>s<section_idx>/
     sporsa.csv
     arduino.csv
-    *.png (if plot=True)
+    labels/labels.csv         # when recording-level labels can be transferred
+    sync_info.json            # when per-section sync runs
+    *.png                     # when plots are enabled
 ```
 
-**Section inclusion:** sections where only one calibration sequence is
-detected (e.g. the recording was stopped early) produce a degenerate split.
-The main README describes inclusion criteria for downstream analysis.
-
----
-
-## Normalized CSV schema
-
-All CSVs produced by the parser follow this schema (defined in
-`common.csv_schema`):
-
-```
-timestamp, ax, ay, az, gx, gy, gz, mx, my, mz
-```
-
-| Column | Units | Notes |
-|---|---|---|
-| `timestamp` | ms | Unix epoch ms (both sensors after sync) |
-| `ax, ay, az` | m/s² | Accelerometer — body frame |
-| `gx, gy, gz` | deg/s | Gyroscope — body frame |
-| `mx, my, mz` | µT | Magnetometer — body frame, NaN when unavailable |
-
-Missing columns are filled with `NaN` to maintain a consistent layout across
-all pipeline stages.
+If fewer than two calibration sequences are found, the full recording is written as section `s1`.
