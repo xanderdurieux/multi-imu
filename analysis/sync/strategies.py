@@ -1,4 +1,4 @@
-"""Four synchronization strategies built on calibration-anchor extraction."""
+"""Synchronization strategy implementations."""
 
 from __future__ import annotations
 
@@ -30,8 +30,52 @@ DEFAULT_SAMPLE_RATE_HZ = 100.0
 DEFAULT_MAX_LAG_SECONDS = 60.0
 DEFAULT_DRIFT_PPM = 300.0
 
-_DEFAULT_ADAPTIVE_SIGNAL_MODE = SIGNAL_MODE_ACC_NORM_DIFF
+_DEFAULT_SIGNAL_MODE = SIGNAL_MODE_ACC_NORM_DIFF
 _DEFAULT_MIN_VALID_FRACTION = 0.5
+
+
+def _target_origin_seconds(tgt_df: pd.DataFrame) -> float:
+    return float(tgt_df["timestamp"].iloc[0]) / 1000.0
+
+
+def _build_series_pair(
+    ref_df: pd.DataFrame,
+    tgt_df: pd.DataFrame,
+    *,
+    sample_rate_hz: float,
+):
+    ref_series = build_alignment_series(
+        ref_df,
+        sample_rate_hz=sample_rate_hz,
+        signal_mode=_DEFAULT_SIGNAL_MODE,
+    )
+    tgt_series = build_alignment_series(
+        tgt_df,
+        sample_rate_hz=sample_rate_hz,
+        signal_mode=_DEFAULT_SIGNAL_MODE,
+    )
+    return ref_series, tgt_series
+
+
+def _build_model(
+    *,
+    reference_name: str,
+    target_name: str,
+    target_origin_seconds: float,
+    offset_seconds: float,
+    drift_seconds_per_second: float,
+    sample_rate_hz: float,
+    max_lag_seconds: float,
+) -> SyncModel:
+    return make_sync_model(
+        reference_name=reference_name,
+        target_name=target_name,
+        target_origin_seconds=target_origin_seconds,
+        offset_seconds=offset_seconds,
+        drift_seconds_per_second=drift_seconds_per_second,
+        sample_rate_hz=sample_rate_hz,
+        max_lag_seconds=max_lag_seconds,
+    )
 
 
 def _build_calibration_meta(
@@ -60,6 +104,49 @@ def _build_calibration_meta(
     return calibration
 
 
+def _fit_lida_drift(
+    target_times: np.ndarray,
+    offsets: np.ndarray,
+    scores: np.ndarray,
+    *,
+    target_origin_seconds: float,
+    fallback_offset_seconds: float,
+    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
+) -> tuple[float, float, float, bool]:
+    """Run LIDA drift fit from local-window offsets.
+
+    Returns ``(offset, drift, fit_r2, accepted)``.
+    """
+    if offsets.size == 0:
+        return fallback_offset_seconds, 0.0, 0.0, False
+
+    weights = np.clip(scores, 0.0, None)
+    offset_seconds, drift, fit_r2 = fit_offset_drift(
+        target_times,
+        offsets,
+        target_origin_seconds=target_origin_seconds,
+        weights=weights,
+    )
+    if fit_r2 < min_fit_r2:
+        return fallback_offset_seconds, 0.0, fit_r2, False
+    return offset_seconds, drift, fit_r2, True
+
+
+def _window_stats_payload(
+    win_stats: dict[str, Any],
+    *,
+    fit_r2: float,
+    scores: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "accepted_windows": int(win_stats["accepted_windows"]),
+        "rejected_windows": int(win_stats["rejected_windows"]),
+        "fit_r2": round(float(fit_r2), 4),
+        "local_corr_mean": float(np.mean(scores)) if scores.size else None,
+        "local_corr_median": float(np.median(scores)) if scores.size else None,
+    }
+
+
 def estimate_multi_anchor(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
@@ -72,11 +159,7 @@ def estimate_multi_anchor(
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     anchor_search_seconds: float = 5.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Fit offset and drift from all matched calibration anchors.
-
-    Each anchor is derived from the median peak timestamp of a matched
-    calibration sequence pair (reference vs target).  Requires ≥ 2 anchors.
-    """
+    """Fit offset and drift from all matched calibration anchors."""
     anchors = load_calibration_anchors(
         recording_name,
         ref_sensor=reference_sensor,
@@ -87,34 +170,32 @@ def estimate_multi_anchor(
             f"multi_anchor requires at least 2 anchors, found {len(anchors)}."
         )
 
-    tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
+    target_origin_s = _target_origin_seconds(tgt_df)
     target_times = np.asarray([a.tgt_ms / 1000.0 for a in anchors], dtype=float)
     offsets = np.asarray([a.offset_s for a in anchors], dtype=float)
-    # Equal weights — each anchor is a single tap-cluster median, no quality score
     weights = np.ones(len(anchors), dtype=float)
-    offset_at_origin, drift, fit_r2 = fit_offset_drift(
+    offset_seconds, drift, fit_r2 = fit_offset_drift(
         target_times,
         offsets,
-        target_origin_seconds=tgt_origin_s,
+        target_origin_seconds=target_origin_s,
         weights=weights,
     )
 
-    model = make_sync_model(
+    model = _build_model(
         reference_name=reference_name,
         target_name=target_name,
-        target_origin_seconds=tgt_origin_s,
-        offset_seconds=offset_at_origin,
+        target_origin_seconds=target_origin_s,
+        offset_seconds=offset_seconds,
         drift_seconds_per_second=drift,
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=float(anchor_search_seconds + 1.0),
     )
-    meta: dict[str, Any] = {
+    return model, {
         "sync_method": "multi_anchor",
         "drift_source": "anchor_fit",
         "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
         "calibration": _build_calibration_meta(anchors, fit_r2=fit_r2),
     }
-    return model, meta
 
 
 def estimate_one_anchor_adaptive(
@@ -129,84 +210,61 @@ def estimate_one_anchor_adaptive(
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     anchor_search_seconds: float = 5.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Use the opening anchor for initial offset, then refine causally from signal."""
+    """One-anchor SDA initialization followed by causal LIDA drift fitting."""
     anchors = load_calibration_anchors(
         recording_name,
         ref_sensor=reference_sensor,
         tgt_sensor=target_sensor,
     )
     opening_anchor = anchors[0]
-    start_ref_time_s = opening_anchor.ref_ms / 1000.0
-
-    ref_series = build_alignment_series(
+    ref_series, tgt_series = _build_series_pair(
         ref_df,
-        sample_rate_hz=sample_rate_hz,
-        signal_mode=_DEFAULT_ADAPTIVE_SIGNAL_MODE,
-    )
-    tgt_series = build_alignment_series(
         tgt_df,
         sample_rate_hz=sample_rate_hz,
-        signal_mode=_DEFAULT_ADAPTIVE_SIGNAL_MODE,
     )
-    tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
+    target_origin_s = _target_origin_seconds(tgt_df)
 
     target_times, offsets, scores, win_stats = adaptive_windowed_refinement(
         ref_series,
         tgt_series,
         initial_offset_seconds=opening_anchor.offset_s,
         initial_drift_seconds_per_second=0.0,
-        target_origin_seconds=tgt_origin_s,
+        target_origin_seconds=target_origin_s,
         window_seconds=DEFAULT_WINDOW_SECONDS,
         window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
         local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
         min_window_score=DEFAULT_MIN_WINDOW_SCORE,
         min_valid_fraction=_DEFAULT_MIN_VALID_FRACTION,
-        start_ref_time_seconds=start_ref_time_s,
+        start_ref_time_seconds=(opening_anchor.ref_ms / 1000.0),
     )
 
-    fit_r2 = 0.0
-    final_offset = opening_anchor.offset_s
-    final_drift = 0.0
-    drift_source = "opening_anchor"
-    if offsets.size:
-        weights = np.clip(scores, 0.0, None)
-        final_offset, final_drift, fit_r2 = fit_offset_drift(
-            target_times,
-            offsets,
-            target_origin_seconds=tgt_origin_s,
-            weights=weights,
-        )
-        if fit_r2 >= DEFAULT_MIN_FIT_R2:
-            drift_source = "adaptive_signal_fit"
-        else:
-            final_offset = opening_anchor.offset_s
-            final_drift = 0.0
-            drift_source = "opening_anchor"
+    final_offset, final_drift, fit_r2, accepted = _fit_lida_drift(
+        target_times,
+        offsets,
+        scores,
+        target_origin_seconds=target_origin_s,
+        fallback_offset_seconds=opening_anchor.offset_s,
+    )
 
-    model = make_sync_model(
+    model = _build_model(
         reference_name=reference_name,
         target_name=target_name,
-        target_origin_seconds=tgt_origin_s,
+        target_origin_seconds=target_origin_s,
         offset_seconds=final_offset,
         drift_seconds_per_second=final_drift,
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=float(anchor_search_seconds + 1.0),
     )
-    meta: dict[str, Any] = {
+    return model, {
         "sync_method": "one_anchor_adaptive",
-        "drift_source": drift_source,
-        "signal_mode": _DEFAULT_ADAPTIVE_SIGNAL_MODE,
+        "drift_source": "sda_lida" if accepted else "sda",
+        "signal_mode": _DEFAULT_SIGNAL_MODE,
         "calibration": _build_calibration_meta(anchors),
         "adaptive": {
             "opening_anchor": calibration_anchor_to_dict(opening_anchor, index=0),
-            "accepted_windows": int(win_stats["accepted_windows"]),
-            "rejected_windows": int(win_stats["rejected_windows"]),
-            "fit_r2": round(float(fit_r2), 4),
-            "local_corr_mean": float(np.mean(scores)) if scores.size else None,
-            "local_corr_median": float(np.median(scores)) if scores.size else None,
+            **_window_stats_payload(win_stats, fit_r2=fit_r2, scores=scores),
         },
     }
-    return model, meta
 
 
 def estimate_one_anchor_prior(
@@ -229,30 +287,29 @@ def estimate_one_anchor_prior(
     )
     opening_anchor = anchors[0]
 
-    tgt_origin_s = float(tgt_df["timestamp"].iloc[0]) / 1000.0
+    target_origin_s = _target_origin_seconds(tgt_df)
     drift_s_per_s = float(drift_ppm) * 1e-6
     offset_at_origin = (
         opening_anchor.offset_s
-        - drift_s_per_s * (opening_anchor.tgt_ms / 1000.0 - tgt_origin_s)
+        - drift_s_per_s * (opening_anchor.tgt_ms / 1000.0 - target_origin_s)
     )
 
-    model = make_sync_model(
+    model = _build_model(
         reference_name=reference_name,
         target_name=target_name,
-        target_origin_seconds=tgt_origin_s,
+        target_origin_seconds=target_origin_s,
         offset_seconds=offset_at_origin,
         drift_seconds_per_second=drift_s_per_s,
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=5.0,
     )
-    meta: dict[str, Any] = {
+    return model, {
         "sync_method": "one_anchor_prior",
         "drift_source": "prior_ppm",
         "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
         "drift_ppm_prior": float(drift_ppm),
         "calibration": _build_calibration_meta(anchors),
     }
-    return model, meta
 
 
 def estimate_signal_only(
@@ -267,20 +324,11 @@ def estimate_signal_only(
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     max_lag_seconds: float = DEFAULT_MAX_LAG_SECONDS,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Signal-only synchronization using SDA coarse offset and LIDA drift fitting.
-
-    ``recording_name``, ``reference_sensor``, and ``target_sensor`` are
-    accepted for API parity; no calibration segments are used here.
-    """
-    ref_series = build_alignment_series(
+    """Signal-only synchronization: SDA coarse lag + LIDA drift fitting."""
+    ref_series, tgt_series = _build_series_pair(
         ref_df,
-        sample_rate_hz=sample_rate_hz,
-        signal_mode=_DEFAULT_ADAPTIVE_SIGNAL_MODE,
-    )
-    tgt_series = build_alignment_series(
         tgt_df,
         sample_rate_hz=sample_rate_hz,
-        signal_mode=_DEFAULT_ADAPTIVE_SIGNAL_MODE,
     )
     if ref_series.signal.size == 0 or tgt_series.signal.size == 0:
         raise ValueError("Cannot sync from empty streams.")
@@ -291,12 +339,13 @@ def estimate_signal_only(
         tgt_series.signal,
         max_lag_samples=max_lag_samples,
     )
+
     coarse_offset_s = (
         float(ref_series.timestamps_seconds[0])
         - float(tgt_series.timestamps_seconds[0])
         + float(lag_samples) / sample_rate_hz
     )
-    tgt_origin_s = float(tgt_series.timestamps_seconds[0])
+    target_origin_s = float(tgt_series.timestamps_seconds[0])
 
     target_times, offsets, scores, win_stats = windowed_lag_refinement(
         ref_series,
@@ -309,40 +358,27 @@ def estimate_signal_only(
         min_valid_fraction=_DEFAULT_MIN_VALID_FRACTION,
     )
 
-    fit_r2 = 0.0
-    drift = 0.0
-    offset_seconds = coarse_offset_s
-    if offsets.size:
-        weights = np.clip(scores, 0.0, None)
-        offset_seconds, drift, fit_r2 = fit_offset_drift(
-            target_times,
-            offsets,
-            target_origin_seconds=tgt_origin_s,
-            weights=weights,
-        )
-        if fit_r2 < DEFAULT_MIN_FIT_R2:
-            drift = 0.0
+    offset_seconds, drift, fit_r2, accepted = _fit_lida_drift(
+        target_times,
+        offsets,
+        scores,
+        target_origin_seconds=target_origin_s,
+        fallback_offset_seconds=coarse_offset_s,
+    )
 
-    model = make_sync_model(
+    model = _build_model(
         reference_name=reference_name,
         target_name=target_name,
-        target_origin_seconds=tgt_origin_s,
+        target_origin_seconds=target_origin_s,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift,
         sample_rate_hz=sample_rate_hz,
         max_lag_seconds=max_lag_seconds,
     )
-    meta: dict[str, Any] = {
+    return model, {
         "sync_method": "signal_only",
-        "drift_source": "sda_lida" if drift != 0.0 else "sda",
-        "signal_mode": _DEFAULT_ADAPTIVE_SIGNAL_MODE,
+        "drift_source": "sda_lida" if accepted else "sda",
+        "signal_mode": _DEFAULT_SIGNAL_MODE,
         "sda_score": round(float(coarse_score), 4),
-        "windowed": {
-            "accepted_windows": int(win_stats["accepted_windows"]),
-            "rejected_windows": int(win_stats["rejected_windows"]),
-            "fit_r2": round(float(fit_r2), 4),
-            "local_corr_mean": float(np.mean(scores)) if scores.size else None,
-            "local_corr_median": float(np.median(scores)) if scores.size else None,
-        },
+        "windowed": _window_stats_payload(win_stats, fit_r2=fit_r2, scores=scores),
     }
-    return model, meta

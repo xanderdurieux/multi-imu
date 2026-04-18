@@ -67,6 +67,34 @@ def add_imu_norms(df: pd.DataFrame) -> pd.DataFrame:
     return add_vector_norms(df)
 
 
+
+
+def zscore_finite(signal: np.ndarray) -> np.ndarray:
+    """Z-score finite samples and fill non-finite output with 0.0."""
+    x = np.asarray(signal, dtype=float)
+    finite = np.isfinite(x)
+    if finite.sum() == 0:
+        return np.zeros_like(x, dtype=float)
+
+    mu = float(np.nanmean(x[finite]))
+    sigma = float(np.nanstd(x[finite]))
+    if sigma < 1e-9:
+        out = np.zeros_like(x, dtype=float)
+        out[~finite] = 0.0
+        return out
+
+    out = (x - mu) / sigma
+    out[~finite] = 0.0
+    return out
+
+
+def first_difference(signal: np.ndarray) -> np.ndarray:
+    """One-step discrete difference preserving the input length."""
+    x = np.asarray(signal, dtype=float)
+    if x.size <= 1:
+        return x.copy()
+    return np.diff(x, prepend=x[0])
+
 def smooth_moving_average(signal: np.ndarray, window: int) -> np.ndarray:
     """Centered box-car moving average, same length as input."""
     if window <= 1:
