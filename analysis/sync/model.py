@@ -1,4 +1,9 @@
-"""SyncModel dataclass and linear clock-transform helpers."""
+"""`SyncModel` dataclass and linear clock-transform helpers.
+
+The model is affine on seconds: ``t_ref = t_tgt + offset + drift*(t_tgt - t0)``.
+Timestamps in the pipeline live in milliseconds; the wrappers below convert at
+the boundary so the math stays in seconds.
+"""
 
 from __future__ import annotations
 
@@ -10,24 +15,11 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class SyncModel:
-    """Linear offset + drift clock model: t_ref = t_tgt + b + a*(t_tgt - t0)."""
+    """Linear offset + drift clock model."""
 
     target_time_origin_seconds: float
     offset_seconds: float
     drift_seconds_per_second: float
-
-
-def make_sync_model(
-    *,
-    target_origin_seconds: float,
-    offset_seconds: float,
-    drift_seconds_per_second: float,
-) -> SyncModel:
-    return SyncModel(
-        target_time_origin_seconds=target_origin_seconds,
-        offset_seconds=offset_seconds,
-        drift_seconds_per_second=drift_seconds_per_second,
-    )
 
 
 def target_to_reference_seconds(
@@ -37,7 +29,6 @@ def target_to_reference_seconds(
     drift_seconds_per_second: float,
     target_origin_seconds: float,
 ) -> np.ndarray:
-    """Apply model equation in seconds: ``t_ref = t_tgt + b + a*(t_tgt - t0)``."""
     t_tgt = np.asarray(target_seconds, dtype=float)
     return (
         t_tgt
@@ -53,15 +44,12 @@ def reference_to_target_seconds(
     drift_seconds_per_second: float,
     target_origin_seconds: float,
 ) -> np.ndarray:
-    """Invert the linear model: solve ``t_ref = t_tgt + b + a*(t_tgt - t0)`` for ``t_tgt``."""
     t_ref = np.asarray(reference_seconds, dtype=float)
     a = float(drift_seconds_per_second)
     denom = 1.0 + a
     if abs(denom) < 1e-9:
-        raise ValueError("Invalid drift model: 1 + drift_seconds_per_second is near zero.")
-
-    num = t_ref - float(offset_seconds) + a * float(target_origin_seconds)
-    return num / denom
+        raise ValueError("Invalid drift: 1 + drift_seconds_per_second is near zero.")
+    return (t_ref - float(offset_seconds) + a * float(target_origin_seconds)) / denom
 
 
 def apply_linear_time_transform(
@@ -88,16 +76,15 @@ def apply_sync_model(
     *,
     replace_timestamp: bool = True,
 ) -> pd.DataFrame:
-    """Apply the offset+drift model to a target DataFrame's timestamps."""
+    """Apply ``model`` to a target DataFrame's ``timestamp`` column (ms)."""
     out = target_df.copy()
     out["timestamp_orig"] = pd.to_numeric(out["timestamp"], errors="coerce")
-    aligned = apply_linear_time_transform(
+    out["timestamp_aligned"] = apply_linear_time_transform(
         out["timestamp_orig"],
         offset_seconds=model.offset_seconds,
         drift_seconds_per_second=model.drift_seconds_per_second,
         target_origin_seconds=model.target_time_origin_seconds,
     )
-    out["timestamp_aligned"] = aligned
     if replace_timestamp:
         out["timestamp"] = out["timestamp_aligned"]
     return out

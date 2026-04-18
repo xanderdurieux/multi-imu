@@ -1,77 +1,72 @@
 # `sync/` — Recording-Level Time Alignment
 
-`sync/` aligns the Arduino stream to the Sporsa stream at the recording level. It estimates a linear clock transform, scores multiple synchronization strategies, selects one winner, and flattens the selected result into `data/recordings/<recording>/synced/`.
+`sync/` aligns the Arduino stream (target) to the Sporsa stream (reference) at
+the recording level. Four strategies fit an affine offset-plus-drift clock model
+``t_ref = t_tgt + b + a*(t_tgt - t0)``; each writes its own stage directory and
+the best one is flattened into `data/recordings/<recording>/synced/`.
 
-## Problem setup
+## Module layout
 
-- Reference sensor: `sporsa`
-- Target sensor: `arduino`
-- Parsed inputs live under `data/recordings/<recording>/parsed/`
-- Timestamps are stored in milliseconds in the `timestamp` column
+Each file owns one concern in the strategy pipeline:
 
-The fitted model is a linear offset-plus-drift correction applied to the Arduino time base.
+| File            | Role                                                                |
+| --------------- | ------------------------------------------------------------------- |
+| `model.py`      | `SyncModel` dataclass + ms↔s time-transform helpers                 |
+| `config.py`     | `SyncConfig` loaded from `sync_args.json`; see field scopes below   |
+| `signals.py`    | Stream I/O, resampling, activity-signal build, post-fit correlation |
+| `anchors.py`    | **FINAL.** Calibration-anchor extraction (used by every anchor-based tier) |
+| `xcorr.py`      | FFT xcorr, masked NCC, affine fit, and windowed refinement (non-causal + causal) |
+| `strategies.py` | The four estimators: `estimate_<method>(ref_df, tgt_df, ...) -> (SyncModel, meta)` |
+| `selection.py`  | Loads per-method `sync_info.json`, scores, picks the winning tier   |
+| `pipeline.py`   | Per-recording orchestration, stage-dir I/O, and the `python -m sync` CLI |
 
-## Implemented strategies
+Approach per method:
 
-- `multi_anchor`: uses multiple detected calibration anchors and fits offset plus drift.
-- `one_anchor_adaptive`: starts from one anchor, then refines drift causally over later windows.
-- `one_anchor_prior`: uses one anchor plus a fixed drift prior.
-- `signal_only`: pure signal alignment without calibration anchors.
+- **`multi_anchor`** — all calibration anchors (`anchors.py`) → weighted affine fit (`xcorr.fit_offset_drift`).
+- **`one_anchor_adaptive`** — opening anchor (`anchors.py`) + causal windowed refinement (`xcorr.adaptive_windowed_refinement`).
+- **`one_anchor_prior`** — opening anchor (`anchors.py`) + fixed drift prior (`config.one_anchor_prior_drift_ppm`).
+- **`signal_only`** — coarse lag via `xcorr.estimate_lag` + non-causal windowed refinement (`xcorr.windowed_lag_refinement`).
 
-All methods write method-specific outputs first, then the selected one is copied into the flat `synced/` directory.
+## Configuration
 
-## Main files and status
+Parameters live in `data/_configs/sync_args.json`. Each field maps to a single
+module/function:
 
-- `model.py`: `SyncModel` plus timestamp transform helpers
-- `stream_io.py`: stream loading, resampling, dropout handling
-- `signals.py` and `activity.py`: activity-signal construction for alignment
-- `anchors.py` (FINAL): calibration-anchor extraction
-- `xcorr.py`: lag search and drift fitting helpers
-- `strategies.py`: the four sync estimators
-- `quality.py`: correlation scoring for aligned streams
-- `orchestrate.py`: method comparison and winner selection
-- `pipeline.py`: recording-level I/O, flattening, and CLI
-- `sync_info_format.py`: consistent JSON payload builder
+| Key                                                 | Influences                                   |
+| --------------------------------------------------- | -------------------------------------------- |
+| `signal_mode`, `resample_rate_hz`                   | `signals.build_resampled_activity_signal`    |
+| `min_valid_fraction`                                | `xcorr.masked_ncc` overlap gate              |
+| `anchor_refinement.resample_rate_hz`, `.search_seconds` | `anchors._refine_offset_xcorr`           |
+| `window_refinement.*`                               | `xcorr.windowed_lag_refinement`, `xcorr.adaptive_windowed_refinement`, `xcorr.fit_windowed_offset_drift` |
+| `signal_only.coarse_search_seconds`                 | `strategies.estimate_signal_only` coarse span |
+| `one_anchor_prior.drift_ppm`                        | `strategies.estimate_one_anchor_prior`       |
 
-## CLI usage
+## CLI
 
 From `analysis/`:
 
 ```bash
-uv run -m sync 2026-02-26_r5
-uv run -m sync 2026-02-26 --all
-uv run -m sync 2026-02-26_r5 --method signal_only
+uv run -m sync 2026-02-26_r5                    # single recording, pick best
+uv run -m sync 2026-02-26 --all                 # every recording in a session
+uv run -m sync 2026-02-26_r5 --method signal_only  # force one method
 ```
 
 ## Outputs
 
-Before selection, each successful method writes its own stage directory with:
+Each method first writes `data/recordings/<recording>/synced/<method>/`:
 
-- `sporsa.csv`
-- `arduino.csv`
-- `sync_info.json`
+- `sporsa.csv`, `arduino.csv`
+- `sync_info.json` — selected affine model + correlation + per-method summary
+- `sync_metadata.json` — hyperparameters + debug stats
 
-After selection, `pipeline.py` writes:
-
-```text
-data/recordings/<recording>/synced/
-    sporsa.csv
-    arduino.csv
-    sync_info.json
-    all_methods.json
-```
-
-- `sync_info.json` contains the selected model, method metadata, and correlation scores.
-- `all_methods.json` stores the comparison summary across methods for that recording.
-
-Per-method temporary directories are pruned after flattening.
+After selection, those files are copied into flat
+`data/recordings/<recording>/synced/` and the per-method directories are pruned.
 
 ## Public API
 
-The main orchestration helpers are:
+From `sync` (re-exported in `__init__.py`):
 
-- `synchronize_recording_all_methods(recording_name)`
-- `synchronize_recording_chosen_method(recording_name, method)`
-- `synchronize_from_calibration(reference_csv=..., target_csv=..., output_dir=...)`
-
-`parser.split_sections` uses `synchronize_from_calibration()` for section-level re-alignment after splitting.
+- `synchronize_recording_all_methods(recording_name)` — run all four, pick best
+- `synchronize_recording_chosen_method(recording_name, method)` — run one
+- `SyncModel`, `apply_sync_model`, `apply_linear_time_transform`
+- `SYNC_METHODS`, `SyncMethodQuality`, `SyncSelectionResult`

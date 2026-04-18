@@ -1,46 +1,47 @@
-"""Detect calibration sequences and split IMU recordings into sections.
+"""Split synced IMU recordings into per-section directories.
 
-A calibration sequence has the pattern:
-  ~5 s static  →  ~5 acceleration peaks  →  ~5 s static
+Sections are defined by pre-detected calibration sequences on the reference
+sensor.  This stage only reads saved outputs from the upstream pipeline:
 
-This module finds those sequences in the reference sensor, then splits all
-configured sensors into matching time windows saved under::
+- Sensor streams from ``<recording>/<stage>/`` (default: ``synced``, where
+  both sensors already share the reference timeline).
+- Calibration segments from ``<recording>/parsed/calibration_segments.json``.
 
-    data/sections/
-        <recording_name>s<section_idx>/
-            sporsa.csv
-            arduino.csv
-            …
+No signals are re-processed and no sync is re-run here.  Each section spans
+from the start of one calibration to the end of the next, so both the
+opening and closing calibrations are included.
+
+Outputs land under::
+
+    data/sections/<recording_name>s<section_idx>/
+        sporsa.csv
+        arduino.csv
 
 CLI usage::
 
-    python -m parser.split_sections 2026-02-26_r5/synced
+    python -m parser.split_sections 2026-02-26_r5
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import shutil
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from common.paths import read_csv, section_dir, sensor_csv, write_csv
-from parser.calibration_segments import CalibrationSegment, find_calibration_segments
 from labels.section_transfer import (
     load_recording_interval_rows_for_transfer,
     write_section_labels_from_recording_intervals,
 )
+from parser.calibration_segments import load_calibration_segments_from_json
 
 log = logging.getLogger(__name__)
 
-_GRAVITY_MS2 = 9.81
-
 
 # ---------------------------------------------------------------------------
-# Section plotting and splitting
+# Section plotting
 # ---------------------------------------------------------------------------
 
 
@@ -69,62 +70,22 @@ def _plot_section(section_path: Path, sensors: list[str]) -> None:
         log.warning("Comparison plotting failed for %s: %s", section_path.name, exc)
 
 
-def split_recording(
+# ---------------------------------------------------------------------------
+# Splitting
+# ---------------------------------------------------------------------------
+
+
+def _load_sensor_streams(
     recording_name: str,
-    stage: str = "synced",
-    sensors: list[str] | None = None,
-    *,
-    reference_sensor: str = "sporsa",
-    sample_rate_hz: float = 100.0,
-    plot: bool = True,
-    sync: bool = True,
-) -> list[Path]:
-    """Split a recording into sections for all sensors, grouped per section.
+    stage: str,
+    sensors: list[str],
+) -> dict[str, pd.DataFrame]:
+    """Read each sensor's CSV from ``<recording>/<stage>/``.
 
-    Calibration sequences are detected in ``reference_sensor``.  Each section
-    spans from the start of one calibration to the end of the next, so both
-    the opening and closing calibrations are included.
-
-    Outputs are saved to::
-
-        data/sections/<recording_name>s<section_idx>/
-            sporsa.csv
-            arduino.csv
-            *.png  (if plot=True)
-
-    If fewer than two calibration sequences are found a warning is logged and
-    the full streams are saved as the first section.
-
-    Parameters
-    ----------
-    sensors:
-        Sensor names to split.  Defaults to ``["sporsa", "arduino"]``.
-    reference_sensor:
-        The sensor used to detect calibration segments.  If not already in
-        ``sensors``, it is prepended automatically.
-    plot:
-        If ``True``, generate sensor and comparison plots for every section.
-    sync:
-        If ``True`` (default), run calibration-based sync on each section
-        after splitting so that the per-section timestamps are precisely
-        aligned.
-
-    Returns a list of written CSV paths in chronological order.
+    Missing sensors are logged and skipped.  Rows with NaN timestamps are
+    dropped and the result is sorted chronologically.
     """
-    if sensors is None:
-        sensors = ["sporsa", "arduino"]
-    if reference_sensor not in sensors:
-        sensors = [reference_sensor] + sensors
-
-    # Load reference sensor and detect calibration segments.
-    ref_csv = sensor_csv(f"{recording_name}/{stage}", reference_sensor)
-    ref_df = read_csv(ref_csv)
-    ref_df = ref_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-
-    calibrations = find_calibration_segments(ref_df, sensor=reference_sensor)
-
-    # Load all sensor DataFrames up-front (skip missing ones with a warning).
-    sensor_dfs: dict[str, pd.DataFrame] = {}
+    streams: dict[str, pd.DataFrame] = {}
     for sensor in sensors:
         try:
             csv_path = sensor_csv(f"{recording_name}/{stage}", sensor)
@@ -133,9 +94,52 @@ def split_recording(
             continue
         df = read_csv(csv_path)
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-        sensor_dfs[sensor] = df
+        streams[sensor] = df
+    return streams
+
+
+def split_recording(
+    recording_name: str,
+    stage: str = "synced",
+    sensors: list[str] | None = None,
+    *,
+    reference_sensor: str = "sporsa",
+    plot: bool = True,
+) -> list[Path]:
+    """Split a recording into sections using saved sync and parse outputs.
+
+    Parameters
+    ----------
+    recording_name:
+        Recording folder name (e.g. ``"2026-02-26_r5"``).
+    stage:
+        Input stage to read sensor CSVs from.  Default ``"synced"``; both
+        sensors there share the reference timeline.
+    sensors:
+        Sensors to split.  Defaults to ``["sporsa", "arduino"]``.  The
+        reference sensor is prepended automatically if missing.
+    reference_sensor:
+        Sensor whose saved calibration segments define section boundaries.
+    plot:
+        If ``True``, generate sensor and comparison plots for every section.
+
+    Returns the list of written CSV paths in chronological order.
+    """
+    if sensors is None:
+        sensors = ["sporsa", "arduino"]
+    if reference_sensor not in sensors:
+        sensors = [reference_sensor] + sensors
+
+    sensor_dfs = _load_sensor_streams(recording_name, stage, sensors)
+    if reference_sensor not in sensor_dfs:
+        raise FileNotFoundError(
+            f"Reference sensor '{reference_sensor}' missing in {recording_name}/{stage}"
+        )
 
     available_sensors = list(sensor_dfs)
+    ref_df = sensor_dfs[reference_sensor]
+
+    calibrations = load_calibration_segments_from_json(recording_name, reference_sensor)
 
     recording_origin_ms = float(ref_df["timestamp"].iloc[0])
     source_interval_rows = load_recording_interval_rows_for_transfer(
@@ -180,9 +184,9 @@ def split_recording(
 
     if len(calibrations) < 2:
         log.warning(
-            "Fewer than 2 calibration sequences found in %s/%s/%s "
+            "Fewer than 2 calibration sequences found for %s/%s "
             "(%d found) — saving full streams as first section",
-            recording_name, stage, reference_sensor, len(calibrations),
+            recording_name, reference_sensor, len(calibrations),
         )
         ts_full_0 = float(ref_df["timestamp"].iloc[0])
         ts_full_1 = float(ref_df["timestamp"].iloc[-1])
@@ -200,121 +204,32 @@ def split_recording(
 
         written.extend(_write_section(i, slices, ts_start, ts_end))
 
-    if sync and reference_sensor in sensor_dfs:
-        target_sensors = [s for s in available_sensors if s != reference_sensor]
-        for tgt in target_sensors:
-            sync_sections(
-                recording_name,
-                reference_sensor=reference_sensor,
-                target_sensor=tgt,
-                sample_rate_hz=sample_rate_hz,
-                plot=plot,
-            )
-
     return written
-
-
-def sync_sections(
-    recording_name: str,
-    *,
-    reference_sensor: str = "sporsa",
-    target_sensor: str = "arduino",
-    sample_rate_hz: float = 100.0,
-    cal_search_s: float = 3.0,
-    plot: bool = True,
-) -> None:
-    """Run calibration-based sync on each section of a recording, in-place.
-
-    Each section must contain ≥ 2 calibration sequences (opening + closing).
-    The target sensor's timestamps are corrected and its CSV is replaced
-    in-place.  A ``sync_info.json`` is also written to each section directory.
-
-    Parameters
-    ----------
-    recording_name:
-        Name of the recording (e.g. ``"2026-02-26_r5"``).
-    reference_sensor:
-        Sensor used as the time reference.
-    target_sensor:
-        Sensor whose timestamps are corrected.
-    sample_rate_hz:
-        Sampling rate for peak detection and cross-correlation.
-    cal_search_s:
-        Search window (±s) for each calibration window alignment.
-    plot:
-        If ``True``, regenerate sensor and comparison plots after syncing.
-    """
-    from sync.pipeline import synchronize_from_calibration
-
-    from common.paths import iter_sections_for_recording
-
-    section_dirs = iter_sections_for_recording(recording_name)
-    if not section_dirs:
-        log.warning("No section directories found for %s", recording_name)
-        return
-
-    for section_dir in section_dirs:
-        ref_csv = section_dir / f"{reference_sensor}.csv"
-        tgt_csv = section_dir / f"{target_sensor}.csv"
-
-        if not ref_csv.exists() or not tgt_csv.exists():
-            log.warning(
-                "Skipping %s/%s: missing %s or %s",
-                recording_name, section_dir.name, ref_csv.name, tgt_csv.name,
-            )
-            continue
-
-        log.info("Syncing %s/%s ...", recording_name, section_dir.name)
-        tmp_dir = section_dir / "_tmp_sync"
-        try:
-            sync_json_raw, synced_csv_raw, _ = synchronize_from_calibration(
-                reference_csv=ref_csv,
-                target_csv=tgt_csv,
-                recording_name=recording_name,
-                output_dir=tmp_dir,
-                reference_sensor=reference_sensor,
-                target_sensor=target_sensor,
-                sample_rate_hz=sample_rate_hz,
-                cal_search_s=cal_search_s,
-            )
-
-            shutil.move(str(synced_csv_raw), tgt_csv)
-            shutil.move(str(sync_json_raw), section_dir / "sync_info.json")
-            log.info("  → wrote %s/sync_info.json", section_dir.name)
-
-        except Exception as exc:
-            log.error(
-                "Failed to sync %s/%s: %s",
-                recording_name, section_dir.name, exc,
-            )
-        finally:
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir)
-
-        if plot:
-            _plot_section(section_dir, [reference_sensor, target_sensor])
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m parser.split_sections",
         description=(
-            "Detect calibration sequences in a recording and split it into "
-            "sections.  Each section spans from the start of one calibration "
-            "to the end of the next and is saved under "
-            "data/sections/<recording_name>s<section_idx>/."
+            "Split a synced recording into per-section directories using the "
+            "calibration segments saved under parsed/.  Each section spans "
+            "from the start of one calibration to the end of the next and is "
+            "saved under data/sections/<recording_name>s<section_idx>/."
         ),
     )
     parser.add_argument(
-        "recording_name_stage",
-        help=(
-            "Recording name and input stage as '<recording_name>/<stage>' "
-            "(e.g. '2026-02-26_r5/synced_cal')."
-        ),
+        "recording_name",
+        help="Recording name (e.g. '2026-02-26_r5').",
+    )
+    parser.add_argument(
+        "--stage",
+        default="synced",
+        help="Input stage to read sensor CSVs from (default: synced).",
     )
     parser.add_argument(
         "--sensors",
@@ -326,23 +241,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reference-sensor",
         default="sporsa",
-        help="Sensor used to detect calibration sequences (default: sporsa).",
-    )
-    parser.add_argument(
-        "--sample-rate-hz",
-        type=float,
-        default=100.0,
-        help="Nominal sampling rate (Hz) for per-section sync (default: 100).",
+        help="Sensor whose saved calibration segments define sections (default: sporsa).",
     )
     parser.add_argument(
         "--no-plot",
         action="store_true",
         help="Skip generating plots for each section.",
-    )
-    parser.add_argument(
-        "--no-sync",
-        action="store_true",
-        help="Skip running the calibration sync on each section after splitting.",
     )
     return parser
 
@@ -351,19 +255,12 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _build_arg_parser().parse_args(argv)
 
-    parts = args.recording_name_stage.split("/", 1)
-    if len(parts) != 2:
-        raise SystemExit("recording_name_stage must be '<recording_name>/<stage>'")
-    recording_name, stage = parts
-
     written = split_recording(
-        recording_name=recording_name,
-        stage=stage,
+        recording_name=args.recording_name,
+        stage=args.stage,
         sensors=args.sensors,
         reference_sensor=args.reference_sensor,
-        sample_rate_hz=args.sample_rate_hz,
         plot=not args.no_plot,
-        sync=not args.no_sync,
     )
 
     print(f"\n{len(written)} file(s) written:")

@@ -866,7 +866,7 @@ def plot_sync_method_metrics(
 
     selection_suffix = f"selected: {_METHOD_LABELS.get(selected_method, selected_method)}" if selected_method else "no selected method"
     fig.suptitle(f"{recording_name} — sync method summary ({selection_suffix})", fontsize=12, y=0.985)
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    fig.tight_layout()
     return save_figure(fig, output_path, dpi=150)
 
 
@@ -892,7 +892,7 @@ def plot_anchor_fits(
     Output: ``synced/anchor_fits.png``.
     """
     from parser.calibration_segments import load_calibration_segments_from_json
-    from sync.stream_io import load_stream, resample_stream
+    from sync.signals import load_stream, resample_stream
 
     _RATE = 100.0
     _REF_SENSOR = "sporsa"

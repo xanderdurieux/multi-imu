@@ -335,7 +335,6 @@ def calibrate_recording_sections(
     force: bool = False,
     output_subdir: str = "calibrated",
     static_calibration_path: Path | None = None,
-    sample_rate_hz: float | None = None,  # kept for CLI compat, no longer used
 ) -> list[SectionCalibration]:
     """Calibrate all sections for a recording."""
     section_dirs = iter_sections_for_recording(recording_name)

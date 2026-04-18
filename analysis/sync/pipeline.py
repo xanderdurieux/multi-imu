@@ -1,4 +1,14 @@
-"""Recording-level sync I/O, selection, and CLI entrypoint."""
+"""Recording-level sync I/O, method orchestration, and CLI entrypoint.
+
+Workflow per recording:
+
+1. Run each strategy in ``SYNC_METHODS`` order; write its outputs to
+   ``synced/<method>/`` (``sporsa.csv``, ``arduino.csv``, ``sync_info.json``,
+   ``sync_metadata.json``).
+2. Load all per-method ``sync_info.json`` files and pick the winner via
+   ``selection.select_best_sync_method``.
+3. Copy the winner into flat ``synced/`` and prune the per-method dirs.
+"""
 
 from __future__ import annotations
 
@@ -22,21 +32,34 @@ from common.paths import (
 )
 
 from .model import apply_sync_model
-from .orchestrate import (
+from .selection import (
     METHOD_STAGES,
     SYNC_METHODS,
     SyncSelectionResult,
     compare_sync_models,
+    extract_quality,
     method_label,
     method_stage,
     select_best_sync_method,
 )
-from .quality import compute_sync_correlations
-from .stream_io import load_stream
+from .signals import compute_sync_correlations, load_stream
+from .strategies import (
+    estimate_multi_anchor,
+    estimate_one_anchor_adaptive,
+    estimate_one_anchor_prior,
+    estimate_signal_only,
+)
 
 log = logging.getLogger(__name__)
 
 _STAGE_IN = "parsed"
+
+_STRATEGIES = {
+    "multi_anchor": estimate_multi_anchor,
+    "one_anchor_adaptive": estimate_one_anchor_adaptive,
+    "one_anchor_prior": estimate_one_anchor_prior,
+    "signal_only": estimate_signal_only,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +91,7 @@ class RecordingResult:
 
 
 # ---------------------------------------------------------------------------
-# Single-method execution helpers
+# Per-method execution
 # ---------------------------------------------------------------------------
 
 
@@ -79,10 +102,9 @@ def _drop_alignment_columns(df):
 
 
 def _method_summary_block(
-    model,
-    meta: dict[str, Any],
-    correlation: dict[str, Any],
+    model, meta: dict[str, Any], correlation: dict[str, Any]
 ) -> dict[str, Any]:
+    calibration = meta.get("calibration") or {}
     return {
         "available": True,
         "offset_seconds": model.offset_seconds,
@@ -90,18 +112,14 @@ def _method_summary_block(
         "drift_ppm": model.drift_seconds_per_second * 1e6,
         "drift_source": meta.get("drift_source"),
         "corr_offset_and_drift": (correlation or {}).get("offset_and_drift"),
-        "calibration_span_s": ((meta.get("calibration") or {}).get("anchor_span_s")),
-        "calibration_n_anchors": ((meta.get("calibration") or {}).get("n_anchors")),
-        "calibration_fit_r2": ((meta.get("calibration") or {}).get("fit_r2")),
+        "calibration_span_s": calibration.get("anchor_span_s"),
+        "calibration_n_anchors": calibration.get("n_anchors"),
+        "calibration_fit_r2": calibration.get("fit_r2"),
     }
 
 
-def _build_method_sync_info(
-    *,
-    method: str,
-    model,
-    meta: dict[str, Any],
-    correlation: dict[str, Any],
+def _build_sync_info(
+    *, method: str, model, meta: dict[str, Any], correlation: dict[str, Any]
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "selected_method": method,
@@ -111,9 +129,7 @@ def _build_method_sync_info(
         "drift_ppm": model.drift_seconds_per_second * 1e6,
         "drift_source": meta.get("drift_source"),
         "correlation": dict(correlation),
-        "methods": {
-            method: _method_summary_block(model, meta, correlation),
-        },
+        "methods": {method: _method_summary_block(model, meta, correlation)},
     }
     calibration = meta.get("calibration")
     if isinstance(calibration, dict):
@@ -122,10 +138,7 @@ def _build_method_sync_info(
 
 
 def _build_sync_metadata(
-    *,
-    reference_csv: Path | str,
-    target_csv: Path | str,
-    meta: dict[str, Any],
+    *, reference_csv: Path, target_csv: Path, meta: dict[str, Any]
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "created_at_utc": datetime.now(UTC).isoformat(),
@@ -136,12 +149,10 @@ def _build_sync_metadata(
     hyperparameters = meta.get("hyperparameters")
     if isinstance(hyperparameters, dict):
         payload["hyperparameters"] = hyperparameters
-
-    for key in ("signal_mode", "drift_ppm_prior", "sda_score", "windowed", "adaptive"):
+    for key in ("coarse_alignment_score", "window_refinement"):
         value = meta.get(key)
         if value is not None:
             payload[key] = value
-
     return payload
 
 
@@ -152,15 +163,8 @@ def _run_method(
     *,
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-) -> tuple[Path, Path, Path]:
-    """Run a single sync strategy and write outputs to its stage directory."""
-    from .strategies import (
-        estimate_multi_anchor,
-        estimate_one_anchor_adaptive,
-        estimate_one_anchor_prior,
-        estimate_signal_only,
-    )
-
+) -> None:
+    """Run a single strategy and write outputs under ``synced/<method>/``."""
     ref_csv = sensor_csv(f"{recording_name}/{stage_in}", reference_sensor)
     tgt_csv = sensor_csv(f"{recording_name}/{stage_in}", target_sensor)
     out_dir = recording_stage_dir(recording_name, method_stage(method))
@@ -176,65 +180,44 @@ def _run_method(
     if ref_df.empty or tgt_df.empty:
         raise ValueError("Reference and target streams must both be non-empty.")
 
-    strategy = {
-        "multi_anchor": estimate_multi_anchor,
-        "one_anchor_adaptive": estimate_one_anchor_adaptive,
-        "one_anchor_prior": estimate_one_anchor_prior,
-        "signal_only": estimate_signal_only,
-    }[method]
-
-    model, meta = strategy(
+    model, meta = _STRATEGIES[method](
         ref_df, tgt_df,
         recording_name=recording_name,
-        reference_name=str(ref_csv),
-        target_name=str(tgt_csv),
         reference_sensor=reference_sensor,
         target_sensor=target_sensor,
     )
 
     aligned_df = apply_sync_model(tgt_df, model, replace_timestamp=True)
-    hyperparameters = meta.get("hyperparameters") if isinstance(meta.get("hyperparameters"), dict) else {}
-    sample_rate_hz = float(hyperparameters.get("sample_rate_hz", 100.0))
-
+    sample_rate_hz = float(
+        (meta.get("hyperparameters") or {}).get("resample_rate_hz", 100.0)
+    )
     correlation = compute_sync_correlations(
         ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz,
     )
-    payload = _build_method_sync_info(
-        method=method,
-        model=model,
-        meta=meta,
-        correlation=correlation,
+
+    info_payload = _build_sync_info(
+        method=method, model=model, meta=meta, correlation=correlation,
     )
     metadata_payload = _build_sync_metadata(
-        reference_csv=ref_csv,
-        target_csv=tgt_csv,
-        meta=meta,
+        reference_csv=ref_csv, target_csv=tgt_csv, meta=meta,
     )
 
-    # Write outputs.
-    ref_out = out_dir / f"{reference_sensor}.csv"
-    tgt_out = out_dir / f"{target_sensor}.csv"
-    sync_json = out_dir / "sync_info.json"
-    sync_metadata_json = out_dir / "sync_metadata.json"
-
-    shutil.copy2(ref_csv, ref_out)
-    write_csv(_drop_alignment_columns(aligned_df), tgt_out)
-    sync_json.write_text(
-        json.dumps(payload, indent=2), encoding="utf-8"
+    shutil.copy2(ref_csv, out_dir / f"{reference_sensor}.csv")
+    write_csv(_drop_alignment_columns(aligned_df), out_dir / f"{target_sensor}.csv")
+    (out_dir / "sync_info.json").write_text(
+        json.dumps(info_payload, indent=2), encoding="utf-8"
     )
-    sync_metadata_json.write_text(
+    (out_dir / "sync_metadata.json").write_text(
         json.dumps(metadata_payload, indent=2), encoding="utf-8"
     )
-    return ref_out, tgt_out, sync_json
 
 
 # ---------------------------------------------------------------------------
-# Selection and flattening
+# Selection flattening
 # ---------------------------------------------------------------------------
 
 
 def _prune_method_stage_directories(recording_name: str) -> None:
-    """Remove all method-specific output directories after flattening."""
     for method in SYNC_METHODS:
         path = recording_stage_dir(recording_name, method_stage(method))
         if path.is_dir():
@@ -263,8 +246,7 @@ def _apply_selection(
         if src.exists():
             shutil.copy2(src, out_dir / filename)
 
-    sync_info_path = out_dir / "sync_info.json"
-    sync_info_path.write_text(
+    (out_dir / "sync_info.json").write_text(
         json.dumps(result.metrics, indent=2), encoding="utf-8"
     )
 
@@ -282,7 +264,7 @@ def _apply_selection(
 
 
 def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
-    """Run all sync methods, select the best, and flatten into synced/."""
+    """Run all sync methods, select the best, and flatten into ``synced/``."""
     result = RecordingResult(recording_name=recording_name)
     log.info("sync start: %s", recording_name)
 
@@ -306,7 +288,6 @@ def synchronize_recording_all_methods(recording_name: str) -> RecordingResult:
         return result
 
     try:
-        comparison = compare_sync_models(recording_name)
         selection = select_best_sync_method(recording_name)
         result.selection = selection
         log.info(
@@ -328,7 +309,7 @@ def synchronize_recording_chosen_method(
     stage_in: str = _STAGE_IN,
     quiet: bool = False,
 ) -> SyncSelectionResult:
-    """Run a single sync method, then flatten its output into synced/."""
+    """Run a single sync method and flatten its output into ``synced/``."""
     if method not in METHOD_STAGES:
         raise ValueError(
             f"Unknown sync method {method!r}; expected one of {SYNC_METHODS}"
@@ -341,8 +322,6 @@ def synchronize_recording_chosen_method(
 
     _run_method(recording_name, stage_in, method)
     comparison = compare_sync_models(recording_name)
-
-    from .orchestrate import extract_quality
     qualities = {m: extract_quality(m, comparison[m]) for m in SYNC_METHODS}
     result = SyncSelectionResult(
         recording_name=recording_name,
@@ -356,7 +335,7 @@ def synchronize_recording_chosen_method(
 
 
 def _synchronize_session(session_name: str) -> list[RecordingResult]:
-    """Run synchronization for every recording in a session (CLI helper)."""
+    """Run sync for every recording in a session (CLI helper)."""
     root = recordings_root()
     recordings = sorted(
         d.name
@@ -368,9 +347,7 @@ def _synchronize_session(session_name: str) -> list[RecordingResult]:
         return []
 
     log.info("sync session %s: %d recording(s)", session_name, len(recordings))
-    results: list[RecordingResult] = []
-    for rec in recordings:
-        results.append(synchronize_recording_all_methods(rec))
+    results = [synchronize_recording_all_methods(rec) for rec in recordings]
 
     log.info("sync session summary: %s", session_name)
     for r in results:
@@ -378,80 +355,6 @@ def _synchronize_session(session_name: str) -> list[RecordingResult]:
         sel = f"-> {r.selection.method}" if r.selection else "no selection"
         log.info("  %-22s  ok=[%s]  %s", r.recording_name, ok, sel)
     return results
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible callable for split_sections.py
-# ---------------------------------------------------------------------------
-
-
-def synchronize_from_calibration(
-    reference_csv: Path | str,
-    target_csv: Path | str,
-    *,
-    recording_name: str,
-    output_dir: Path | str,
-    reference_sensor: str = "sporsa",
-    target_sensor: str = "arduino",
-    sample_rate_hz: float = 100.0,
-    cal_search_s: float = 5.0,
-) -> tuple[Path, Path, Path | None]:
-    """Calibration-based sync writing outputs to output_dir.
-
-    Used by ``parser.split_sections`` for per-section synchronization.
-    """
-    from .strategies import estimate_multi_anchor
-
-    ref_path = Path(reference_csv)
-    tgt_path = Path(target_csv)
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    ref_df = load_stream(ref_path)
-    tgt_df = load_stream(tgt_path)
-    if ref_df.empty or tgt_df.empty:
-        raise ValueError("Reference and target must be non-empty.")
-
-    model, meta = estimate_multi_anchor(
-        ref_df, tgt_df,
-        recording_name=recording_name,
-        reference_name=str(ref_path),
-        target_name=str(tgt_path),
-        reference_sensor=reference_sensor,
-        target_sensor=target_sensor,
-        sample_rate_hz=sample_rate_hz,
-        anchor_search_seconds=cal_search_s,
-    )
-
-    correlation = compute_sync_correlations(ref_df, tgt_df, model, sample_rate_hz=sample_rate_hz)
-    payload = _build_method_sync_info(
-        method="multi_anchor",
-        model=model,
-        meta=meta,
-        correlation=correlation,
-    )
-    metadata_payload = _build_sync_metadata(
-        reference_csv=ref_path,
-        target_csv=tgt_path,
-        meta=meta,
-    )
-
-    sync_json_path = out_dir / "sync_info.json"
-    sync_json_path.write_text(
-        json.dumps(payload, indent=2), encoding="utf-8"
-    )
-    sync_metadata_path = out_dir / "sync_metadata.json"
-    sync_metadata_path.write_text(
-        json.dumps(metadata_payload, indent=2), encoding="utf-8"
-    )
-
-    aligned_df = _drop_alignment_columns(
-        apply_sync_model(tgt_df, model, replace_timestamp=True)
-    )
-    synced_csv_path = out_dir / f"{tgt_path.stem}_synced.csv"
-    write_csv(aligned_df, synced_csv_path)
-
-    return sync_json_path, synced_csv_path, None
 
 
 # ---------------------------------------------------------------------------

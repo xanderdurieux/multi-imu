@@ -131,7 +131,6 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             try:
                 cals = calibrate_recording_sections(
                     rec,
-                    sample_rate_hz=cfg.sample_rate_hz,
                     force=cfg.force,
                 )
                 result["ok"] += len(cals)

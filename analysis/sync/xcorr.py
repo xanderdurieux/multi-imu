@@ -1,25 +1,26 @@
-"""Cross-correlation primitives, windowed lag refinement, and drift fitting."""
+"""Cross-correlation primitives plus offset/drift refinement.
+
+Public API categories:
+- correlation primitives: `estimate_lag`, `masked_ncc`
+- offset refinement: `refine_offsets_from_coarse_offset`
+- drift refinement observations: `collect_drift_observations_from_anchor`
+- drift refinement: `refine_drift_unconstrained`, `refine_drift_through_anchor`
+"""
 
 from __future__ import annotations
 
 import numpy as np
 
-from .activity import AlignmentSeries
 from .model import reference_to_target_seconds
 
+
 # ---------------------------------------------------------------------------
-# Primitives
+# Correlation primitives
 # ---------------------------------------------------------------------------
 
-DEFAULT_WINDOW_SECONDS = 20.0
-DEFAULT_WINDOW_STEP_SECONDS = 10.0
-DEFAULT_LOCAL_SEARCH_SECONDS = 0.5
-DEFAULT_MIN_WINDOW_SCORE = 0.10
-DEFAULT_MIN_FIT_R2 = 0.10
 
-
-def fft_correlate_full(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Full cross-correlation via FFT (equivalent to np.correlate mode='full')."""
+def _fft_correlate_full(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Full cross-correlation via FFT (equivalent to ``np.correlate(mode='full')``)."""
     ref = np.asarray(a, dtype=float)
     tgt = np.asarray(b, dtype=float)
     n = ref.size + tgt.size - 1
@@ -39,7 +40,7 @@ def estimate_lag(
     max_lag_samples: int | None = None,
     min_overlap_samples: int = 10,
 ) -> tuple[int, float]:
-    """Estimate the integer lag that maximises overlap-normalised correlation."""
+    """Integer lag maximising overlap-normalised cross-correlation."""
     ref = np.asarray(reference_signal, dtype=float)
     tgt = np.asarray(target_signal, dtype=float)
     n_ref, n_tgt = ref.size, tgt.size
@@ -51,9 +52,9 @@ def estimate_lag(
     ref_valid = np.isfinite(ref).astype(float)
     tgt_valid = np.isfinite(tgt).astype(float)
 
-    corr = fft_correlate_full(ref_clean, tgt_clean)
+    corr = _fft_correlate_full(ref_clean, tgt_clean)
     lags = np.arange(-(n_tgt - 1), n_ref, dtype=int)
-    overlap = fft_correlate_full(ref_valid, tgt_valid)
+    overlap = _fft_correlate_full(ref_valid, tgt_valid)
 
     valid = overlap >= max(1, int(min_overlap_samples))
     if max_lag_samples is not None:
@@ -73,7 +74,7 @@ def masked_ncc(
     *,
     min_valid_fraction: float = 0.5,
 ) -> tuple[float, float]:
-    """Normalised cross-correlation (Pearson r) over the finite-overlap region."""
+    """Normalised cross-correlation (Pearson r) over finite-overlap region."""
     if a.shape != b.shape:
         raise ValueError("Arrays must have equal length.")
     valid = np.isfinite(a) & np.isfinite(b)
@@ -89,7 +90,7 @@ def masked_ncc(
 
 
 # ---------------------------------------------------------------------------
-# Linear drift fitting
+# Drift fitting primitives
 # ---------------------------------------------------------------------------
 
 
@@ -100,10 +101,7 @@ def fit_offset_drift(
     target_origin_seconds: float,
     weights: np.ndarray | None = None,
 ) -> tuple[float, float, float]:
-    """Weighted linear fit: offset = intercept + slope*(t - t0).
-
-    Returns (intercept, slope, R^2).
-    """
+    """Weighted linear fit ``offset = intercept + slope*(t - t0)``. Returns (intercept, slope, R²)."""
     if target_times_sec.size == 0:
         return 0.0, 0.0, 0.0
     if target_times_sec.size == 1:
@@ -128,125 +126,106 @@ def fit_offset_drift(
     return float(intercept), float(slope), float(r2)
 
 
-# ---------------------------------------------------------------------------
-# Non-causal windowed refinement (for signal_only tier)
-# ---------------------------------------------------------------------------
-
-
-def windowed_lag_refinement(
-    ref_series: AlignmentSeries,
-    tgt_series: AlignmentSeries,
+def fit_drift_through_point(
+    target_times_sec: np.ndarray,
+    offsets_sec: np.ndarray,
     *,
-    coarse_lag_samples: int,
-    window_seconds: float = DEFAULT_WINDOW_SECONDS,
-    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
-    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
-    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
-    min_valid_fraction: float = 0.5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Non-causal windowed lag refinement around a fixed coarse lag.
+    anchor_time_seconds: float,
+    anchor_offset_seconds: float,
+    weights: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Weighted LS slope with the line pinned through ``(anchor_time, anchor_offset)``.
 
-    Returns (target_times_sec, offsets_sec, scores, stats_dict).
+    Model: ``offset_i = anchor_offset + slope * (t_i - anchor_time)``. Closed-form
+    weighted slope through the (shifted) origin plus an R² against the weighted
+    mean of the observations — same semantic as `fit_offset_drift`'s R².
     """
-    ref_sig = ref_series.signal
-    tgt_sig = tgt_series.signal
-    ref_ts = ref_series.timestamps_seconds
-    tgt_ts = tgt_series.timestamps_seconds
-    sr = float(ref_series.sample_rate_hz)
-    n_ref, n_tgt = ref_sig.size, tgt_sig.size
+    if target_times_sec.size == 0:
+        return 0.0, 0.0
 
-    empty = np.asarray([], dtype=float)
-    empty_stats = {"accepted_windows": 0, "rejected_windows": 0}
-    if n_ref == 0 or n_tgt == 0:
-        return empty, empty, empty, empty_stats
-
-    win_n = max(20, int(round(window_seconds * sr)))
-    step_n = max(5, int(round(window_step_seconds * sr)))
-    search_n = max(1, int(round(local_search_seconds * sr)))
-    half = win_n // 2
-    if n_ref < win_n:
-        return empty, empty, empty, empty_stats
-
-    target_times: list[float] = []
-    offsets: list[float] = []
-    scores: list[float] = []
-    rejected = 0
-
-    for center in range(half, n_ref - half, step_n):
-        left, right = center - half, center + half
-        ref_win = ref_sig[left:right]
-        if ref_win.size < 10:
-            continue
-
-        best_lag: int | None = None
-        best_score = float("-inf")
-        for delta in range(-search_n, search_n + 1):
-            lag = int(coarse_lag_samples + delta)
-            t_left, t_right = left - lag, right - lag
-            if t_left < 0 or t_right > n_tgt:
-                continue
-            tgt_win = tgt_sig[t_left:t_right]
-            if tgt_win.size != ref_win.size:
-                continue
-            score, _ = masked_ncc(
-                ref_win, tgt_win, min_valid_fraction=min_valid_fraction
-            )
-            if np.isfinite(score) and score > best_score:
-                best_score = score
-                best_lag = lag
-
-        if best_lag is None or best_score < min_window_score:
-            rejected += 1
-            continue
-
-        tgt_idx = center - best_lag
-        if tgt_idx < 0 or tgt_idx >= tgt_ts.size:
-            continue
-
-        target_times.append(float(tgt_ts[tgt_idx]))
-        offsets.append(float(ref_ts[center]) - float(tgt_ts[tgt_idx]))
-        scores.append(best_score)
-
-    return (
-        np.asarray(target_times, dtype=float),
-        np.asarray(offsets, dtype=float),
-        np.asarray(scores, dtype=float),
-        {"accepted_windows": len(target_times), "rejected_windows": rejected},
+    dx = np.asarray(target_times_sec, dtype=float) - float(anchor_time_seconds)
+    dy = np.asarray(offsets_sec, dtype=float) - float(anchor_offset_seconds)
+    w = (
+        np.clip(np.asarray(weights, dtype=float), 0.0, None)
+        if weights is not None
+        else np.ones_like(dx)
     )
 
+    denom = float(np.sum(w * dx * dx))
+    if denom < 1e-12:
+        return 0.0, 0.0
+    slope = float(np.sum(w * dx * dy) / denom)
+
+    w_sum = float(np.sum(w))
+    mean_dy = float(np.sum(w * dy) / w_sum) if w_sum > 0 else 0.0
+    ss_res = float(np.sum(w * (dy - slope * dx) ** 2))
+    ss_tot = float(np.sum(w * (dy - mean_dy) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 0.0
+    return slope, float(r2)
+
 
 # ---------------------------------------------------------------------------
-# Causal adaptive windowed refinement (for one_anchor_adaptive tier)
+# Offset refinement primitives
 # ---------------------------------------------------------------------------
 
 
-def adaptive_windowed_refinement(
-    ref_series: AlignmentSeries,
-    tgt_series: AlignmentSeries,
+def _best_window_shift_samples(
+    ref_sig: np.ndarray,
+    tgt_sig: np.ndarray,
     *,
-    initial_offset_seconds: float,
-    initial_drift_seconds_per_second: float = 0.0,
-    target_origin_seconds: float,
-    window_seconds: float = DEFAULT_WINDOW_SECONDS,
-    window_step_seconds: float = DEFAULT_WINDOW_STEP_SECONDS,
-    local_search_seconds: float = DEFAULT_LOCAL_SEARCH_SECONDS,
-    min_window_score: float = DEFAULT_MIN_WINDOW_SCORE,
-    min_points_for_drift: int = 3,
-    min_valid_fraction: float = 0.5,
+    left: int,
+    right: int,
+    base_shift_samples: int,
+    search_radius_samples: int,
+    min_valid_fraction: float,
+) -> tuple[int | None, float]:
+    """Search best sample shift for one reference window."""
+    n_tgt = tgt_sig.size
+    ref_win = ref_sig[left:right]
+    if ref_win.size < 10:
+        return None, float("-inf")
+
+    best_shift: int | None = None
+    best_score = float("-inf")
+    for delta in range(-search_radius_samples, search_radius_samples + 1):
+        shift = int(base_shift_samples + delta)
+        t_left, t_right = left - shift, right - shift
+        if t_left < 0 or t_right > n_tgt:
+            continue
+        tgt_win = tgt_sig[t_left:t_right]
+        if tgt_win.size != ref_win.size:
+            continue
+        score, _ = masked_ncc(
+            ref_win, tgt_win, min_valid_fraction=min_valid_fraction
+        )
+        if np.isfinite(score) and score > best_score:
+            best_score = score
+            best_shift = shift
+    return best_shift, best_score
+
+
+def _collect_window_offsets(
+    ref_timestamps_seconds: np.ndarray,
+    ref_signal: np.ndarray,
+    tgt_timestamps_seconds: np.ndarray,
+    tgt_signal: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    window_seconds: float,
+    window_step_seconds: float,
+    local_search_seconds: float,
+    min_window_score: float,
+    min_valid_fraction: float,
     start_ref_time_seconds: float | None = None,
+    predict_target_time_seconds=None,
+    on_accept=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Causal windowed refinement: updates running model after each window.
-
-    Only past observations inform the search centre for future windows,
-    so no future data leaks into the estimate.
-
-    Returns (target_times_sec, offsets_sec, scores, stats_dict).
-    """
-    ref_sig = ref_series.signal
-    tgt_sig = tgt_series.signal
-    ref_ts = ref_series.timestamps_seconds
-    tgt_ts = tgt_series.timestamps_seconds
-    sr = float(ref_series.sample_rate_hz)
+    """Collect per-window offset observations with shared lag-search logic."""
+    ref_sig = np.asarray(ref_signal, dtype=float)
+    tgt_sig = np.asarray(tgt_signal, dtype=float)
+    ref_ts = np.asarray(ref_timestamps_seconds, dtype=float)
+    tgt_ts = np.asarray(tgt_timestamps_seconds, dtype=float)
+    sr = float(sample_rate_hz)
     n_ref, n_tgt = ref_sig.size, tgt_sig.size
 
     empty = np.asarray([], dtype=float)
@@ -260,9 +239,6 @@ def adaptive_windowed_refinement(
     half = win_n // 2
     if n_ref < win_n:
         return empty, empty, empty, empty_stats
-
-    cur_offset = float(initial_offset_seconds)
-    cur_drift = float(initial_drift_seconds_per_second)
 
     target_times: list[float] = []
     offsets: list[float] = []
@@ -271,74 +247,39 @@ def adaptive_windowed_refinement(
 
     for center in range(half, n_ref - half, step_n):
         t_ref_center = float(ref_ts[center])
-        if start_ref_time_seconds is not None and t_ref_center < float(start_ref_time_seconds):
+        if (
+            start_ref_time_seconds is not None
+            and t_ref_center < float(start_ref_time_seconds)
+        ):
             continue
-
-        # Predict where this ref window maps in target time.
-        t_tgt_pred = float(
-            reference_to_target_seconds(
-                t_ref_center,
-                offset_seconds=cur_offset,
-                drift_seconds_per_second=cur_drift,
-                target_origin_seconds=target_origin_seconds,
-            )
-        )
-        pred_tgt_idx = int(
-            np.clip(np.searchsorted(tgt_ts, t_tgt_pred), 0, n_tgt - 1)
-        )
-        pred_lag = center - pred_tgt_idx
 
         left, right = center - half, center + half
-        ref_win = ref_sig[left:right]
-        if ref_win.size < 10:
-            continue
+        t_tgt_pred = float(predict_target_time_seconds(center, t_ref_center))
+        pred_tgt_idx = int(np.clip(np.searchsorted(tgt_ts, t_tgt_pred), 0, tgt_ts.size - 1))
+        base_shift = center - pred_tgt_idx
+        best_shift, best_score = _best_window_shift_samples(
+            ref_sig,
+            tgt_sig,
+            left=left,
+            right=right,
+            base_shift_samples=base_shift,
+            search_radius_samples=search_n,
+            min_valid_fraction=min_valid_fraction,
+        )
 
-        best_lag: int | None = None
-        best_score = float("-inf")
-        for delta in range(-search_n, search_n + 1):
-            lag = pred_lag + delta
-            t_left, t_right = left - lag, right - lag
-            if t_left < 0 or t_right > n_tgt:
-                continue
-            tgt_win = tgt_sig[t_left:t_right]
-            if tgt_win.size != ref_win.size:
-                continue
-            score, _ = masked_ncc(
-                ref_win, tgt_win, min_valid_fraction=min_valid_fraction
-            )
-            if np.isfinite(score) and score > best_score:
-                best_score = score
-                best_lag = lag
-
-        if best_lag is None or best_score < min_window_score:
+        if best_shift is None or best_score < min_window_score:
             rejected += 1
             continue
 
-        tgt_idx = center - best_lag
+        tgt_idx = center - best_shift
         if tgt_idx < 0 or tgt_idx >= tgt_ts.size:
             continue
 
         target_times.append(float(tgt_ts[tgt_idx]))
         offsets.append(float(ref_ts[center]) - float(tgt_ts[tgt_idx]))
         scores.append(best_score)
-
-        # Update running model from all accumulated observations.
-        n_pts = len(target_times)
-        if n_pts >= min_points_for_drift:
-            t_arr = np.asarray(target_times, dtype=float)
-            o_arr = np.asarray(offsets, dtype=float)
-            w_arr = np.clip(np.asarray(scores, dtype=float), 0.0, None)
-            intercept, slope, _ = fit_offset_drift(
-                t_arr, o_arr,
-                target_origin_seconds=target_origin_seconds,
-                weights=w_arr,
-            )
-            cur_offset = intercept
-            cur_drift = slope
-        elif n_pts >= 1:
-            cur_offset = float(
-                np.average(offsets, weights=np.clip(scores, 0.0, None))
-            )
+        if on_accept is not None:
+            on_accept(target_times, offsets, scores)
 
     return (
         np.asarray(target_times, dtype=float),
@@ -346,3 +287,171 @@ def adaptive_windowed_refinement(
         np.asarray(scores, dtype=float),
         {"accepted_windows": len(target_times), "rejected_windows": rejected},
     )
+
+
+def refine_offsets_from_coarse_offset(
+    ref_timestamps_seconds: np.ndarray,
+    ref_signal: np.ndarray,
+    tgt_timestamps_seconds: np.ndarray,
+    tgt_signal: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    coarse_offset_seconds: float,
+    window_seconds: float,
+    window_step_seconds: float,
+    local_search_seconds: float,
+    min_window_score: float,
+    min_valid_fraction: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Collect offsets from non-causal refinement around coarse time offset."""
+
+    def _predict_target_time_seconds(_center: int, t_ref_center: float) -> float:
+        return float(t_ref_center) - float(coarse_offset_seconds)
+
+    return _collect_window_offsets(
+        ref_timestamps_seconds,
+        ref_signal,
+        tgt_timestamps_seconds,
+        tgt_signal,
+        sample_rate_hz=sample_rate_hz,
+        window_seconds=window_seconds,
+        window_step_seconds=window_step_seconds,
+        local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
+        min_valid_fraction=min_valid_fraction,
+        predict_target_time_seconds=_predict_target_time_seconds,
+    )
+
+
+def collect_drift_observations_from_anchor(
+    ref_timestamps_seconds: np.ndarray,
+    ref_signal: np.ndarray,
+    tgt_timestamps_seconds: np.ndarray,
+    tgt_signal: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    anchor_ref_time_seconds: float,
+    anchor_target_time_seconds: float,
+    anchor_offset_seconds: float,
+    target_origin_seconds: float,
+    window_seconds: float,
+    window_step_seconds: float,
+    local_search_seconds: float,
+    min_window_score: float,
+    min_valid_fraction: float,
+    min_points_for_drift: int = 3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Collect causal drift-fit observations constrained by the opening anchor."""
+    tgt_ts = np.asarray(tgt_timestamps_seconds, dtype=float)
+
+    cur_drift = 0.0
+    cur_offset = float(anchor_offset_seconds) - cur_drift * (
+        float(anchor_target_time_seconds) - float(target_origin_seconds)
+    )
+
+    def _predict_target_time_seconds(_center: int, t_ref_center: float) -> float:
+        return float(
+            reference_to_target_seconds(
+                float(t_ref_center),
+                offset_seconds=float(cur_offset),
+                drift_seconds_per_second=float(cur_drift),
+                target_origin_seconds=float(target_origin_seconds),
+            )
+        )
+
+    def _on_accept(
+        target_times: list[float],
+        offsets: list[float],
+        scores: list[float],
+    ) -> None:
+        nonlocal cur_drift, cur_offset
+        if len(target_times) < int(min_points_for_drift):
+            return
+        slope, _ = fit_drift_through_point(
+            np.asarray(target_times, dtype=float),
+            np.asarray(offsets, dtype=float),
+            anchor_time_seconds=float(anchor_target_time_seconds),
+            anchor_offset_seconds=float(anchor_offset_seconds),
+            weights=np.asarray(scores, dtype=float),
+        )
+        cur_drift = slope
+        cur_offset = float(anchor_offset_seconds) - cur_drift * (
+            float(anchor_target_time_seconds) - float(target_origin_seconds)
+        )
+
+    return _collect_window_offsets(
+        ref_timestamps_seconds,
+        ref_signal,
+        tgt_timestamps_seconds,
+        tgt_signal,
+        sample_rate_hz=sample_rate_hz,
+        window_seconds=window_seconds,
+        window_step_seconds=window_step_seconds,
+        local_search_seconds=local_search_seconds,
+        min_window_score=min_window_score,
+        min_valid_fraction=min_valid_fraction,
+        start_ref_time_seconds=float(anchor_ref_time_seconds),
+        predict_target_time_seconds=_predict_target_time_seconds,
+        on_accept=_on_accept,
+    )
+
+
+def refine_drift_unconstrained(
+    target_times_sec: np.ndarray,
+    offsets_sec: np.ndarray,
+    scores: np.ndarray,
+    *,
+    min_fit_r2: float,
+    target_origin_seconds: float,
+    fallback_offset_seconds: float,
+    min_fit_ppm: float,
+    max_fit_ppm: float,
+) -> tuple[float, float, float, bool]:
+    """Refine unconstrained offset+drift model from windowed offsets."""
+    if offsets_sec.size == 0:
+        return float(fallback_offset_seconds), 0.0, 0.0, False
+
+    weights = np.clip(np.asarray(scores, dtype=float), 0.0, None)
+    offset_seconds, drift, fit_r2 = fit_offset_drift(
+        target_times_sec,
+        offsets_sec,
+        target_origin_seconds=float(target_origin_seconds),
+        weights=weights,
+    )
+
+    if fit_r2 < min_fit_r2 or drift < min_fit_ppm/1000.0 or drift > max_fit_ppm/1000.0:
+        return float(fallback_offset_seconds), 0.0, fit_r2, False
+    return float(offset_seconds), float(drift), float(fit_r2), True
+
+
+def refine_drift_through_anchor(
+    target_times_sec: np.ndarray,
+    offsets_sec: np.ndarray,
+    scores: np.ndarray,
+    *,
+    min_fit_r2: float,
+    target_origin_seconds: float,
+    anchor_time_seconds: float,
+    anchor_offset_seconds: float,
+    min_fit_ppm: float,
+    max_fit_ppm: float,
+) -> tuple[float, float, float, bool]:
+    """Refine drift constrained to pass through calibration anchor."""
+    if offsets_sec.size == 0:
+        return float(anchor_offset_seconds), 0.0, 0.0, False
+
+    weights = np.clip(np.asarray(scores, dtype=float), 0.0, None)
+    slope, fit_r2 = fit_drift_through_point(
+        target_times_sec,
+        offsets_sec,
+        anchor_time_seconds=float(anchor_time_seconds),
+        anchor_offset_seconds=float(anchor_offset_seconds),
+        weights=weights,
+    )
+
+    if fit_r2 < min_fit_r2 or slope < min_fit_ppm/1000.0 or slope > max_fit_ppm/1000.0:
+        return float(anchor_offset_seconds), 0.0, fit_r2, False
+    offset_seconds = float(anchor_offset_seconds) - float(slope) * (
+        float(anchor_time_seconds) - float(target_origin_seconds)
+    )
+    return float(offset_seconds), float(slope), float(fit_r2), True

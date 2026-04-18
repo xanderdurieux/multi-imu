@@ -16,9 +16,9 @@ Anchor extraction:
 
 4. Refine each anchor by resampling the ``acc_norm`` signal within the
    peak window at a common rate and maximising cross-correlation (via
-   :func:`sync.xcorr.estimate_lag`) within ±``_REFINE_SEARCH_S`` of the
-   coarse lag. The lag that maximises overlap-normalised correlation
-   converts directly to a sub-sample offset correction.
+   :func:`sync.xcorr.estimate_lag`) within the configured local search span.
+   The best sample shift from correlation converts directly to an offset
+   correction in seconds.
 
 The result feeds directly into the drift-fitting step in
 :mod:`sync.strategies`.
@@ -27,7 +27,7 @@ The result feeds directly into the drift-fitting step in
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -38,14 +38,11 @@ from parser.calibration_segments import (
     CalibrationSegment,
     load_calibration_segments_from_json,
 )
-from .stream_io import load_stream, resample_stream
+from .config import default_sync_config
+from .signals import load_stream, resample_stream
 from .xcorr import estimate_lag
 
 log = logging.getLogger(__name__)
-
-_REFINE_SAMPLE_RATE_HZ: float = 100.0
-_REFINE_SEARCH_S: float = 1.0   # ± search window around coarse lag
-
 
 @dataclass(frozen=True)
 class CalibrationAnchor:
@@ -65,24 +62,21 @@ class CalibrationAnchor:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _shake_center_ms(seg: CalibrationSegment) -> float:
-    """Midpoint of the shake zone: between end of pre-static and start of post-static."""
-    shake_start = seg.start_ms + seg.static_pre_ms
-    shake_end = seg.end_ms - seg.static_post_ms
-    return (shake_start + shake_end) / 2.0
-
 
 def _refine_offset_xcorr(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     ref_seg: CalibrationSegment,
     coarse_offset_s: float,
+    *,
+    resample_rate_hz: float,
+    search_seconds: float,
 ) -> tuple[float, float]:
     """Refine *coarse_offset_s* by maximising acc_norm cross-correlation.
 
     Uses the full segment span (not just detected peaks) so that partial
     detections near recording gaps do not bias the window placement.
-    Searches ±``_REFINE_SEARCH_S`` around lag 0.
+    Searches within ±``search_seconds`` around zero sample shift.
     """
     ref_start = ref_seg.start_ms
     ref_end = ref_seg.end_ms
@@ -92,11 +86,11 @@ def _refine_offset_xcorr(
     tgt_end = ref_end - coarse_offset_s * 1000.0
 
     ref_win = resample_stream(
-        ref_df, _REFINE_SAMPLE_RATE_HZ,
+        ref_df, resample_rate_hz,
         start_ms=ref_start, end_ms=ref_end, columns=["acc_norm"],
     )
     tgt_win = resample_stream(
-        tgt_df, _REFINE_SAMPLE_RATE_HZ,
+        tgt_df, resample_rate_hz,
         start_ms=tgt_start, end_ms=tgt_end, columns=["acc_norm"],
     )
 
@@ -108,14 +102,14 @@ def _refine_offset_xcorr(
     if ref_sig.size < 10 or tgt_sig.size < 10:
         return coarse_offset_s, float("nan")
 
-    search_n = max(1, int(round(_REFINE_SEARCH_S * _REFINE_SAMPLE_RATE_HZ)))
-    lag, score = estimate_lag(ref_sig, tgt_sig, max_lag_samples=search_n)
+    search_n = max(1, int(round(search_seconds * resample_rate_hz)))
+    shift_samples, score = estimate_lag(ref_sig, tgt_sig, max_lag_samples=search_n)
 
     if not np.isfinite(score) or score <= 0:
         return coarse_offset_s, float("nan")
 
-    # Positive lag: ref is lag samples ahead of tgt → offset increases.
-    refined_offset_s = coarse_offset_s + lag / _REFINE_SAMPLE_RATE_HZ
+    # Positive shift: ref is ahead of tgt by `shift_samples` samples.
+    refined_offset_s = coarse_offset_s + shift_samples / resample_rate_hz
     return refined_offset_s, float(score)
 
 
@@ -128,8 +122,16 @@ def load_calibration_anchors(
     *,
     ref_sensor: str = "sporsa",
     tgt_sensor: str = "arduino",
+    resample_rate_hz: float | None = None,
+    search_seconds: float | None = None,
 ) -> list[CalibrationAnchor]:
     """Load calibration segments and produce one refined anchor per matched pair."""
+    config = default_sync_config()
+    if resample_rate_hz is None:
+        resample_rate_hz = config.anchor_refinement.resample_rate_hz
+    if search_seconds is None:
+        search_seconds = config.anchor_refinement.search_seconds
+
     ref_segs = load_calibration_segments_from_json(recording_name, ref_sensor)
     tgt_segs = load_calibration_segments_from_json(recording_name, tgt_sensor)
 
@@ -168,7 +170,12 @@ def load_calibration_anchors(
         coarse_offset_s = (ref_center_ms - tgt_center_ms) / 1000.0
 
         refined_offset_s, score = _refine_offset_xcorr(
-            ref_df, tgt_df, ref_seg, coarse_offset_s,
+            ref_df,
+            tgt_df,
+            ref_seg,
+            coarse_offset_s,
+            resample_rate_hz=float(resample_rate_hz),
+            search_seconds=float(search_seconds),
         )
 
         tgt_center_ms = ref_center_ms - refined_offset_s * 1000.0

@@ -1,11 +1,15 @@
-"""Run all synchronization tiers, compare results, and select the best."""
+"""Compare per-method sync outputs and pick the best one for a recording.
+
+Loads each method's ``sync_info.json`` from its stage directory, extracts a
+quality summary (``SyncMethodQuality``), applies tier-priority + gate logic,
+and returns a ``SyncSelectionResult`` used by ``pipeline._apply_selection``.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal, Optional
 
 from common.paths import recording_stage_dir
@@ -31,7 +35,7 @@ METHOD_LABELS: dict[str, str] = {
     "multi_anchor": "Multi-anchor",
     "one_anchor_adaptive": "One-anchor adaptive",
     "one_anchor_prior": "One-anchor prior",
-    "signal_only": "Signal-only (SDA/LIDA)",
+    "signal_only": "Signal-only",
 }
 
 SyncMethodName = Literal[

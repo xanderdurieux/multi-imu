@@ -351,6 +351,21 @@ def default_calibration_segments_config_path() -> Path:
     return configs_root() / "calibration_segments_args.json"
 
 
+def default_sync_config_path() -> Path:
+    """Return the path to the default sync search-parameter config file."""
+    return configs_root() / "sync_args.json"
+
+
+def _merge_nested_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_nested_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
     """Load workflow config data with default-as-base merging.
 
@@ -379,3 +394,12 @@ def load_calibration_segments_config_data(override_path: Path | str | None = Non
     merged = dict(default_payload)
     merged.update(override_payload)
     return merged
+
+
+def load_sync_config_data(override_path: Path | str | None = None) -> dict:
+    """Load sync config data with default-as-base merging."""
+    default_payload = read_json_file(default_sync_config_path())
+    if override_path is None:
+        return dict(default_payload)
+    override_payload = read_json_file(override_path)
+    return _merge_nested_dicts(default_payload, override_payload)

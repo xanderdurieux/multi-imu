@@ -1,4 +1,17 @@
-"""Synchronization strategy implementations."""
+"""Sync-strategy estimators.
+
+Every estimator returns ``(SyncModel, meta)`` and shares one signature:
+
+    estimate_<method>(ref_df, tgt_df, *, recording_name,
+                      reference_sensor="sporsa", target_sensor="arduino",
+                      config=None) -> (SyncModel, meta)
+
+Tier hierarchy (strongest to weakest):
+  1. multi_anchor        — all calibration anchors, affine fit
+  2. one_anchor_adaptive — opening anchor + causal windowed refinement
+  3. one_anchor_prior    — opening anchor + fixed drift prior (ppm)
+  4. signal_only         — coarse xcorr + non-causal windowed refinement
+"""
 
 from __future__ import annotations
 
@@ -7,70 +20,52 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .activity import SIGNAL_MODE_ACC_NORM_DIFF, build_alignment_series
 from .anchors import (
     CalibrationAnchor,
     calibration_anchor_to_dict,
     load_calibration_anchors,
 )
-from .model import SyncModel, make_sync_model
+from .config import SyncConfig, default_sync_config
+from .model import SyncModel
+from .signals import build_resampled_activity_signal
 from .xcorr import (
-    DEFAULT_LOCAL_SEARCH_SECONDS,
-    DEFAULT_MIN_FIT_R2,
-    DEFAULT_MIN_WINDOW_SCORE,
-    DEFAULT_WINDOW_SECONDS,
-    DEFAULT_WINDOW_STEP_SECONDS,
-    adaptive_windowed_refinement,
+    collect_drift_observations_from_anchor,
     estimate_lag,
     fit_offset_drift,
-    windowed_lag_refinement,
+    refine_drift_through_anchor,
+    refine_drift_unconstrained,
+    refine_offsets_from_coarse_offset,
 )
 
-DEFAULT_SAMPLE_RATE_HZ = 100.0
-DEFAULT_MAX_LAG_SECONDS = 60.0
-DEFAULT_DRIFT_PPM = 300.0
 
-_DEFAULT_SIGNAL_MODE = SIGNAL_MODE_ACC_NORM_DIFF
-_DEFAULT_MIN_VALID_FRACTION = 0.5
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 
 def _target_origin_seconds(tgt_df: pd.DataFrame) -> float:
     return float(tgt_df["timestamp"].iloc[0]) / 1000.0
 
 
-def _build_series_pair(
+def _build_signal_pair(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
-    *,
-    sample_rate_hz: float,
-):
-    ref_series = build_alignment_series(
+    config: SyncConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ref_ts, ref_sig = build_resampled_activity_signal(
         ref_df,
-        sample_rate_hz=sample_rate_hz,
-        signal_mode=_DEFAULT_SIGNAL_MODE,
+        sample_rate_hz=config.resample_rate_hz,
+        signal_mode=config.signal_mode,
     )
-    tgt_series = build_alignment_series(
+    tgt_ts, tgt_sig = build_resampled_activity_signal(
         tgt_df,
-        sample_rate_hz=sample_rate_hz,
-        signal_mode=_DEFAULT_SIGNAL_MODE,
+        sample_rate_hz=config.resample_rate_hz,
+        signal_mode=config.signal_mode,
     )
-    return ref_series, tgt_series
+    return ref_ts, ref_sig, tgt_ts, tgt_sig
 
 
-def _build_model(
-    *,
-    target_origin_seconds: float,
-    offset_seconds: float,
-    drift_seconds_per_second: float,
-) -> SyncModel:
-    return make_sync_model(
-        target_origin_seconds=target_origin_seconds,
-        offset_seconds=offset_seconds,
-        drift_seconds_per_second=drift_seconds_per_second,
-    )
-
-
-def _build_calibration_meta(
+def _calibration_meta(
     anchors: list[CalibrationAnchor],
     *,
     fit_r2: float | None = None,
@@ -79,7 +74,7 @@ def _build_calibration_meta(
     opening = sorted_anchors[0] if sorted_anchors else None
     closing = sorted_anchors[-1] if sorted_anchors else None
 
-    calibration: dict[str, Any] = {
+    meta: dict[str, Any] = {
         "n_anchors": len(sorted_anchors),
         "anchor_span_s": (
             round(float((closing.tgt_ms - opening.tgt_ms) / 1000.0), 1)
@@ -92,39 +87,11 @@ def _build_calibration_meta(
         ],
     }
     if fit_r2 is not None:
-        calibration["fit_r2"] = round(float(fit_r2), 4)
-    return calibration
+        meta["fit_r2"] = round(float(fit_r2), 4)
+    return meta
 
 
-def _fit_lida_drift(
-    target_times: np.ndarray,
-    offsets: np.ndarray,
-    scores: np.ndarray,
-    *,
-    target_origin_seconds: float,
-    fallback_offset_seconds: float,
-    min_fit_r2: float = DEFAULT_MIN_FIT_R2,
-) -> tuple[float, float, float, bool]:
-    """Run LIDA drift fit from local-window offsets.
-
-    Returns ``(offset, drift, fit_r2, accepted)``.
-    """
-    if offsets.size == 0:
-        return fallback_offset_seconds, 0.0, 0.0, False
-
-    weights = np.clip(scores, 0.0, None)
-    offset_seconds, drift, fit_r2 = fit_offset_drift(
-        target_times,
-        offsets,
-        target_origin_seconds=target_origin_seconds,
-        weights=weights,
-    )
-    if fit_r2 < min_fit_r2:
-        return fallback_offset_seconds, 0.0, fit_r2, False
-    return offset_seconds, drift, fit_r2, True
-
-
-def _window_stats_payload(
+def _window_stats(
     win_stats: dict[str, Any],
     *,
     fit_r2: float,
@@ -139,23 +106,51 @@ def _window_stats_payload(
     }
 
 
+def _shared_hyperparameters(config: SyncConfig) -> dict[str, Any]:
+    return {
+        "resample_rate_hz": float(config.resample_rate_hz),
+        "signal_mode": config.signal_mode,
+        "min_valid_fraction": float(config.min_valid_fraction),
+        "anchor_refinement": {
+            "resample_rate_hz": float(config.anchor_refinement.resample_rate_hz),
+            "search_seconds": float(config.anchor_refinement.search_seconds),
+        },
+    }
+
+
+def _window_hyperparameters(config: SyncConfig) -> dict[str, Any]:
+    w = config.window_refinement
+    return {
+        "window_seconds": float(w.window_seconds),
+        "step_seconds": float(w.step_seconds),
+        "local_search_seconds": float(w.local_search_seconds),
+        "min_window_score": float(w.min_window_score),
+        "min_fit_r2": float(w.min_fit_r2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategies
+# ---------------------------------------------------------------------------
+
+
 def estimate_multi_anchor(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
-    recording_name: str = "",
-    reference_name: str = "",
-    target_name: str = "",
+    recording_name: str,
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-    sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    anchor_search_seconds: float = 5.0,
+    config: SyncConfig | None = None,
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Fit offset and drift from all matched calibration anchors."""
+    config = config or default_sync_config()
     anchors = load_calibration_anchors(
         recording_name,
         ref_sensor=reference_sensor,
         tgt_sensor=target_sensor,
+        resample_rate_hz=config.anchor_refinement.resample_rate_hz,
+        search_seconds=config.anchor_refinement.search_seconds,
     )
     if len(anchors) < 2:
         raise ValueError(
@@ -165,29 +160,23 @@ def estimate_multi_anchor(
     target_origin_s = _target_origin_seconds(tgt_df)
     target_times = np.asarray([a.tgt_ms / 1000.0 for a in anchors], dtype=float)
     offsets = np.asarray([a.offset_s for a in anchors], dtype=float)
-    weights = np.ones(len(anchors), dtype=float)
     offset_seconds, drift, fit_r2 = fit_offset_drift(
         target_times,
         offsets,
         target_origin_seconds=target_origin_s,
-        weights=weights,
+        weights=np.ones(len(anchors), dtype=float),
     )
 
-    model = _build_model(
-        target_origin_seconds=target_origin_s,
+    model = SyncModel(
+        target_time_origin_seconds=target_origin_s,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift,
     )
     return model, {
         "sync_method": "multi_anchor",
         "drift_source": "anchor_fit",
-        "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
-        "calibration": _build_calibration_meta(anchors, fit_r2=fit_r2),
-        "hyperparameters": {
-            "sample_rate_hz": float(sample_rate_hz),
-            "max_lag_seconds": float(anchor_search_seconds + 1.0),
-            "anchor_search_seconds": float(anchor_search_seconds),
-        },
+        "calibration": _calibration_meta(anchors, fit_r2=fit_r2),
+        "hyperparameters": _shared_hyperparameters(config),
     }
 
 
@@ -195,72 +184,71 @@ def estimate_one_anchor_adaptive(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
-    recording_name: str = "",
-    reference_name: str = "",
-    target_name: str = "",
+    recording_name: str,
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-    sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    anchor_search_seconds: float = 5.0,
+    config: SyncConfig | None = None,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """One-anchor SDA initialization followed by causal LIDA drift fitting."""
+    """Opening-anchor offset + causal windowed drift refinement."""
+    config = config or default_sync_config()
+    window = config.window_refinement
+
     anchors = load_calibration_anchors(
         recording_name,
         ref_sensor=reference_sensor,
         tgt_sensor=target_sensor,
+        resample_rate_hz=config.anchor_refinement.resample_rate_hz,
+        search_seconds=config.anchor_refinement.search_seconds,
     )
-    opening_anchor = anchors[0]
-    ref_series, tgt_series = _build_series_pair(
-        ref_df,
-        tgt_df,
-        sample_rate_hz=sample_rate_hz,
-    )
+    opening = anchors[0]
+    anchor_ref_s = opening.ref_ms / 1000.0
+    anchor_tgt_s = opening.tgt_ms / 1000.0
+    anchor_offset_s = opening.offset_s
+
+    ref_ts, ref_sig, tgt_ts, tgt_sig = _build_signal_pair(ref_df, tgt_df, config)
     target_origin_s = _target_origin_seconds(tgt_df)
 
-    target_times, offsets, scores, win_stats = adaptive_windowed_refinement(
-        ref_series,
-        tgt_series,
-        initial_offset_seconds=opening_anchor.offset_s,
-        initial_drift_seconds_per_second=0.0,
+    target_times, offsets, scores, win_stats = collect_drift_observations_from_anchor(
+        ref_ts, ref_sig, tgt_ts, tgt_sig,
+        sample_rate_hz=config.resample_rate_hz,
+        anchor_ref_time_seconds=anchor_ref_s,
+        anchor_target_time_seconds=anchor_tgt_s,
+        anchor_offset_seconds=anchor_offset_s,
         target_origin_seconds=target_origin_s,
-        window_seconds=DEFAULT_WINDOW_SECONDS,
-        window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
-        local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
-        min_window_score=DEFAULT_MIN_WINDOW_SCORE,
-        min_valid_fraction=_DEFAULT_MIN_VALID_FRACTION,
-        start_ref_time_seconds=(opening_anchor.ref_ms / 1000.0),
+        window_seconds=window.window_seconds,
+        window_step_seconds=window.step_seconds,
+        local_search_seconds=window.local_search_seconds,
+        min_window_score=window.min_window_score,
+        min_valid_fraction=config.min_valid_fraction,
     )
 
-    final_offset, final_drift, fit_r2, accepted = _fit_lida_drift(
-        target_times,
-        offsets,
-        scores,
+    final_offset, final_drift, fit_r2, accepted = refine_drift_through_anchor(
+        target_times, offsets, scores,
+        min_fit_r2=window.min_fit_r2,
         target_origin_seconds=target_origin_s,
-        fallback_offset_seconds=opening_anchor.offset_s,
+        anchor_time_seconds=anchor_tgt_s,
+        anchor_offset_seconds=anchor_offset_s,
+        min_fit_ppm=window.min_fit_ppm,
+        max_fit_ppm=window.max_fit_ppm,
     )
 
-    model = _build_model(
-        target_origin_seconds=target_origin_s,
+    model = SyncModel(
+        target_time_origin_seconds=target_origin_s,
         offset_seconds=final_offset,
         drift_seconds_per_second=final_drift,
     )
     return model, {
         "sync_method": "one_anchor_adaptive",
-        "drift_source": "sda_lida" if accepted else "sda",
-        "signal_mode": _DEFAULT_SIGNAL_MODE,
-        "calibration": _build_calibration_meta(anchors),
-        "adaptive": {
-            "opening_anchor": calibration_anchor_to_dict(opening_anchor, index=0),
-            **_window_stats_payload(win_stats, fit_r2=fit_r2, scores=scores),
+        "drift_source": "causal_window_refinement" if accepted else "opening_anchor",
+        "calibration": _calibration_meta(anchors),
+        "window_refinement": {
+            "causal": True,
+            "opening_anchor": calibration_anchor_to_dict(opening, index=0),
+            **_window_stats(win_stats, fit_r2=fit_r2, scores=scores),
         },
         "hyperparameters": {
-            "sample_rate_hz": float(sample_rate_hz),
-            "max_lag_seconds": float(anchor_search_seconds + 1.0),
-            "anchor_search_seconds": float(anchor_search_seconds),
-            "window_seconds": float(DEFAULT_WINDOW_SECONDS),
-            "window_step_seconds": float(DEFAULT_WINDOW_STEP_SECONDS),
-            "local_search_seconds": float(DEFAULT_LOCAL_SEARCH_SECONDS),
-            "min_window_score": float(DEFAULT_MIN_WINDOW_SCORE),
+            **_shared_hyperparameters(config),
+            "window_refinement": _window_hyperparameters(config),
         },
     }
 
@@ -269,44 +257,43 @@ def estimate_one_anchor_prior(
     ref_df: pd.DataFrame,
     tgt_df: pd.DataFrame,
     *,
-    recording_name: str = "",
-    reference_name: str = "",
-    target_name: str = "",
+    recording_name: str,
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-    sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    drift_ppm: float = DEFAULT_DRIFT_PPM,
+    config: SyncConfig | None = None,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Use the opening anchor for offset and a fixed drift prior."""
+    """Opening anchor for offset plus a fixed drift prior."""
+    config = config or default_sync_config()
+    drift_ppm = config.one_anchor_prior_drift_ppm
+
     anchors = load_calibration_anchors(
         recording_name,
         ref_sensor=reference_sensor,
         tgt_sensor=target_sensor,
+        resample_rate_hz=config.anchor_refinement.resample_rate_hz,
+        search_seconds=config.anchor_refinement.search_seconds,
     )
-    opening_anchor = anchors[0]
+    opening = anchors[0]
 
     target_origin_s = _target_origin_seconds(tgt_df)
-    drift_s_per_s = float(drift_ppm) * 1e-6
+    drift_s_per_s = drift_ppm * 1e-6
     offset_at_origin = (
-        opening_anchor.offset_s
-        - drift_s_per_s * (opening_anchor.tgt_ms / 1000.0 - target_origin_s)
+        opening.offset_s
+        - drift_s_per_s * (opening.tgt_ms / 1000.0 - target_origin_s)
     )
 
-    model = _build_model(
-        target_origin_seconds=target_origin_s,
+    model = SyncModel(
+        target_time_origin_seconds=target_origin_s,
         offset_seconds=offset_at_origin,
         drift_seconds_per_second=drift_s_per_s,
     )
     return model, {
         "sync_method": "one_anchor_prior",
-        "drift_source": "prior_ppm",
-        "signal_mode": SIGNAL_MODE_ACC_NORM_DIFF,
-        "drift_ppm_prior": float(drift_ppm),
-        "calibration": _build_calibration_meta(anchors),
+        "drift_source": "drift_prior",
+        "calibration": _calibration_meta(anchors),
         "hyperparameters": {
-            "sample_rate_hz": float(sample_rate_hz),
-            "max_lag_seconds": 5.0,
-            "drift_ppm_prior": float(drift_ppm),
+            **_shared_hyperparameters(config),
+            "drift_prior_ppm": float(drift_ppm),
         },
     }
 
@@ -316,72 +303,68 @@ def estimate_signal_only(
     tgt_df: pd.DataFrame,
     *,
     recording_name: str = "",
-    reference_name: str = "",
-    target_name: str = "",
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
-    sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    max_lag_seconds: float = DEFAULT_MAX_LAG_SECONDS,
+    config: SyncConfig | None = None,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Signal-only synchronization: SDA coarse lag + LIDA drift fitting."""
-    ref_series, tgt_series = _build_series_pair(
-        ref_df,
-        tgt_df,
-        sample_rate_hz=sample_rate_hz,
-    )
-    if ref_series.signal.size == 0 or tgt_series.signal.size == 0:
+    """Signal-only coarse alignment followed by non-causal windowed refinement."""
+    config = config or default_sync_config()
+    window = config.window_refinement
+    max_lag_seconds = config.signal_only_coarse_search_seconds
+
+    ref_ts, ref_sig, tgt_ts, tgt_sig = _build_signal_pair(ref_df, tgt_df, config)
+    if ref_sig.size == 0 or tgt_sig.size == 0:
         raise ValueError("Cannot sync from empty streams.")
 
-    max_lag_samples = int(round(max_lag_seconds * sample_rate_hz))
-    lag_samples, coarse_score = estimate_lag(
-        ref_series.signal,
-        tgt_series.signal,
-        max_lag_samples=max_lag_samples,
+    max_lag_samples = int(round(max_lag_seconds * config.resample_rate_hz))
+    shift_samples, coarse_score = estimate_lag(
+        ref_sig, tgt_sig, max_lag_samples=max_lag_samples,
     )
 
     coarse_offset_s = (
-        float(ref_series.timestamps_seconds[0])
-        - float(tgt_series.timestamps_seconds[0])
-        + float(lag_samples) / sample_rate_hz
+        float(ref_ts[0]) - float(tgt_ts[0])
+        + float(shift_samples) / config.resample_rate_hz
     )
-    target_origin_s = float(tgt_series.timestamps_seconds[0])
+    target_origin_s = float(tgt_ts[0])
 
-    target_times, offsets, scores, win_stats = windowed_lag_refinement(
-        ref_series,
-        tgt_series,
-        coarse_lag_samples=lag_samples,
-        window_seconds=DEFAULT_WINDOW_SECONDS,
-        window_step_seconds=DEFAULT_WINDOW_STEP_SECONDS,
-        local_search_seconds=DEFAULT_LOCAL_SEARCH_SECONDS,
-        min_window_score=DEFAULT_MIN_WINDOW_SCORE,
-        min_valid_fraction=_DEFAULT_MIN_VALID_FRACTION,
+    target_times, offsets, scores, win_stats = refine_offsets_from_coarse_offset(
+        ref_ts, ref_sig, tgt_ts, tgt_sig,
+        sample_rate_hz=config.resample_rate_hz,
+        coarse_offset_seconds=coarse_offset_s,
+        window_seconds=window.window_seconds,
+        window_step_seconds=window.step_seconds,
+        local_search_seconds=window.local_search_seconds,
+        min_window_score=window.min_window_score,
+        min_valid_fraction=config.min_valid_fraction,
     )
 
-    offset_seconds, drift, fit_r2, accepted = _fit_lida_drift(
-        target_times,
-        offsets,
-        scores,
+    offset_seconds, drift, fit_r2, accepted = refine_drift_unconstrained(
+        target_times, offsets, scores,
+        min_fit_r2=window.min_fit_r2,
         target_origin_seconds=target_origin_s,
         fallback_offset_seconds=coarse_offset_s,
+        min_fit_ppm=window.min_fit_ppm,
+        max_fit_ppm=window.max_fit_ppm,
     )
 
-    model = _build_model(
-        target_origin_seconds=target_origin_s,
+    model = SyncModel(
+        target_time_origin_seconds=target_origin_s,
         offset_seconds=offset_seconds,
         drift_seconds_per_second=drift,
     )
     return model, {
         "sync_method": "signal_only",
-        "drift_source": "sda_lida" if accepted else "sda",
-        "signal_mode": _DEFAULT_SIGNAL_MODE,
-        "sda_score": round(float(coarse_score), 4),
-        "windowed": _window_stats_payload(win_stats, fit_r2=fit_r2, scores=scores),
+        "drift_source": "window_refinement" if accepted else "coarse_signal_alignment",
+        "coarse_alignment_score": round(float(coarse_score), 4),
+        "window_refinement": {
+            "causal": False,
+            **_window_stats(win_stats, fit_r2=fit_r2, scores=scores),
+        },
         "hyperparameters": {
-            "sample_rate_hz": float(sample_rate_hz),
-            "max_lag_seconds": float(max_lag_seconds),
-            "window_seconds": float(DEFAULT_WINDOW_SECONDS),
-            "window_step_seconds": float(DEFAULT_WINDOW_STEP_SECONDS),
-            "local_search_seconds": float(DEFAULT_LOCAL_SEARCH_SECONDS),
-            "min_window_score": float(DEFAULT_MIN_WINDOW_SCORE),
+            "resample_rate_hz": float(config.resample_rate_hz),
+            "signal_mode": config.signal_mode,
+            "min_valid_fraction": float(config.min_valid_fraction),
+            "coarse_search_seconds": float(max_lag_seconds),
+            "window_refinement": _window_hyperparameters(config),
         },
     }
