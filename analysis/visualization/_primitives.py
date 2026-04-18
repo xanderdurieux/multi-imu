@@ -32,13 +32,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from common.signals import vector_norm
 from visualization._utils import (
     ACC_COLS,
     GYRO_COLS,
     MAG_COLS,
     SENSOR_COLORS,
     filter_valid_plot_xy,
-    strict_vector_norm,
 )
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ def draw_signal_norm(
         present = [c for c in cols if c in df.columns]
         if not present:
             return ax
-        norm = strict_vector_norm(df, present)
+        norm = vector_norm(df, present)
     return draw_signal(
         ax,
         t,

@@ -490,16 +490,16 @@ def detect_protocol_landmarks(
     seg = segments[0]  # opening routine = first calibration sequence
     static_ranges: list[tuple[float, float]] = []
 
-    if seg.peak_timestamps:
-        pre_end_ms = seg.peak_timestamps[0]
-        if pre_end_ms > seg.start_timestamp:
-            static_ranges.append((seg.start_timestamp, pre_end_ms))
+    if seg.peak_ms:
+        pre_end_ms = seg.peak_ms[0]
+        if pre_end_ms > seg.start_ms:
+            static_ranges.append((seg.start_ms, pre_end_ms))
 
-        post_start_ms = seg.peak_timestamps[-1]
-        if seg.end_timestamp > post_start_ms:
-            static_ranges.append((post_start_ms, seg.end_timestamp))
+        post_start_ms = seg.peak_ms[-1]
+        if seg.end_ms > post_start_ms:
+            static_ranges.append((post_start_ms, seg.end_ms))
     else:
-        static_ranges.append((seg.start_timestamp, seg.end_timestamp))
+        static_ranges.append((seg.start_ms, seg.end_ms))
 
     return seg, static_ranges
 

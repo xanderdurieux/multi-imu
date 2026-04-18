@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -161,8 +162,12 @@ def _cv_evaluate(
 
         # clone() creates a fresh, unfitted copy with identical hyperparameters —
         # required so each fold starts from scratch and shares no state.
+        # Median imputation is fit on the training fold only to avoid leaking
+        # validation-fold statistics into the filled values; replaces the
+        # previous fillna(0) which conflated 'missing' with 'zero'.
         pipe = Pipeline(
             [
+                ("imputer", SimpleImputer(strategy="median")),
                 ("scaler", StandardScaler()),
                 ("clf", clone(model)),
             ]
@@ -318,7 +323,9 @@ def run_evaluation(
     metrics_rows: list[dict] = []
 
     for fs_name, feat_cols in active_sets.items():
-        X = df[feat_cols].fillna(0).values
+        # NaN handling happens inside the CV pipeline (SimpleImputer) so that
+        # imputation statistics are fit on the training fold only.
+        X = df[feat_cols].to_numpy(dtype=float)
 
         # Use available n_splits (capped at n_groups)
         n_groups = len(np.unique(groups_all)) if groups_all is not None else len(y_all)
@@ -345,7 +352,12 @@ def run_evaluation(
                     class_names=classes,
                 )
             except Exception as exc:
-                log.warning("Evaluation failed for %s: %s", key, exc)
+                log.warning(
+                    "Evaluation failed for %s (%s): %s",
+                    key,
+                    exc.__class__.__name__,
+                    exc,
+                )
                 continue
 
             all_results[key] = result

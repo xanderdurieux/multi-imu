@@ -17,11 +17,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from common.paths import read_csv, sensor_csv
+from common.signals import vector_norm
 from visualization._utils import (
     filter_valid_plot_xy,
     prepare_sensor_df,
     save_figure,
-    strict_vector_norm,
     timestamps_to_relative_seconds,
 )
 
@@ -63,15 +63,15 @@ def plot_sensor_data(
     if norm_only:
         fig, ax = plt.subplots(figsize=(12, 3))
         if acc_cols:
-            acc_norm = strict_vector_norm(df, acc_cols)
+            acc_norm = vector_norm(df, acc_cols)
             x, y = filter_valid_plot_xy(ts, acc_norm)
             ax.plot(x, y, lw=0.8, label="|acc|")
         if not acc_only and gyro_cols:
-            gyro_norm = strict_vector_norm(df, gyro_cols)
+            gyro_norm = vector_norm(df, gyro_cols)
             x, y = filter_valid_plot_xy(ts, gyro_norm)
             ax.plot(x, y, lw=0.8, label="|gyro|")
         if not acc_only and has_mag:
-            mag_norm = strict_vector_norm(df, mag_cols)
+            mag_norm = vector_norm(df, mag_cols)
             x, y = filter_valid_plot_xy(ts, mag_norm)
             ax.plot(x, y, lw=0.8, label="|mag|")
         ax.set_xlabel("Time (s)")

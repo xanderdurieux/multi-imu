@@ -40,15 +40,15 @@ _SPORSA_SENSOR = "sporsa"
 def _build_opening_sequence(
     seg: Any,  # CalibrationSegment
 ) -> OpeningSequence:
-    peak_ts = list(seg.peak_timestamps) if seg.peak_timestamps else []
-    pre_end_ms = peak_ts[0] if peak_ts else seg.end_timestamp
-    post_start_ms = peak_ts[-1] if peak_ts else seg.start_timestamp
+    peak_ts = list(seg.peak_ms) if seg.peak_ms else []
+    pre_end_ms = peak_ts[0] if peak_ts else seg.end_ms
+    post_start_ms = peak_ts[-1] if peak_ts else seg.start_ms
     return OpeningSequence(
         tap_times_ms=peak_ts,
-        pre_static_start_ms=seg.start_timestamp,
+        pre_static_start_ms=seg.start_ms,
         pre_static_end_ms=pre_end_ms,
         post_static_start_ms=post_start_ms,
-        post_static_end_ms=seg.end_timestamp,
+        post_static_end_ms=seg.end_ms,
         n_taps=len(peak_ts),
     )
 
@@ -291,7 +291,7 @@ def _cal_sensor(
         # Arduino: find first stable post-mount window after the opening routine
         post_mount_window = _find_first_stable_window(
             df,
-            after_ms=opening_seg.end_timestamp,
+            after_ms=opening_seg.end_ms,
             min_duration_ms=3000.0,
             threshold_ms2=1.5,
         )

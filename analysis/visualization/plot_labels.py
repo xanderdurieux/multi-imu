@@ -39,13 +39,13 @@ from common.paths import (
     sections_root,
 )
 from labels.parser import LabelRow, load_labels
+from common.signals import vector_norm
 from visualization._utils import (
     ACC_COLS,
     GYRO_COLS,
     SENSOR_COLORS,
     filter_valid_plot_xy,
     save_figure,
-    strict_vector_norm,
 )
 
 log = logging.getLogger(__name__)
@@ -167,12 +167,12 @@ def plot_labels_sensor(
         gyro_cols = [c for c in GYRO_COLS if c in df.columns]
 
         if acc_cols:
-            acc_norm = strict_vector_norm(df, acc_cols)
+            acc_norm = vector_norm(df, acc_cols)
             x, y = filter_valid_plot_xy(ts_s, acc_norm)
             axes[0].plot(x, y, lw=0.7, color=sc, label=sensor_name)
 
         if gyro_cols:
-            gyro_norm = strict_vector_norm(df, gyro_cols)
+            gyro_norm = vector_norm(df, gyro_cols)
             x, y = filter_valid_plot_xy(ts_s, gyro_norm)
             axes[1].plot(x, y, lw=0.7, color=sc, label=sensor_name)
 

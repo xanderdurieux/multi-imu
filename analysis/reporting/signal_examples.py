@@ -27,29 +27,18 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, sections_root
+from visualization._utils import (
+    AXIS_COLORS as _AXIS_COLORS,
+    NORM_COLOR as _NORM_COLOR,
+    SENSOR_COLORS,
+    label_color as _label_color,
+)
 
 log = logging.getLogger(__name__)
 
 _DPI = 200
-
-_BIKE_COLOR = "#1f77b4"
-_RIDER_COLOR = "#ff7f0e"
-_AXIS_COLORS = {"x": "#e41a1c", "y": "#4daf4a", "z": "#377eb8"}
-_NORM_COLOR = "black"
-
-_LABEL_PALETTE = [
-    "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
-    "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
-    "#469990", "#dcbeff", "#9A6324", "#fffac8", "#800000",
-    "#aaffc3", "#808000",
-]
-
-
-def _label_color(label: str, label_list: list[str]) -> str:
-    try:
-        return _LABEL_PALETTE[label_list.index(label) % len(_LABEL_PALETTE)]
-    except ValueError:
-        return "#90A4AE"
+_BIKE_COLOR = SENSOR_COLORS["sporsa"]
+_RIDER_COLOR = SENSOR_COLORS["arduino"]
 
 
 # ---------------------------------------------------------------------------
@@ -87,16 +76,6 @@ def find_representative_windows(
 # Signal loading
 # ---------------------------------------------------------------------------
 
-def _safe_read(path: Path) -> Optional[pd.DataFrame]:
-    if not path.exists():
-        return None
-    try:
-        return read_csv(path)
-    except Exception as exc:
-        log.warning("Could not read %s: %s", path, exc)
-        return None
-
-
 def load_section_signals(section_id: str) -> dict[str, pd.DataFrame]:
     """Load all relevant signal DataFrames for a section.
 
@@ -109,8 +88,7 @@ def load_section_signals(section_id: str) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
 
     def _load(key: str, path: Path) -> None:
-        df = _safe_read(path)
-        out[key] = df if df is not None else pd.DataFrame()
+        out[key] = read_csv(path) if path.exists() else pd.DataFrame()
 
     _load("bike_cal",         sec_dir / "calibrated" / "sporsa.csv")
     _load("rider_cal",        sec_dir / "calibrated" / "arduino.csv")

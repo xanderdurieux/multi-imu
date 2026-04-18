@@ -7,6 +7,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from common.signals import add_vector_norms
+
 SIGNAL_MODE_ACC_NORM_DIFF = "acc_norm_diff"
 SIGNAL_MODE_GYRO_NORM_DIFF = "gyro_norm_diff"
 SIGNAL_MODE_ACC_GYRO_FUSED_DIFF = "acc_gyro_fused_diff"
@@ -31,24 +33,6 @@ def zscore(signal: np.ndarray) -> np.ndarray:
         return out
     out = (x - mu) / sigma
     out[~finite] = 0.0
-    return out
-
-
-def add_vector_norms(
-    df: pd.DataFrame,
-    *,
-    vector_axes: dict[str, Iterable[str]],
-) -> pd.DataFrame:
-    """Add vector norms for the provided sensor axes."""
-    out = df.copy()
-    for name, axes in vector_axes.items():
-        axes = list(axes)
-        if all(col in out.columns for col in axes):
-            arr = out[axes].to_numpy(dtype=float)
-            with np.errstate(invalid="ignore"):
-                out[f"{name}_norm"] = np.sqrt(np.nansum(arr * arr, axis=1))
-        else:
-            out[f"{name}_norm"] = np.nan
     return out
 
 
@@ -92,7 +76,7 @@ def build_activity_signal(
     differentiate: bool = True,
 ) -> tuple[np.ndarray, str]:
     """Build a 1D alignment signal and return it with the resolved mode label."""
-    base = add_vector_norms(df, vector_axes=vector_axes)
+    base = add_vector_norms(df, vector_axes)
     resolved_mode = resolve_signal_mode(
         signal_mode=signal_mode,
         use_acc=use_acc,

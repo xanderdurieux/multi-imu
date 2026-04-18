@@ -291,7 +291,8 @@ def plot_sync_example_result(
     opening_sp_on_abs: float | None = None   # for panel 2 shared axis
     opening_ar_on_abs: float | None = None
     if cal_block:
-        opening = cal_block.get("opening") or {}
+        anchors = cal_block.get("anchors")
+        opening = anchors[0] if isinstance(anchors, list) and anchors else {}
         t_tgt = opening.get("t_tgt_s")
         anchor_offset = opening.get("offset_s")
         if t_tgt is not None and anchor_offset is not None:

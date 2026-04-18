@@ -50,12 +50,6 @@ def _build_calibration_meta(
             if opening is not None and closing is not None and len(sorted_anchors) >= 2
             else 0.0
         ),
-        "opening": calibration_anchor_to_dict(opening, index=0) if opening is not None else None,
-        "closing": (
-            calibration_anchor_to_dict(closing, index=len(sorted_anchors) - 1)
-            if closing is not None and len(sorted_anchors) >= 2
-            else None
-        ),
         "anchors": [
             calibration_anchor_to_dict(anchor, index=i)
             for i, anchor in enumerate(sorted_anchors)
@@ -76,6 +70,7 @@ def estimate_multi_anchor(
     reference_sensor: str = "sporsa",
     target_sensor: str = "arduino",
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
+    anchor_search_seconds: float = 5.0,
 ) -> tuple[SyncModel, dict[str, Any]]:
     """Fit offset and drift from all matched calibration anchors.
 
@@ -111,7 +106,7 @@ def estimate_multi_anchor(
         offset_seconds=offset_at_origin,
         drift_seconds_per_second=drift,
         sample_rate_hz=sample_rate_hz,
-        max_lag_seconds=5.0,
+        max_lag_seconds=float(anchor_search_seconds + 1.0),
     )
     meta: dict[str, Any] = {
         "sync_method": "multi_anchor",

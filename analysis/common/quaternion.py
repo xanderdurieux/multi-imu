@@ -16,9 +16,12 @@ orientation estimate used everywhere else.
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable, Tuple
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 def quat_identity() -> np.ndarray:
@@ -27,10 +30,16 @@ def quat_identity() -> np.ndarray:
 
 
 def quat_normalize(q: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """Return ``q`` normalized to unit length."""
+    """Return ``q`` normalized to unit length.
+
+    Falls back to identity (and logs at DEBUG) when the input norm is below
+    ``eps`` — this happens with underflow in orientation filter loops and
+    is worth surfacing when diagnosing divergence.
+    """
     q = np.asarray(q, dtype=float)
     n = np.linalg.norm(q)
     if n < eps:
+        log.debug("quat_normalize: degenerate quaternion (|q|=%.3e); resetting to identity.", n)
         return quat_identity()
     return q / n
 

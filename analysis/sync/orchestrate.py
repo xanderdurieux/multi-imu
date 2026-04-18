@@ -71,8 +71,6 @@ class SyncMethodQuality:
     drift_ppm: Optional[float]
     drift_source: Optional[str]
     calibration_span_s: Optional[float]
-    calibration_open_score: Optional[float]
-    calibration_close_score: Optional[float]
     calibration_n_windows: Optional[int]
     calibration_fit_r2: Optional[float]
     calibration_anchors: Optional[list[dict[str, Any]]]
@@ -142,8 +140,6 @@ def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
     empty_calibration: dict[str, Any] = {
         "n_anchors": 0,
         "anchor_span_s": 0.0,
-        "opening": None,
-        "closing": None,
         "anchors": [],
     }
     empty: dict[str, Any] = {
@@ -157,7 +153,7 @@ def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(info, dict):
             continue
         cal = info.get("calibration")
-        if isinstance(cal, dict) and (cal.get("anchors") or cal.get("opening")):
+        if isinstance(cal, dict) and cal.get("anchors"):
             return {
                 "target_time_origin_seconds": info.get("target_time_origin_seconds"),
                 "calibration": cal,
@@ -182,8 +178,6 @@ def _shared_fallback_from_qualities(
     empty_calibration: dict[str, Any] = {
         "n_anchors": 0,
         "anchor_span_s": 0.0,
-        "opening": None,
-        "closing": None,
         "anchors": [],
     }
     for m in SYNC_METHODS:
@@ -198,9 +192,6 @@ def _shared_fallback_from_qualities(
         }
         if q.calibration_fit_r2 is not None:
             cal["fit_r2"] = q.calibration_fit_r2
-        if anchors:
-            cal["opening"] = anchors[0]
-            cal["closing"] = anchors[-1] if len(anchors) > 1 else None
         return {
             "target_time_origin_seconds": q.target_time_origin_seconds,
             "calibration": cal,
@@ -223,8 +214,7 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
             method=method, stage=stage, available=False,
             offset_seconds=None,
             corr_offset_and_drift=None, drift_ppm=None, drift_source=None,
-            calibration_span_s=None, calibration_open_score=None,
-            calibration_close_score=None, calibration_n_windows=None,
+            calibration_span_s=None, calibration_n_windows=None,
             calibration_fit_r2=None, calibration_anchors=None,
             target_time_origin_seconds=None,
             drift_seconds_per_second=None,
@@ -245,8 +235,6 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
         drift_ppm=(drift * 1e6) if drift is not None else None,
         drift_source=info.get("drift_source"),
         calibration_span_s=cal.get("anchor_span_s") if cal else None,
-        calibration_open_score=(cal.get("opening") or {}).get("score") if cal else None,
-        calibration_close_score=(cal.get("closing") or {}).get("score") if cal else None,
         calibration_n_windows=cal.get("n_anchors") if cal else None,
         calibration_fit_r2=cal.get("fit_r2") if cal else None,
         calibration_anchors=cal.get("anchors") if cal else None,
@@ -263,6 +251,18 @@ def extract_quality(method: str, info: Optional[dict]) -> SyncMethodQuality:
 _MAX_DRIFT_PPM = 2_000.0
 
 
+def _boundary_anchor_scores(anchors: Optional[list[dict[str, Any]]]) -> tuple[float | None, float | None]:
+    if not anchors:
+        return None, None
+
+    opening = anchors[0] if isinstance(anchors[0], dict) else None
+    closing = anchors[-1] if isinstance(anchors[-1], dict) else None
+
+    open_score = opening.get("score") if opening else None
+    close_score = closing.get("score") if closing else None
+    return open_score, close_score
+
+
 def _multi_anchor_passes(
     q: SyncMethodQuality,
     *,
@@ -275,9 +275,10 @@ def _multi_anchor_passes(
         return False
     if q.calibration_span_s is None or q.calibration_span_s < min_cal_span_s:
         return False
-    if (q.calibration_open_score or 0.0) < min_cal_score:
+    open_score, close_score = _boundary_anchor_scores(q.calibration_anchors)
+    if (open_score or 0.0) < min_cal_score:
         return False
-    if (q.calibration_close_score or 0.0) < min_cal_score:
+    if (close_score or 0.0) < min_cal_score:
         return False
     if q.corr_offset_and_drift is None or q.corr_offset_and_drift < min_corr:
         return False

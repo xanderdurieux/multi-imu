@@ -7,16 +7,18 @@ from typing import Any
 
 import numpy as np
 
+from common.signals import add_imu_norms
+
 from .model import SyncModel, apply_sync_model
-from .stream_io import add_vector_norms, resample_stream
+from .stream_io import resample_stream
 
 
 def acc_norm_correlation(
     ref_df, tgt_df, *, sample_rate_hz: float
 ) -> float | None:
     """Pearson r of acc_norm over the overlapping time region."""
-    ref_r = add_vector_norms(resample_stream(ref_df, sample_rate_hz))
-    tgt_r = add_vector_norms(resample_stream(tgt_df, sample_rate_hz))
+    ref_r = add_imu_norms(resample_stream(ref_df, sample_rate_hz))
+    tgt_r = add_imu_norms(resample_stream(tgt_df, sample_rate_hz))
 
     ref_ts = ref_r["timestamp"].to_numpy(dtype=float)
     tgt_ts = tgt_r["timestamp"].to_numpy(dtype=float)

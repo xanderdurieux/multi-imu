@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, peak_widths
 
+from common.signals import norm_xyz
 from events.config import EventConfig
 
 
@@ -244,7 +245,7 @@ def detect_swerves(
         gy = _col(df, "gy")
         gz = _col(df, "gz")
         if gx is not None and gy is not None and gz is not None:
-            signal = np.sqrt(gx**2 + gy**2 + gz**2)
+            signal = norm_xyz(gx, gy, gz)
         else:
             return candidates
 
@@ -321,7 +322,7 @@ def detect_falls(
         ay = _col(df, "ay")
         az = _col(df, "az")
         if ax is not None and ay is not None and az is not None:
-            acc = np.sqrt(ax**2 + ay**2 + az**2)
+            acc = norm_xyz(ax, ay, az)
         else:
             acc = _col(df, "acc_hf", "acc_deviation")
             if acc is not None:
@@ -337,7 +338,7 @@ def detect_falls(
         gy = _col(df, "gy")
         gz = _col(df, "gz")
         if gx is not None and gy is not None and gz is not None:
-            gyro = np.sqrt(gx**2 + gy**2 + gz**2)
+            gyro = norm_xyz(gx, gy, gz)
 
     acc_abs = np.abs(np.nan_to_num(acc, nan=0.0))
 

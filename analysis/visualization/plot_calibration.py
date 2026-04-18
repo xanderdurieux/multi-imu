@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import read_csv, resolve_data_dir
+from common.signals import vector_norm
 from visualization._utils import (
     ACC_COLS,
     GYRO_COLS,
@@ -35,7 +36,6 @@ from visualization._utils import (
     filter_valid_plot_xy,
     load_json,
     save_figure,
-    strict_vector_norm,
     timestamps_to_relative_seconds,
 )
 
@@ -98,10 +98,10 @@ def plot_calibration_raw_vs_calibrated(
         color = SENSOR_COLORS.get(sensor, "steelblue")
 
         # --- Norm comparison ---
-        acc_raw = strict_vector_norm(df_raw, [c for c in ("ax", "ay", "az") if c in df_raw.columns])
-        gyro_raw = strict_vector_norm(df_raw, [c for c in ("gx", "gy", "gz") if c in df_raw.columns])
-        acc_cal = strict_vector_norm(df_cal, [c for c in ("ax", "ay", "az") if c in df_cal.columns])
-        gyro_cal = strict_vector_norm(df_cal, [c for c in ("gx", "gy", "gz") if c in df_cal.columns])
+        acc_raw = vector_norm(df_raw, [c for c in ("ax", "ay", "az") if c in df_raw.columns])
+        gyro_raw = vector_norm(df_raw, [c for c in ("gx", "gy", "gz") if c in df_raw.columns])
+        acc_cal = vector_norm(df_cal, [c for c in ("ax", "ay", "az") if c in df_cal.columns])
+        gyro_cal = vector_norm(df_cal, [c for c in ("gx", "gy", "gz") if c in df_cal.columns])
 
         fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=False)
         for ax_obj, ts, vals, label, alpha in (
@@ -394,7 +394,7 @@ def plot_calibration_protocol(
         acc_cols = [c for c in ACC_COLS if c in df.columns]
         if not acc_cols:
             continue
-        acc_norm = strict_vector_norm(df, acc_cols)
+        acc_norm = vector_norm(df, acc_cols)
 
         fig, ax = plt.subplots(figsize=(15, 4))
         color = SENSOR_COLORS.get(sensor, "steelblue")

@@ -1,4 +1,4 @@
-"""Shared path utilities for locating data directories."""
+"""Shared utilities for paths, signal helpers, and NaN-safe statistics."""
 
 from .paths import (
     CSV_COLUMNS,

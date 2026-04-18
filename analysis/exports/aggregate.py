@@ -107,7 +107,7 @@ def aggregate_calibration_params(
 
         try:
             data = json.loads(cal_json.read_text(encoding="utf-8"))
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             log.warning("Failed to read %s: %s", project_relative_path(cal_json), exc)
             continue
 
@@ -176,20 +176,25 @@ def aggregate_calibration_params(
 
 
 def _unpack3(value, default: float) -> tuple[float, float, float]:
-    """Unpack a 3-element list, filling with default on failure."""
+    """Unpack a 3-element list, filling with default on failure.
+
+    Applied at the JSON-parsing boundary where the shape of ``value`` is
+    not guaranteed; narrow to type/value errors so programming mistakes
+    (e.g. missing attributes) are not silenced.
+    """
     try:
         lst = list(value)
         return float(lst[0]), float(lst[1]), float(lst[2])
-    except Exception:
+    except (TypeError, ValueError, IndexError):
         return default, default, default
 
 
 def _as_float(value) -> float | None:
+    if value is None:
+        return None
     try:
-        if value is None:
-            return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -271,7 +276,7 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
     if all_methods_path.exists():
         try:
             data = json.loads(all_methods_path.read_text(encoding="utf-8"))
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             log.warning("Failed to read %s: %s", project_relative_path(all_methods_path), exc)
             data = {}
 
@@ -324,7 +329,7 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
         try:
             raw_info = json.loads(sync_info_path.read_text(encoding="utf-8"))
             info = flatten_sync_info_dict(raw_info) or {}
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             log.warning("Failed to read %s: %s", project_relative_path(sync_info_path), exc)
             info = {}
 

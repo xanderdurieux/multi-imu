@@ -33,12 +33,12 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, sections_root
+from visualization._utils import SENSOR_COLORS as _SENSOR_COLORS
 
 log = logging.getLogger(__name__)
 
 _DPI = 200
 
-_SENSOR_COLORS = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 _SENSOR_LABELS = {"sporsa": "Bike (SPORSA)", "arduino": "Rider (Arduino)"}
 
 _QUALITY_COLORS = {

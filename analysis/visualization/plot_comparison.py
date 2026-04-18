@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from common.paths import resolve_data_dir
+from common.signals import vector_norm
 from visualization._utils import (
     SENSOR_COLORS,
     SENSORS,
@@ -25,7 +26,6 @@ from visualization._utils import (
     relative_seconds,
     save_figure,
     shared_t0_ms,
-    strict_vector_norm,
 )
 
 log = logging.getLogger(__name__)
@@ -72,15 +72,15 @@ def plot_comparison_data(
         mag_cols = [c for c in ["mx", "my", "mz"] if c in df.columns]
 
         if acc_cols:
-            acc_norm = strict_vector_norm(df, acc_cols)
+            acc_norm = vector_norm(df, acc_cols)
             x, y = filter_valid_plot_xy(ts_s, acc_norm)
             axes[0].plot(x, y, lw=0.8, color=color, label=f"{sensor} |acc|", alpha=0.8)
         if gyro_cols:
-            gyro_norm = strict_vector_norm(df, gyro_cols)
+            gyro_norm = vector_norm(df, gyro_cols)
             x, y = filter_valid_plot_xy(ts_s, gyro_norm)
             axes[1].plot(x, y, lw=0.8, color=color, label=f"{sensor} |gyro|", alpha=0.8)
         if has_mag and len(mag_cols) == 3:
-            mag_norm = strict_vector_norm(df, mag_cols)
+            mag_norm = vector_norm(df, mag_cols)
             x, y = filter_valid_plot_xy(ts_s, mag_norm)
             axes[2].plot(x, y, lw=0.8, color=color, label=f"{sensor} |mag|", alpha=0.8)
 

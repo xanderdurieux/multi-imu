@@ -10,6 +10,7 @@ import pandas as pd
 from scipy.signal import butter, filtfilt
 
 from common.paths import read_csv
+from common.signals import add_imu_norms
 
 VECTOR_AXES: dict[str, list[str]] = {
     "acc": ["ax", "ay", "az"],
@@ -25,19 +26,6 @@ def load_stream(csv_path: Path | str) -> pd.DataFrame:
     df = read_csv(Path(csv_path)).copy()
     df = df.dropna(subset=["timestamp"])
     return df.sort_values("timestamp").reset_index(drop=True)
-
-
-def add_vector_norms(df: pd.DataFrame) -> pd.DataFrame:
-    """Add |acc|, |gyro|, |mag| magnitude columns."""
-    out = df.copy()
-    for name, axes in VECTOR_AXES.items():
-        if all(c in out.columns for c in axes):
-            arr = out[axes].to_numpy(dtype=float)
-            with np.errstate(invalid="ignore"):
-                out[f"{name}_norm"] = np.sqrt(np.nansum(arr * arr, axis=1))
-        else:
-            out[f"{name}_norm"] = np.nan
-    return out
 
 
 def infer_numeric_columns(
@@ -168,7 +156,7 @@ def remove_dropouts(
     df: pd.DataFrame, *, epsilon_fraction: float = 0.1
 ) -> pd.DataFrame:
     """Remove rows where acc_norm is near-zero (BLE dropout packets)."""
-    out = add_vector_norms(df)
+    out = add_imu_norms(df)
     g_approx = float(out["acc_norm"].median())
     if g_approx <= 0:
         return df

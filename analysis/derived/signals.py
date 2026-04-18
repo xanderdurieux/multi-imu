@@ -12,48 +12,13 @@ import logging
 
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt
+
+from common.signals import butter_lowpass, norm_xyz
 
 log = logging.getLogger(__name__)
 
 _GRAVITY = 9.81
-_MIN_SAMPLES_BUTTER = 3 * (4 + 1)  # 3 * (order + 1) for 4th-order filter
 _QUAT_COLS = ("qw", "qx", "qy", "qz")
-
-
-def _butter_lowpass(data: np.ndarray, cutoff_hz: float, sample_rate_hz: float, order: int = 4) -> np.ndarray:
-    """Apply a zero-phase Butterworth lowpass filter while preserving NaN gaps."""
-    if len(data) <= _MIN_SAMPLES_BUTTER:
-        log.debug(
-            "Too few samples (%d) for Butterworth filter (need > %d); returning original signal.",
-            len(data),
-            _MIN_SAMPLES_BUTTER,
-        )
-        return data.copy()
-    finite = np.isfinite(data)
-    if not finite.any():
-        return data.copy()
-    nyq = 0.5 * sample_rate_hz
-    normal_cutoff = cutoff_hz / nyq
-    # Clamp to avoid ValueError from scipy when cutoff >= nyquist.
-    normal_cutoff = min(normal_cutoff, 0.9999)
-    b, a = butter(order, normal_cutoff, btype="low", analog=False)
-
-    out = data.copy()
-
-    # Filter each contiguous finite segment independently. This keeps missing
-    # spans as NaN without allowing them to contaminate the entire trace.
-    finite_i = finite.astype(np.int8)
-    starts = np.flatnonzero(np.diff(np.r_[0, finite_i]) == 1)
-    stops = np.flatnonzero(np.diff(np.r_[finite_i, 0]) == -1) + 1
-
-    for start, stop in zip(starts, stops, strict=False):
-        segment = data[start:stop]
-        if len(segment) <= _MIN_SAMPLES_BUTTER:
-            continue
-        out[start:stop] = filtfilt(b, a, segment)
-
-    return out
 
 
 def _rolling_rms(series: pd.Series, window: int) -> pd.Series:
@@ -125,7 +90,7 @@ def _compute_linear_acc(
     # Remove gravity (world +Z = 9.81 m/s²).
     az_w -= _GRAVITY
 
-    norm = np.sqrt(ax_w**2 + ay_w**2 + az_w**2)
+    norm = norm_xyz(ax_w, ay_w, az_w)
     return ax_w, ay_w, az_w, norm
 
 
@@ -183,8 +148,8 @@ def compute_sensor_signals(
     gz = df["gz"].to_numpy(dtype=float)
 
     # Norms.
-    acc_norm = np.sqrt(ax**2 + ay**2 + az**2)
-    gyro_norm = np.sqrt(gx**2 + gy**2 + gz**2)
+    acc_norm = norm_xyz(ax, ay, az)
+    gyro_norm = norm_xyz(gx, gy, gz)
     out["acc_norm"] = acc_norm
     out["gyro_norm"] = gyro_norm
 
@@ -195,17 +160,17 @@ def compute_sensor_signals(
         ay_w = df["ay_world"].to_numpy(dtype=float)
         az_w = df["az_world"].to_numpy(dtype=float)
         out["acc_vertical"] = az_w
-        out["acc_horizontal"] = np.sqrt(ax_w**2 + ay_w**2)
+        out["acc_horizontal"] = np.hypot(ax_w, ay_w)
     else:
         out["acc_vertical"] = az
-        out["acc_horizontal"] = np.sqrt(ax**2 + ay**2)
+        out["acc_horizontal"] = np.hypot(ax, ay)
 
     # Deviation from gravity.
     acc_deviation = np.abs(acc_norm - _GRAVITY)
     out["acc_deviation"] = acc_deviation
 
     # Lowpass / highpass splits.
-    acc_lf = _butter_lowpass(acc_norm, cutoff_hz=2.0, sample_rate_hz=sample_rate_hz)
+    acc_lf = butter_lowpass(acc_norm, cutoff_hz=2.0, sample_rate_hz=sample_rate_hz)
     out["acc_lf"] = acc_lf
     out["acc_hf"] = acc_norm - acc_lf
 
@@ -213,10 +178,10 @@ def compute_sensor_signals(
     dax = np.gradient(ax) * sample_rate_hz
     day = np.gradient(ay) * sample_rate_hz
     daz = np.gradient(az) * sample_rate_hz
-    out["jerk_norm"] = np.sqrt(dax**2 + day**2 + daz**2)
+    out["jerk_norm"] = norm_xyz(dax, day, daz)
 
     # Gyro lowpass / highpass.
-    gyro_lf = _butter_lowpass(gyro_norm, cutoff_hz=1.0, sample_rate_hz=sample_rate_hz)
+    gyro_lf = butter_lowpass(gyro_norm, cutoff_hz=1.0, sample_rate_hz=sample_rate_hz)
     out["gyro_lf"] = gyro_lf
     out["gyro_hf"] = gyro_norm - gyro_lf
 

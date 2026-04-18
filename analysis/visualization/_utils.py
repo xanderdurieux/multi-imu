@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -10,7 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path, read_csv
+from common.paths import project_relative_path, read_csv, read_json_file
+from common.signals import vector_norm
 
 log = logging.getLogger(__name__)
 
@@ -22,9 +22,34 @@ SENSORS: tuple[str, ...] = ("sporsa", "arduino")
 
 SENSOR_COLORS: dict[str, str] = {"sporsa": "#1f77b4", "arduino": "#ff7f0e"}
 
+# Qualitative palette reused by reporting/visualization plots needing many
+# distinguishable colors (e.g. label strips, scenario legends).
+QUALITATIVE_PALETTE: tuple[str, ...] = (
+    "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+    "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
+    "#469990", "#dcbeff", "#9A6324", "#fffac8", "#800000",
+    "#aaffc3", "#808000",
+)
+UNKNOWN_LABEL_COLOR = "#90A4AE"
+
+# Per-axis colors used by sensor plots.
+AXIS_COLORS: dict[str, str] = {"x": "#e41a1c", "y": "#4daf4a", "z": "#377eb8"}
+NORM_COLOR: str = "black"
+
 ACC_COLS: tuple[str, ...] = ("ax", "ay", "az")
 GYRO_COLS: tuple[str, ...] = ("gx", "gy", "gz")
 MAG_COLS: tuple[str, ...] = ("mx", "my", "mz")
+
+
+def label_color(label: str, label_list: list[str]) -> str:
+    """Return a stable color for ``label`` given its position in ``label_list``.
+
+    Unknown labels fall back to ``UNKNOWN_LABEL_COLOR``.
+    """
+    try:
+        return QUALITATIVE_PALETTE[label_list.index(label) % len(QUALITATIVE_PALETTE)]
+    except ValueError:
+        return UNKNOWN_LABEL_COLOR
 
 
 # ---------------------------------------------------------------------------
@@ -57,27 +82,12 @@ def filter_valid_plot_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.n
     return x[valid], y[valid]
 
 
-def strict_vector_norm(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
-    """Return row-wise vector norm while preserving NaN for incomplete rows."""
-    if not cols:
-        return np.array([], dtype=float)
-    missing = [col for col in cols if col not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns for vector norm: {missing}")
-
-    arr = np.column_stack([pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float) for col in cols])
-    out = np.full(arr.shape[0], np.nan, dtype=float)
-    valid = np.isfinite(arr).all(axis=1)
-    out[valid] = np.linalg.norm(arr[valid], axis=1)
-    return out
-
-
 def acc_norm(df: pd.DataFrame) -> np.ndarray | None:
     """Accelerometer magnitude — uses pre-computed ``acc_norm`` column when present."""
     if "acc_norm" in df.columns:
         return pd.to_numeric(df["acc_norm"], errors="coerce").to_numpy(dtype=float)
     cols = [c for c in ACC_COLS if c in df.columns]
-    return strict_vector_norm(df, cols) if cols else None
+    return vector_norm(df, cols) if cols else None
 
 
 def gyro_norm(df: pd.DataFrame) -> np.ndarray | None:
@@ -85,7 +95,7 @@ def gyro_norm(df: pd.DataFrame) -> np.ndarray | None:
     if "gyro_norm" in df.columns:
         return pd.to_numeric(df["gyro_norm"], errors="coerce").to_numpy(dtype=float)
     cols = [c for c in GYRO_COLS if c in df.columns]
-    return strict_vector_norm(df, cols) if cols else None
+    return vector_norm(df, cols) if cols else None
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +143,8 @@ def load_json(path: Path) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
+        return read_json_file(path)
+    except (OSError, ValueError) as exc:
         log.warning("Could not read %s: %s", path, exc)
         return None
 

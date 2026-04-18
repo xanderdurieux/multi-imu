@@ -161,7 +161,7 @@ Core fields from `SyncModel`: `reference_csv`, `target_csv`, `target_time_origin
 
 Always added by `pipeline._run_method`: `correlation` (`offset_only`, `offset_and_drift`, `signal`, `sample_rate_hz`).
 
-Method-specific keys include `sync_method`, `drift_source`, `signal_mode`, `calibration`, `adaptive`, `sda_score`, `windowed`, `drift_ppm_prior` as applicable.
+Method-specific keys include `sync_method`, `drift_source`, `signal_mode`, `calibration`, `adaptive`, `sda_score`, `windowed`, `drift_ppm_prior` as applicable. The calibration block stores the full `anchors` list plus summary values such as `n_anchors`, `anchor_span_s`, and optional `fit_r2`.
 
 ---
 
@@ -227,7 +227,6 @@ synchronize_from_calibration(
 |--------|-------------|
 | `VECTOR_AXES` | Default axis groups for acc/gyro/mag norms. |
 | `load_stream` | Read CSV, drop NaN timestamps, sort. |
-| `add_vector_norms` | Add `acc_norm`, `gyro_norm`, `mag_norm` when axes exist. |
 | `infer_numeric_columns` | Numeric columns except optional skip (used by resamplers). |
 | `resample_stream` | Uniform grid linear interpolation; optional column subset and time bounds. |
 | `resample_to_reference_timestamps` | Interpolate target onto reference timestamps (NaN outside hull). |
@@ -240,7 +239,6 @@ synchronize_from_calibration(
 |--------|-------------|
 | `SIGNAL_MODE_*`, `SIGNAL_MODES` | Named modes for differentiated norm signals (`acc_norm_diff`, etc.). |
 | `zscore` | Per-series z-score with finite mask. |
-| `add_vector_norms` | Like stream_io but takes `vector_axes` dict (reusable for non-standard CSVs). |
 | `resolve_signal_mode` | Map explicit `signal_mode` or legacy `use_acc` / `use_gyro` / `differentiate` flags. |
 | `build_activity_signal` | 1D signal array + resolved mode label from a `DataFrame` and axis map. |
 
@@ -329,10 +327,6 @@ Internal `_build_calibration_meta` / `_require_anchor_count` reduce duplication 
 - **`synchronize_from_calibration`** previously passed unsupported kwargs into `estimate_multi_anchor`; `anchor_search_seconds` and `sda_fallback_max_lag_s` are now threaded from `cal_search_s` and `coarse_max_lag_s`. Section-level sync therefore honours the splitter’s search window and SDA fallback lag.
 - **`print_comparison`** printed one correlation column per method in separate rows; it now prints a single **Corr offset+drift** row aligned with all methods.
 - **Unused** `build_activity_signal` wrapper in `activity.py` was removed (only `build_alignment_series` is used internally).
-
-### Duplication that is intentional (for now)
-
-- **`add_vector_norms`** exists in both `stream_io.py` (fixed `VECTOR_AXES`) and `signals.py` (parameterised axes). Consolidating would touch `quality.py` and `activity.py`; keeping both avoids churn while `signals` stays generic.
 
 ### Possible future simplifications
 
