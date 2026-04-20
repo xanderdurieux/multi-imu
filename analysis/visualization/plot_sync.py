@@ -866,7 +866,6 @@ def plot_sync_method_metrics(
 
     selection_suffix = f"selected: {_METHOD_LABELS.get(selected_method, selected_method)}" if selected_method else "no selected method"
     fig.suptitle(f"{recording_name} — sync method summary ({selection_suffix})", fontsize=12, y=0.985)
-    fig.tight_layout()
     return save_figure(fig, output_path, dpi=150)
 
 

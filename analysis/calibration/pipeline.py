@@ -12,8 +12,15 @@ import re
 
 import pandas as pd
 
-from common.paths import iter_sections_for_recording, project_relative_path, read_csv, write_csv
+from common.paths import (
+    iter_sections_for_recording,
+    project_relative_path,
+    read_csv,
+    recording_stage_dir,
+    write_csv,
+)
 from parser.calibration_segments import CalibrationSegment, load_calibration_segments_from_json
+from sync.model import apply_linear_time_transform
 from .core import (
     OpeningSequence,
     SensorIntrinsics,
@@ -37,12 +44,126 @@ _ARDUINO_SENSOR = "arduino"
 _SPORSA_SENSOR = "sporsa"
 
 
+def _load_arduino_sync_params(recording_name: str) -> dict[str, float] | None:
+    """Return the sync-model parameters used to map Arduino raw millis → synced ms.
+
+    Returns ``None`` when no ``sync_info.json`` is available yet (e.g. when
+    calibration is run before the sync stage has produced output).
+    """
+    sync_path = recording_stage_dir(recording_name, "synced") / "sync_info.json"
+    if not sync_path.exists():
+        return None
+    try:
+        data = json.loads(sync_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("Could not parse %s: %s", sync_path, exc)
+        return None
+    try:
+        return {
+            "offset_seconds": float(data["offset_seconds"]),
+            "drift_seconds_per_second": float(data["drift_seconds_per_second"]),
+            "target_origin_seconds": float(data["target_time_origin_seconds"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        log.warning("Incomplete sync model in %s: %s", sync_path, exc)
+        return None
+
+
+def _transform_segments_to_synced(
+    segs: list[CalibrationSegment],
+    sync_params: dict[str, float],
+) -> list[CalibrationSegment]:
+    """Map segment timestamps from raw Arduino millis to the synced frame.
+
+    Durations (``static_pre_ms``, ``static_post_ms``) are preserved on the
+    synced axis by adjusting them for the linear drift factor, so that
+    ``end_ms - static_post_ms`` continues to mark the genuine start of the
+    post-tap static flank.
+    """
+    if not segs:
+        return segs
+
+    import numpy as np
+
+    starts = np.array([s.start_ms for s in segs], dtype=float)
+    ends = np.array([s.end_ms for s in segs], dtype=float)
+    synced_starts = apply_linear_time_transform(starts, **sync_params)
+    synced_ends = apply_linear_time_transform(ends, **sync_params)
+    # Linear transform preserves durations up to the drift factor (1 + a).
+    drift_factor = 1.0 + float(sync_params["drift_seconds_per_second"])
+
+    out: list[CalibrationSegment] = []
+    for seg, s_ms, e_ms in zip(segs, synced_starts, synced_ends):
+        peaks: list[float] = []
+        if seg.peak_ms:
+            peak_arr = np.array(seg.peak_ms, dtype=float)
+            peaks = apply_linear_time_transform(peak_arr, **sync_params).tolist()
+        out.append(
+            CalibrationSegment(
+                start_ms=float(s_ms),
+                end_ms=float(e_ms),
+                peak_ms=peaks,
+                peak_strength=seg.peak_strength,
+                static_pre_ms=seg.static_pre_ms * drift_factor,
+                static_post_ms=seg.static_post_ms * drift_factor,
+            )
+        )
+    return out
+
+
+def _clip_segments_to_range(
+    segs: list[CalibrationSegment],
+    t_min: float,
+    t_max: float,
+) -> list[CalibrationSegment]:
+    """Clip each segment's boundaries and static-flank durations to ``[t_min, t_max]``.
+
+    Segments that end before ``t_min`` or start after ``t_max`` are dropped.
+    For a segment that straddles either boundary, the pre-/post-static
+    duration is shortened so ``start_ms + static_pre_ms`` and
+    ``end_ms - static_post_ms`` remain within the clipped span.  Tap peaks
+    outside the clipped range are removed.
+    """
+    out: list[CalibrationSegment] = []
+    for seg in segs:
+        if seg.end_ms < t_min or seg.start_ms > t_max:
+            continue
+
+        new_start = max(seg.start_ms, t_min)
+        new_end = min(seg.end_ms, t_max)
+        pre_cut = new_start - seg.start_ms
+        post_cut = seg.end_ms - new_end
+        new_static_pre = max(0.0, seg.static_pre_ms - pre_cut)
+        new_static_post = max(0.0, seg.static_post_ms - post_cut)
+
+        new_peaks = [p for p in seg.peak_ms if new_start <= p <= new_end]
+
+        out.append(
+            CalibrationSegment(
+                start_ms=new_start,
+                end_ms=new_end,
+                peak_ms=new_peaks,
+                peak_strength=seg.peak_strength,
+                static_pre_ms=new_static_pre,
+                static_post_ms=new_static_post,
+            )
+        )
+    return out
+
+
 def _build_opening_sequence(
     seg: Any,  # CalibrationSegment
 ) -> OpeningSequence:
+    """Build the protocol-level opening summary using the genuinely-static flanks.
+
+    The static flank boundaries come from ``static_pre_ms``/``static_post_ms``
+    (parser-side detection), not from the tap peak timestamps, because the
+    span between the last peak and the end of the segment can include tap
+    settling motion.
+    """
     peak_ts = list(seg.peak_ms) if seg.peak_ms else []
-    pre_end_ms = peak_ts[0] if peak_ts else seg.end_ms
-    post_start_ms = peak_ts[-1] if peak_ts else seg.start_ms
+    pre_end_ms = seg.start_ms + seg.static_pre_ms if seg.static_pre_ms > 0 else seg.start_ms
+    post_start_ms = seg.end_ms - seg.static_post_ms if seg.static_post_ms > 0 else seg.end_ms
     return OpeningSequence(
         tap_times_ms=peak_ts,
         pre_static_start_ms=seg.start_ms,
@@ -129,9 +250,9 @@ def calibrate_section(
     # Per-sensor calibration
     all_intrinsics: dict[str, SensorIntrinsics] = {}
     all_alignment: dict[str, SensorAlignment] = {}
+    all_opening: dict[str, OpeningSequence] = {}
     all_quality_tags: list[str] = []
     protocol_detected_any = False
-    opening_sequence: OpeningSequence | None = None
     fallback_used = False
 
     for sensor in _SENSORS:
@@ -166,8 +287,8 @@ def calibrate_section(
                 all_quality_tags=all_quality_tags,
                 recording_name=recording_name,
             )
-            if opening_seg is not None and opening_sequence is None:
-                opening_sequence = _build_opening_sequence(opening_seg)
+            if opening_seg is not None:
+                all_opening[sensor] = _build_opening_sequence(opening_seg)
                 protocol_detected_any = True
             elif not protocol_detected_any and all_intrinsics.get(sensor):
                 intrin = all_intrinsics[sensor]
@@ -213,7 +334,7 @@ def calibrate_section(
 
     section_cal = SectionCalibration(
         protocol_detected=protocol_detected_any,
-        opening_sequence=opening_sequence,
+        opening_sequence=all_opening,
         intrinsics=all_intrinsics,
         alignment=all_alignment,
         quality={"overall": overall, "tags": sorted(set(all_quality_tags))},
@@ -252,6 +373,29 @@ def _cal_sensor(
     except (FileNotFoundError, KeyError, ValueError) as exc:
         log.warning("%s/%s: could not load calibration segments (%s) — using fallback", section_name, sensor, exc)
         segs = []
+
+    # Arduino calibration segments are stored in raw Arduino millis (pre-sync);
+    # the section CSV uses synced timestamps.  Map the segments through the
+    # recording's sync model so the static ranges match the CSV timestamps.
+    if sensor == _ARDUINO_SENSOR and segs:
+        sync_params = _load_arduino_sync_params(recording_name)
+        if sync_params is None:
+            log.warning(
+                "%s/%s: no sync_info.json — Arduino calibration segments are in raw millis "
+                "and will not match the synced CSV timestamps; using fallback",
+                section_name, sensor,
+            )
+            all_quality_tags.append(f"sync_missing_{sensor}")
+            segs = []
+        else:
+            segs = _transform_segments_to_synced(segs, sync_params)
+
+    # Calibration segments are detected over the full recording; clip any that
+    # straddle the section's time span so downstream code only references
+    # samples that actually exist in the section CSV.
+    if segs:
+        ts = df["timestamp"].to_numpy(dtype=float)
+        segs = _clip_segments_to_range(segs, float(ts[0]), float(ts[-1]))
 
     opening_seg, static_ranges = detect_protocol_landmarks(segs)
 
@@ -310,8 +454,11 @@ def _cal_sensor(
                 section_name, sensor,
             )
     else:
-        # Sporsa (no mount change): use opening static window for alignment
-        alignment_window = static_ranges[0]
+        # Sporsa (no mount change): use the post-tap static flank, which is
+        # the window immediately preceding the activity — symmetrical in
+        # intent with Arduino's post-mount window.  Falls back to the
+        # pre-tap window when only one static flank was detected.
+        alignment_window = static_ranges[-1]
 
     alignment = estimate_sensor_alignment(df, alignment_window, full_df=df)
     all_alignment[sensor] = alignment

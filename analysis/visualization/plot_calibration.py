@@ -1,13 +1,18 @@
 """Calibration-stage visualizations (schema v2 — protocol-aware).
 
+Only norm-based and parameter-space figures are exported.  Per-axis body- or
+world-frame time series are intentionally omitted because the calibration
+stage applies a single static body-to-world rotation and does not track
+orientation over time; axis-resolved values after the alignment window are
+not physically interpretable without the orientation stage.  See the
+docstring of :mod:`calibration.core` for details.
+
 Functions
 ---------
 plot_calibration_raw_vs_calibrated
-    Individual-axis and norm comparison (raw → calibrated) per sensor.
+    Norm comparison (|acc|, |gyro|) raw → calibrated per sensor.
 plot_calibration_parameters
     Gyro bias bars, alignment rotation matrix, gravity vector per sensor.
-plot_calibration_world_frame
-    World-frame acceleration and gyroscope signals with reference lines.
 plot_calibration_protocol
     Protocol-detection overview: opening sequence, mount transition, alignment window.
 plot_calibration_stage
@@ -30,7 +35,6 @@ from common.paths import read_csv, resolve_data_dir
 from common.signals import vector_norm
 from visualization._utils import (
     ACC_COLS,
-    GYRO_COLS,
     SENSOR_COLORS,
     SENSORS,
     filter_valid_plot_xy,
@@ -70,12 +74,14 @@ def plot_calibration_raw_vs_calibrated(
     *,
     sensors: list[str] | None = None,
 ) -> list[Path]:
-    """Per-sensor 4-panel plot: |acc|, |gyro|, and individual axes before vs after calibration.
+    """Per-sensor norm comparison (|acc|, |gyro|) before vs after calibration.
 
-    Outputs
-    -------
+    Per-axis body-frame signals are intentionally omitted — see the module
+    docstring.
+
+    Output
+    ------
     ``calibrated/<sensor>_calibration_comparison.png``
-    ``calibrated/<sensor>_axes_comparison.png``
     """
     selected = sensors or list(SENSORS)
     out_paths: list[Path] = []
@@ -95,9 +101,7 @@ def plot_calibration_raw_vs_calibrated(
 
         ts_raw = timestamps_to_relative_seconds(df_raw["timestamp"])
         ts_cal = timestamps_to_relative_seconds(df_cal["timestamp"])
-        color = SENSOR_COLORS.get(sensor, "steelblue")
 
-        # --- Norm comparison ---
         acc_raw = vector_norm(df_raw, [c for c in ("ax", "ay", "az") if c in df_raw.columns])
         gyro_raw = vector_norm(df_raw, [c for c in ("gx", "gy", "gz") if c in df_raw.columns])
         acc_cal = vector_norm(df_cal, [c for c in ("ax", "ay", "az") if c in df_cal.columns])
@@ -124,46 +128,6 @@ def plot_calibration_raw_vs_calibrated(
         fig.tight_layout()
         out_a = cal_dir / f"{sensor}_calibration_comparison.png"
         out_paths.append(save_figure(fig, out_a))
-
-        # --- Per-axis comparison ---
-        acc_axes = [c for c in ("ax", "ay", "az") if c in df_raw.columns and c in df_cal.columns]
-        gyro_axes = [c for c in ("gx", "gy", "gz") if c in df_raw.columns and c in df_cal.columns]
-        n_rows = max(len(acc_axes), len(gyro_axes))
-        if n_rows == 0:
-            continue
-
-        fig, axes_grid = plt.subplots(n_rows, 2, figsize=(16, 3 * n_rows), sharex=False, squeeze=False)
-        units = {"ax": "m/s²", "ay": "m/s²", "az": "m/s²", "gx": "deg/s", "gy": "deg/s", "gz": "deg/s"}
-        axis_colors = {"ax": "#d62728", "ay": "#2ca02c", "az": "#1f77b4",
-                       "gx": "#9467bd", "gy": "#8c564b", "gz": "#e377c2"}
-
-        for col_idx, cols in enumerate((acc_axes, gyro_axes)):
-            for row_idx, col in enumerate(cols):
-                ax_obj = axes_grid[row_idx][col_idx]
-                c = axis_colors.get(col, "gray")
-                raw_vals = pd.to_numeric(df_raw[col], errors="coerce").to_numpy(dtype=float)
-                cal_vals = pd.to_numeric(df_cal[col], errors="coerce").to_numpy(dtype=float)
-                xr, yr = filter_valid_plot_xy(ts_raw, raw_vals)
-                xc, yc = filter_valid_plot_xy(ts_cal, cal_vals)
-                ax_obj.plot(xr, yr, lw=0.7, alpha=_RAW_ALPHA, color=c, label="raw")
-                ax_obj.plot(xc, yc, lw=0.9, alpha=_CAL_ALPHA, color=c, ls="--", label="calibrated")
-                ax_obj.axhline(0, color="gray", lw=0.5, ls=":")
-                ax_obj.set_ylabel(f"{col} ({units.get(col, '')})")
-                ax_obj.legend(fontsize=7, loc="upper right")
-                ax_obj.grid(alpha=0.2, lw=0.4)
-            for row_idx in range(len(cols), n_rows):
-                axes_grid[row_idx][col_idx].set_visible(False)
-
-        for ax_obj in axes_grid[-1]:
-            if ax_obj.get_visible():
-                ax_obj.set_xlabel("Time (s)")
-        axes_grid[0][0].set_title("Accelerometer axes")
-        if len(gyro_axes) > 0:
-            axes_grid[0][1].set_title("Gyroscope axes")
-        fig.suptitle(f"{section_dir.name} / {sensor} — per-axis calibration effect", y=1.01)
-        fig.tight_layout()
-        out_b = cal_dir / f"{sensor}_axes_comparison.png"
-        out_paths.append(save_figure(fig, out_b))
 
     return out_paths
 
@@ -267,84 +231,7 @@ def plot_calibration_parameters(
 
 
 # ---------------------------------------------------------------------------
-# Plot 3: World-frame signals
-# ---------------------------------------------------------------------------
-
-def plot_calibration_world_frame(
-    section_dir: Path,
-    *,
-    sensors: list[str] | None = None,
-) -> list[Path]:
-    """World-frame acc and gyro signals from the calibrated CSV.
-
-    Output
-    ------
-    ``calibrated/<sensor>_world_frame.png``
-    """
-    selected = sensors or list(SENSORS)
-    out_paths: list[Path] = []
-    cal_dir = section_dir / "calibrated"
-
-    for sensor in selected:
-        cal_csv = cal_dir / f"{sensor}.csv"
-        if not cal_csv.exists():
-            continue
-        df = read_csv(cal_csv)
-        if "timestamp" not in df.columns:
-            continue
-
-        world_acc = [c for c in ("ax_world", "ay_world", "az_world") if c in df.columns]
-        world_gyro = [c for c in ("gx_world", "gy_world", "gz_world") if c in df.columns]
-        if not world_acc and not world_gyro:
-            log.info("No world-frame columns in %s/%s — skipping", section_dir.name, sensor)
-            continue
-
-        ts = timestamps_to_relative_seconds(df["timestamp"])
-        axis_colors = {
-            "ax_world": "#d62728", "ay_world": "#2ca02c", "az_world": "#1f77b4",
-            "gx_world": "#9467bd", "gy_world": "#8c564b", "gz_world": "#e377c2",
-        }
-        n_rows = int(bool(world_acc)) + int(bool(world_gyro))
-        fig, axes = plt.subplots(n_rows, 1, figsize=(14, 3.5 * n_rows), sharex=True, squeeze=False)
-        axes = axes.flatten()
-
-        row = 0
-        if world_acc:
-            ax = axes[row]
-            for col in world_acc:
-                vals = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
-                x, y = filter_valid_plot_xy(ts, vals)
-                ax.plot(x, y, lw=0.8, alpha=0.85, color=axis_colors[col], label=col)
-            ax.axhline(_G, color="gray", lw=1.0, ls="--", label=f"+g ({_G} m/s²)")
-            ax.axhline(-_G, color="gray", lw=0.7, ls=":", label="−g")
-            ax.axhline(0, color="black", lw=0.4, ls=":")
-            ax.set_ylabel("World-frame acc (m/s²)")
-            ax.legend(fontsize=8, loc="upper right", ncol=2)
-            ax.grid(alpha=0.2, lw=0.4)
-            row += 1
-
-        if world_gyro:
-            ax = axes[row]
-            for col in world_gyro:
-                vals = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
-                x, y = filter_valid_plot_xy(ts, vals)
-                ax.plot(x, y, lw=0.8, alpha=0.85, color=axis_colors[col], label=col)
-            ax.axhline(0, color="black", lw=0.4, ls=":")
-            ax.set_ylabel("World-frame gyro (deg/s)")
-            ax.legend(fontsize=8, loc="upper right", ncol=2)
-            ax.grid(alpha=0.2, lw=0.4)
-
-        axes[-1].set_xlabel("Time (s)")
-        fig.suptitle(f"{section_dir.name} / {sensor} — world-frame signals after calibration")
-        fig.tight_layout()
-        out_path = cal_dir / f"{sensor}_world_frame.png"
-        out_paths.append(save_figure(fig, out_path))
-
-    return out_paths
-
-
-# ---------------------------------------------------------------------------
-# Plot 4: Protocol detection overview
+# Plot 3: Protocol detection overview
 # ---------------------------------------------------------------------------
 
 def plot_calibration_protocol(
@@ -374,11 +261,12 @@ def plot_calibration_protocol(
     out_paths: list[Path] = []
     cal_dir = section_dir / "calibrated"
 
-    opening_seq = cal_data.get("opening_sequence") or {}
+    opening_block = cal_data.get("opening_sequence") or {}
     alignment_block = cal_data.get("alignment", {})
     protocol_detected = cal_data.get("protocol_detected", False)
 
     for sensor in selected:
+        opening_seq = opening_block.get(sensor) or {}
         raw_csv = section_dir / f"{sensor}.csv"
         if not raw_csv.exists():
             continue
@@ -474,9 +362,7 @@ def plot_calibration_stage(
 
     Produces:
     - ``<sensor>_calibration_comparison.png``  — norm before/after
-    - ``<sensor>_axes_comparison.png``          — per-axis before/after
     - ``calibration_parameters.png``            — biases + rotation matrix
-    - ``<sensor>_world_frame.png``              — world-frame signals
     - ``<sensor>_protocol.png``                 — protocol detection overview
     """
     section_dir = _resolve_section_dir(target)
@@ -493,11 +379,6 @@ def plot_calibration_stage(
             out_paths.append(p)
     except Exception as exc:
         log.warning("Calibration parameters plot failed for %s: %s", section_dir.name, exc)
-
-    try:
-        out_paths += plot_calibration_world_frame(section_dir, sensors=sensors)
-    except Exception as exc:
-        log.warning("World-frame plot failed for %s: %s", section_dir.name, exc)
 
     try:
         out_paths += plot_calibration_protocol(section_dir, sensors=sensors)
@@ -528,7 +409,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--plot",
-        choices=["all", "raw_vs_cal", "parameters", "world_frame", "protocol"],
+        choices=["all", "raw_vs_cal", "parameters", "protocol"],
         default="all",
         help="Which plot(s) to generate (default: all).",
     )
@@ -544,7 +425,6 @@ def main(argv: list[str] | None = None) -> None:
     dispatch = {
         "raw_vs_cal": lambda: plot_calibration_raw_vs_calibrated(section_dir, sensors=args.sensors),
         "parameters": lambda: [plot_calibration_parameters(section_dir, sensors=args.sensors)],
-        "world_frame": lambda: plot_calibration_world_frame(section_dir, sensors=args.sensors),
         "protocol": lambda: plot_calibration_protocol(section_dir, sensors=args.sensors),
         "all": lambda: plot_calibration_stage(section_dir, sensors=args.sensors),
     }

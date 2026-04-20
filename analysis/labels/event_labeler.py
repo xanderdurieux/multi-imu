@@ -11,10 +11,11 @@ scrollbar on the plot strip). Hover on any sensor panel highlights the same time
 
 Usage (from ``analysis/``)::
 
-    uv run python -m labels.event_labeler 2026-02-26_r2/synced
-    uv run python -m labels.event_labeler 2026-02-26_r2s1 out.html
+    uv run python -m labels.event_labeler 2026-02-26_r2
+    uv run python -m labels.event_labeler 2026-02-26_r2 /tmp/out.html
 
-If the output path is omitted, writes ``event_labeler.html`` next to the CSVs.
+The CLI always resolves the recording's ``synced/`` stage automatically.
+If the output path is omitted, writes ``event_labeler.html`` inside that folder.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +36,14 @@ from plotly.subplots import make_subplots
 from plotly.utils import PlotlyJSONEncoder
 
 import plotly
-from common.paths import list_csv_files, read_csv, resolve_data_dir, session_input_dir
+from common.paths import (
+    list_csv_files,
+    read_csv,
+    read_json_file,
+    recording_stage_dir,
+    resolve_data_dir,
+    session_input_dir,
+)
 from parser.gps import parse_gps_csv
 
 # ---------------------------------------------------------------------------
@@ -210,6 +219,26 @@ MAX_IMU_POINTS = 12_000
 MAX_GPS_MAP_POINTS = 5_000
 
 
+@dataclass(frozen=True)
+class ContextBand:
+    start_ms: float
+    end_ms: float
+    label: str
+
+
+@dataclass(frozen=True)
+class ContextMarker:
+    timestamp_ms: float
+    label: str
+
+
+@dataclass(frozen=True)
+class LabelerContext:
+    cards: list[tuple[str, list[str]]]
+    calibration_bands: list[ContextBand]
+    sync_markers: list[ContextMarker]
+
+
 def _prepare_gps_track_arrays(
     gps_path: Path | None,
     t0_ms: float,
@@ -273,6 +302,237 @@ def _prepare_gps_track_arrays(
     spd = spd[order]
     note = f"GPS: {gps_path.name} ({len(df)} pts, ±{extra_s:g} s pad)"
     return t_s, lat, lon, spd, note
+
+
+def _safe_json_dict(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = read_json_file(path)
+    except (OSError, ValueError) as exc:
+        log.debug("Could not read JSON %s: %s", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _fmt_s(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1f} s"
+
+
+def _fmt_hz(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1f} Hz"
+
+
+def _fmt_ppm(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:+.1f} ppm"
+
+
+def _fmt_corr(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def _build_labeler_context(
+    *,
+    recording_id: str,
+    view_start_ms: float,
+    view_end_ms: float,
+) -> LabelerContext:
+    if not recording_id:
+        return LabelerContext(cards=[], calibration_bands=[], sync_markers=[])
+
+    parsed_dir = recording_stage_dir(recording_id, "parsed")
+    synced_dir = recording_stage_dir(recording_id, "synced")
+    session_stats = _safe_json_dict(parsed_dir / "session_stats.json")
+    cal_segments = _safe_json_dict(parsed_dir / "calibration_segments.json")
+    sync_info = _safe_json_dict(synced_dir / "sync_info.json")
+    sync_meta = _safe_json_dict(synced_dir / "sync_metadata.json")
+
+    cards: list[tuple[str, list[str]]] = []
+
+    timing_lines: list[str] = []
+    streams = session_stats.get("streams")
+    if isinstance(streams, dict):
+        for sensor_key, sensor_label in (
+            ("sporsa", "Bike (sporsa)"),
+            ("arduino", "Rider (arduino)"),
+        ):
+            stream = streams.get(sensor_key)
+            if not isinstance(stream, dict):
+                continue
+            timing = stream.get("timing") if isinstance(stream.get("timing"), dict) else {}
+            duration_s = _finite_float(timing.get("duration_s"))
+            rate_hz = _finite_float(timing.get("rate_hz"))
+            gap_count = timing.get("gaps", {}).get("gap_count") if isinstance(timing.get("gaps"), dict) else None
+            line = f"{sensor_label}: {_fmt_s(duration_s)}, {_fmt_hz(rate_hz)}"
+            if gap_count is not None:
+                line += f", {int(gap_count)} gaps"
+            if sensor_key == "arduino":
+                device_clock = (
+                    stream.get("device_to_received_clock")
+                    if isinstance(stream.get("device_to_received_clock"), dict)
+                    else {}
+                )
+                drift_ppm = _finite_float(device_clock.get("drift_ppm"))
+                if drift_ppm is not None:
+                    line += f", parser drift {_fmt_ppm(drift_ppm)}"
+            timing_lines.append(line)
+    if timing_lines:
+        cards.append(("Parsed timing", timing_lines))
+
+    calibration_bands: list[ContextBand] = []
+    cue_lines: list[str] = []
+    sensors = cal_segments.get("sensors")
+    sporsa_cal = sensors.get("sporsa") if isinstance(sensors, dict) else None
+    if isinstance(sporsa_cal, dict):
+        raw_segments = sporsa_cal.get("segments")
+        segments = raw_segments if isinstance(raw_segments, list) else []
+        total_segments = 0
+        for idx, seg in enumerate(segments, start=1):
+            if not isinstance(seg, dict):
+                continue
+            start_ms = _finite_float(seg.get("start_ms"))
+            end_ms = _finite_float(seg.get("end_ms"))
+            if start_ms is None or end_ms is None or end_ms <= start_ms:
+                continue
+            total_segments += 1
+            if end_ms <= view_start_ms or start_ms >= view_end_ms:
+                continue
+            calibration_bands.append(
+                ContextBand(start_ms=start_ms, end_ms=end_ms, label=f"Calibration {idx}")
+            )
+        if total_segments > 0:
+            total_dur_s = _finite_float(sporsa_cal.get("total_duration_s"))
+            cue_lines.append(
+                f"Parsed sporsa calibration segments: {total_segments} total, "
+                f"{len(calibration_bands)} in this view ({_fmt_s(total_dur_s)} cumulative)"
+            )
+
+    sync_markers: list[ContextMarker] = []
+    sync_lines: list[str] = []
+    if sync_info:
+        selected_method = str(sync_info.get("selected_method", "")).strip()
+        drift_ppm = _finite_float(sync_info.get("drift_ppm"))
+        corr = _finite_float((sync_info.get("correlation") or {}).get("offset_and_drift"))
+        calibration = sync_info.get("calibration") if isinstance(sync_info.get("calibration"), dict) else {}
+        n_anchors = calibration.get("n_anchors")
+        span_s = _finite_float(calibration.get("anchor_span_s"))
+        anchors = calibration.get("anchors") if isinstance(calibration.get("anchors"), list) else []
+        visible_anchors = 0
+        for idx, anchor in enumerate(anchors, start=1):
+            if not isinstance(anchor, dict):
+                continue
+            ref_ms = _finite_float(anchor.get("ref_ms"))
+            if ref_ms is None:
+                continue
+            if view_start_ms <= ref_ms <= view_end_ms:
+                sync_markers.append(ContextMarker(timestamp_ms=ref_ms, label=f"A{idx}"))
+                visible_anchors += 1
+
+        if selected_method:
+            sync_lines.append(f"Selected sync: {selected_method}")
+        if drift_ppm is not None or corr is not None:
+            sync_lines.append(
+                f"Drift {_fmt_ppm(drift_ppm)} with offset+drift correlation {_fmt_corr(corr)}"
+            )
+        if n_anchors is not None:
+            sync_lines.append(f"Anchor fit: {int(n_anchors)} anchors across {_fmt_s(span_s)}")
+        signal_mode = None
+        hyperparameters = sync_meta.get("hyperparameters")
+        if isinstance(hyperparameters, dict):
+            signal_mode = str(hyperparameters.get("signal_mode", "")).strip() or None
+        if signal_mode:
+            sync_lines.append(f"Sync signal mode: {signal_mode}")
+        if visible_anchors > 0:
+            cue_lines.append(f"Visible sync anchors in this view: {visible_anchors}")
+
+    if sync_lines:
+        cards.append(("Sync summary", sync_lines))
+    if cue_lines:
+        cue_lines.append("Shaded bands mark parsed bike calibration segments; dashed lines mark sync anchors.")
+        cards.append(("Labeling cues", cue_lines))
+
+    return LabelerContext(
+        cards=cards,
+        calibration_bands=calibration_bands,
+        sync_markers=sync_markers,
+    )
+
+
+def _add_context_overlays(
+    fig: go.Figure,
+    *,
+    t0_ms: float,
+    context: LabelerContext,
+) -> None:
+    for band in context.calibration_bands:
+        x0 = (band.start_ms - t0_ms) / 1000.0
+        x1 = (band.end_ms - t0_ms) / 1000.0
+        if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+            continue
+        fig.add_vrect(
+            x0=x0,
+            x1=x1,
+            fillcolor="rgba(146, 64, 14, 0.09)",
+            line_width=0,
+            layer="below",
+            row="all",
+            col=1,
+        )
+
+    annotate_markers = len(context.sync_markers) <= 4
+    for marker in context.sync_markers:
+        x = (marker.timestamp_ms - t0_ms) / 1000.0
+        if not np.isfinite(x):
+            continue
+        fig.add_vline(
+            x=x,
+            line_width=1.2,
+            line_dash="dot",
+            line_color="#f59e0b",
+            row="all",
+            col=1,
+        )
+        if annotate_markers:
+            fig.add_annotation(
+                x=x,
+                xref="x",
+                y=1.0,
+                yref="paper",
+                text=marker.label,
+                showarrow=False,
+                yshift=10,
+                font=dict(size=9, color="#92400e"),
+                bgcolor="rgba(255,255,255,0.9)",
+                bordercolor="#f59e0b",
+                borderwidth=1,
+            )
+
+
+def _render_context_cards_html(context: LabelerContext) -> str:
+    if not context.cards:
+        return ""
+
+    parts: list[str] = ['<div class="context-grid">']
+    for title, lines in context.cards:
+        items = "".join(f"<li>{html.escape(line)}</li>" for line in lines if line)
+        if not items:
+            continue
+        parts.append(
+            '<div class="context-card">'
+            f"<b>{html.escape(title)}</b>"
+            f"<ul>{items}</ul>"
+            "</div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _downsample_index(n: int, max_points: int) -> np.ndarray:
@@ -562,7 +822,7 @@ def _apply_per_subplot_legends(fig: go.Figure, n_rows: int, *, legend_x_paper: f
 
 def build_event_labeler_figure(
     data_dir: Path,
-) -> tuple[go.Figure, go.Figure | None, float, str, dict[str, list[float]], float]:
+) -> tuple[go.Figure, go.Figure | None, float, str, dict[str, list[float]], float, LabelerContext]:
     """Return time-series figure, optional map figure, duration (s), GPS note, GPS arrays for JS sync.
 
     Figures use ``autosize=True`` so the HTML page can fit them to the viewport (no fixed pixel width).
@@ -598,6 +858,11 @@ def build_event_labeler_figure(
 
     gps_t_s, gps_lat, gps_lon, gps_speed, gps_note = _prepare_gps_track_arrays(
         gps_path, t0_ms, imu_t0_ms, imu_t1_ms
+    )
+    context = _build_labeler_context(
+        recording_id=recording_id,
+        view_start_ms=imu_t0_ms,
+        view_end_ms=imu_t1_ms,
     )
 
     subplot_specs: list[tuple[str, list[go.Scattergl]]] = []
@@ -784,6 +1049,7 @@ def build_event_labeler_figure(
     fig.update_yaxes(fixedrange=True, showline=True, mirror=True)
     fig.update_xaxes(title_text="Time from first sporsa sample in this folder (s)", row=n_rows, col=1)
     _apply_per_subplot_legends(fig, n_rows)
+    _add_context_overlays(fig, t0_ms=t0_ms, context=context)
 
     fig_map: go.Figure | None = None
     gps_payload: dict[str, list[float]] = {"t": [], "lat": [], "lon": []}
@@ -801,13 +1067,7 @@ def build_event_labeler_figure(
             "lon": [float(x) for x in gps_lon],
         }
 
-    return fig, fig_map, duration_s, gps_note, gps_payload, t0_ms
-
-
-def _slug(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_") or "labels"
+    return fig, fig_map, duration_s, gps_note, gps_payload, t0_ms, context
 
 
 def _plotly_js_cdn_url() -> str:
@@ -923,6 +1183,30 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     .warn {{ color: #b45309; font-size: 0.8rem; }}
     .mode label {{ margin-right: 12px; cursor: pointer; }}
     .gps-note {{ font-size: 0.8rem; color: #475569; margin-top: 4px; }}
+    .context-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }}
+    .context-card {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #f8fafc;
+    }}
+    .context-card b {{
+      display: block;
+      margin-bottom: 6px;
+      color: #0f172a;
+    }}
+    .context-card ul {{
+      margin: 0;
+      padding-left: 18px;
+      color: #334155;
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }}
   </style>
 </head>
 <body>
@@ -954,6 +1238,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         <b>Interval:</b> two clicks; <b>Peak:</b> one click. Times shown here are seconds from the first sporsa sample in this folder; downloaded CSVs also include absolute millisecond timestamps for the pipeline.
       </p>
       <p class="gps-note">{gps_note_esc}</p>
+      {context_html}
       {section_warn}
     </div>
     <div class="plot-strip" id="plotStrip">
@@ -1468,12 +1753,13 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 
 
 def write_event_labeler_html(
-    target: str | Path,
+    recording_name: str,
     out_path: Path | None = None,
     *,
     pixels_per_second: float | None = None,
 ) -> Path:
-    data_dir = resolve_data_dir(target)
+    recording_dir = resolve_data_dir(recording_name)
+    data_dir = recording_stage_dir(recording_dir.name, "synced")
     if out_path is None:
         out_path = data_dir / "event_labeler.html"
     out_path = Path(out_path)
@@ -1482,14 +1768,14 @@ def write_event_labeler_html(
     recording_id, section_id = infer_recording_section_ids(data_dir)
     if pixels_per_second is not None:
         log.warning("pixels_per_second is ignored; event labeler uses viewport width.")
-    fig_time, fig_map, duration_s, gps_note, gps_payload, time_origin_ms = build_event_labeler_figure(data_dir)
+    fig_time, fig_map, duration_s, gps_note, gps_payload, time_origin_ms, context = build_event_labeler_figure(data_dir)
     fig_time_json = fig_time.to_plotly_json()
     fig_map_json = fig_map.to_plotly_json() if fig_map is not None else None
     map_wrap_class = "hidden" if fig_map is None else ""
+    context_html = _render_context_cards_html(context)
 
-    slug = _slug(recording_id)
     sec_part = f"_{section_id}" if section_id else ""
-    suggested = f"labels_intervals_{slug}{sec_part}.csv"
+    suggested = f"labels_intervals_{recording_id}{sec_part}.csv"
 
     section_warn = ""
     if not section_id:
@@ -1523,6 +1809,7 @@ def write_event_labeler_html(
         recording_id_esc=html.escape(recording_id, quote=True),
         section_id_esc=html.escape(section_id, quote=True),
         gps_note_esc=html.escape(gps_note, quote=True),
+        context_html=context_html,
         section_warn=section_warn,
         map_wrap_class=map_wrap_class,
         map_col_max=MAP_COLUMN_MAX_PX,
@@ -1537,11 +1824,11 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if not argv:
-        print(__doc__ or "Usage: uv run python -m labels.event_labeler <target> [out.html]")
+        print(__doc__ or "Usage: uv run python -m labels.event_labeler <recording_name> [out.html]")
         sys.exit(1)
-    target = argv[0]
+    recording_name = argv[0]
     out = Path(argv[1]) if len(argv) > 1 else None
-    p = write_event_labeler_html(target, out)
+    p = write_event_labeler_html(recording_name, out)
     print(p.resolve())
 
 

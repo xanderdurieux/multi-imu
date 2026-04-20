@@ -21,10 +21,39 @@ Sporsa does not undergo a mount change; its opening static windows are used
 for both intrinsic estimation and alignment.
 
 Calibration is split into two independent outputs per sensor:
-- ``intrinsics``: gyro bias (always); accelerometer bias/scale only when a
-  static hardware calibration reference is provided.
+- ``intrinsics``: gyro bias (always, from the dynamic static-window estimate);
+  accelerometer bias/scale only when a static hardware calibration reference
+  is provided.  When present, the static reference gyro bias and the
+  post-correction gravity norm are recorded as sanity-check tags on the
+  intrinsics; the dynamic gyro bias is what is actually applied, because
+  gyro bias drifts with temperature on a session timescale.
 - ``alignment``: body-to-world rotation derived from the first appropriate
   stable window after mount, plus yaw resolved by priority (mag → PCA → none).
+
+Signal interpretation (IMPORTANT)
+---------------------------------
+This stage applies a **single** body-to-world rotation estimated at the
+alignment window.  It does NOT track orientation over time.  Downstream
+consumers must therefore treat the outputs as follows:
+
+- ``acc_norm``, ``gyro_norm``, ``mag_norm`` are rotation-invariant and are
+  reliable throughout the entire section.
+- ``ax``, ``ay``, ``az``, ``gx``, ``gy``, ``gz`` are body-frame, bias- (and
+  scale-) corrected values.  Per-axis values are only physically meaningful
+  when combined with a real-time body orientation (from the ``orientation``
+  stage).  Do not plot or reason about individual body-frame axes as a
+  function of time without such an orientation.
+- ``ax_world``, ``ay_world``, ``az_world`` (and the gyro equivalents) are
+  correct **only at the alignment window**.  As soon as the rider turns,
+  pitches, or the helmet tilts, the fixed rotation stops pointing at the
+  true world axes.  Do not export per-axis world-frame figures or draw
+  per-axis conclusions from them; they are provided purely as an
+  initialization aid for the orientation stage, which must re-estimate
+  the rotation sample-by-sample.
+
+Figures and features that depend on per-axis signals should either consume
+the time-varying orientation from the ``orientation`` stage, or restrict
+themselves to norms.
 """
 
 from __future__ import annotations
@@ -160,7 +189,7 @@ class SectionCalibration:
     """Combined protocol-aware calibration for a section (both sensors)."""
 
     protocol_detected: bool = False
-    opening_sequence: OpeningSequence | None = None
+    opening_sequence: dict[str, OpeningSequence] = field(default_factory=dict)
     intrinsics: dict[str, SensorIntrinsics] = field(default_factory=dict)
     alignment: dict[str, SensorAlignment] = field(default_factory=dict)
     quality: dict[str, Any] = field(
@@ -172,7 +201,7 @@ class SectionCalibration:
         return {
             "schema_version": 2,
             "protocol_detected": self.protocol_detected,
-            "opening_sequence": self.opening_sequence.to_dict() if self.opening_sequence else None,
+            "opening_sequence": {k: v.to_dict() for k, v in self.opening_sequence.items()},
             "intrinsics": {k: v.to_dict() for k, v in self.intrinsics.items()},
             "alignment": {k: v.to_dict() for k, v in self.alignment.items()},
             "quality": self.quality,
@@ -181,8 +210,12 @@ class SectionCalibration:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "SectionCalibration":
-        raw_opening = d.get("opening_sequence")
-        opening = OpeningSequence.from_dict(raw_opening) if raw_opening else None
+        raw_opening = d.get("opening_sequence") or {}
+        opening = {
+            sensor: OpeningSequence.from_dict(payload)
+            for sensor, payload in raw_opening.items()
+            if payload
+        }
         return cls(
             protocol_detected=bool(d.get("protocol_detected", False)),
             opening_sequence=opening,
@@ -468,21 +501,19 @@ def detect_protocol_landmarks(
 ) -> tuple[CalibrationSegment | None, list[tuple[float, float]]]:
     """Derive opening-routine static ranges from pre-detected calibration segments.
 
-    The first detected segment is the opening routine.  Its peak timestamps
-    split the segment into a pre-tap static window and a post-tap static window.
-
-    Parameters
-    ----------
-    segments:
-        Pre-detected calibration segments loaded from JSON (parser output).
-        Pass an empty list if none were found.
+    The first detected segment is the opening routine.  Its ``static_pre_ms``
+    and ``static_post_ms`` durations define the actual genuinely-static flanks
+    at the segment boundaries; the span between the last peak and the end of
+    the segment can include post-tap settling motion and must not be treated
+    as static.
 
     Returns
     -------
     (opening_segment, static_ranges)
         ``opening_segment``: the first :class:`CalibrationSegment`, or ``None``.
-        ``static_ranges``: list of ``(start_ms, end_ms)`` timestamp pairs for
-        the static flanks.  Empty when no segments were found.
+        ``static_ranges``: list of ``(start_ms, end_ms)`` timestamp pairs
+        for the pre- and post-tap static flanks (in chronological order).
+        Empty when no segments were found.
     """
     if not segments:
         return None, []
@@ -490,15 +521,16 @@ def detect_protocol_landmarks(
     seg = segments[0]  # opening routine = first calibration sequence
     static_ranges: list[tuple[float, float]] = []
 
-    if seg.peak_ms:
-        pre_end_ms = seg.peak_ms[0]
-        if pre_end_ms > seg.start_ms:
-            static_ranges.append((seg.start_ms, pre_end_ms))
+    pre_end = seg.start_ms + seg.static_pre_ms
+    if seg.static_pre_ms > 0 and pre_end > seg.start_ms:
+        static_ranges.append((seg.start_ms, pre_end))
 
-        post_start_ms = seg.peak_ms[-1]
-        if seg.end_ms > post_start_ms:
-            static_ranges.append((post_start_ms, seg.end_ms))
-    else:
+    post_start = seg.end_ms - seg.static_post_ms
+    if seg.static_post_ms > 0 and seg.end_ms > post_start:
+        static_ranges.append((post_start, seg.end_ms))
+
+    if not static_ranges:
+        # No reliable flank durations recorded — fall back to the segment span.
         static_ranges.append((seg.start_ms, seg.end_ms))
 
     return seg, static_ranges
@@ -509,6 +541,10 @@ def detect_protocol_landmarks(
 # ---------------------------------------------------------------------------
 
 
+_GYRO_BIAS_DRIFT_THRESHOLD_DEG_S = 1.0
+_ACC_SANITY_THRESHOLD_MS2 = 0.1
+
+
 def estimate_sensor_intrinsics(
     df: pd.DataFrame,
     static_ranges: list[tuple[float, float]],
@@ -517,6 +553,21 @@ def estimate_sensor_intrinsics(
 ) -> SensorIntrinsics:
     """Estimate sensor intrinsics from static windows.
 
+    The dynamic gyro-bias estimate from the opening static window is always
+    the applied value, because gyro bias drifts with temperature on a
+    session timescale.  When a static hardware calibration reference is
+    provided, it is used as:
+
+    1. A source for accelerometer bias / scale (these are stable on a
+       session timescale and are carried over).
+    2. A sanity check: the reference gyro bias is compared against the
+       dynamic estimate, and the corrected gravity norm over the static
+       window is compared against :math:`g`.  Discrepancies surface as
+       quality tags rather than silently overriding the live estimate.
+
+    The acc scale convention matches ``static_calibration.imu_static``:
+    corrected = ``scale * (raw - bias)`` (see :func:`apply_calibration`).
+
     Parameters
     ----------
     df:
@@ -524,10 +575,9 @@ def estimate_sensor_intrinsics(
     static_ranges:
         ``(start_ms, end_ms)`` timestamp pairs of static windows to use.
     static_cal:
-        Optional static hardware calibration reference dict.  Must contain
-        ``accelerometer.bias`` and/or ``accelerometer.scale`` and
-        ``gyroscope.bias_deg_s`` sub-dicts to be used.  When provided, its
-        gyro bias overrides the dynamically-estimated value.
+        Optional static hardware calibration reference dict.  Expected
+        sub-dicts: ``accelerometer.bias``, ``accelerometer.scale``,
+        ``gyroscope.bias_deg_s``.
 
     Returns
     -------
@@ -535,13 +585,12 @@ def estimate_sensor_intrinsics(
     """
     quality_tags: list[str] = []
 
-    # Gyro bias
+    # Dynamic gyro bias from the opening static window (always applied).
     gyro_bias = _gyro_bias_from_ranges(df, static_ranges)
 
-    # Gravity estimate for quality assessment
+    # Raw body-frame gravity for quality assessment.
     g_body, residual = _gravity_from_ranges(df, static_ranges)
 
-    # Assess quality
     if np.isnan(residual) or residual > 2.0:
         quality = "poor"
         quality_tags.append("poor_static_gravity")
@@ -555,7 +604,8 @@ def estimate_sensor_intrinsics(
         quality_tags.append("no_static_ranges")
         quality = "poor"
 
-    # Accelerometer intrinsics: only from hardware static calibration
+    # Optional hardware static calibration: accelerometer bias/scale carry
+    # over; the gyro bias is only cross-checked, never applied.
     acc_bias: list[float] | None = None
     acc_scale: list[float] | None = None
 
@@ -563,18 +613,37 @@ def estimate_sensor_intrinsics(
         acc_cal = static_cal.get("accelerometer", {})
         if acc_cal.get("bias"):
             b = acc_cal["bias"]
-            acc_bias = [float(b.get("x", 0)), float(b.get("y", 0)), float(b.get("z", 0))]
+            acc_bias = [float(b.get("x", 0.0)), float(b.get("y", 0.0)), float(b.get("z", 0.0))]
         if acc_cal.get("scale"):
             sc = acc_cal["scale"]
-            acc_scale = [float(sc.get("x", 1)), float(sc.get("y", 1)), float(sc.get("z", 1))]
-        # Override gyro bias with static reference if available
+            acc_scale = [float(sc.get("x", 1.0)), float(sc.get("y", 1.0)), float(sc.get("z", 1.0))]
+
         gyro_cal = static_cal.get("gyroscope", {})
         if gyro_cal.get("bias_deg_s"):
             gb = gyro_cal["bias_deg_s"]
-            gyro_bias = np.array([
-                float(gb.get("x", 0)), float(gb.get("y", 0)), float(gb.get("z", 0))
+            static_gyro_bias = np.array([
+                float(gb.get("x", 0.0)), float(gb.get("y", 0.0)), float(gb.get("z", 0.0))
             ])
-            quality_tags.append("gyro_bias_from_static_cal")
+            drift = float(np.linalg.norm(gyro_bias - static_gyro_bias))
+            if drift > _GYRO_BIAS_DRIFT_THRESHOLD_DEG_S:
+                quality_tags.append(f"gyro_bias_drift_{drift:.2f}deg_s")
+                if quality == "good":
+                    quality = "marginal"
+
+        # Post-correction gravity sanity check: does bias/scale bring |a|≈g?
+        if acc_bias is not None or acc_scale is not None:
+            corrected = g_body.copy()
+            if acc_bias is not None:
+                corrected = corrected - np.array(acc_bias, dtype=float)
+            if acc_scale is not None:
+                corrected = corrected * np.array(acc_scale, dtype=float)
+            corrected_norm = float(np.linalg.norm(corrected))
+            if np.isfinite(corrected_norm):
+                post_residual = abs(corrected_norm - _G)
+                if post_residual > _ACC_SANITY_THRESHOLD_MS2:
+                    quality_tags.append(f"acc_cal_stale_{post_residual:.3f}ms2")
+                    if quality == "good":
+                        quality = "marginal"
 
     return SensorIntrinsics(
         gyro_bias=list(np.round(gyro_bias, 6).tolist()),
@@ -685,10 +754,16 @@ def apply_calibration(
 
     Steps:
     1. Subtract gyroscope bias (always).
-    2. Subtract accelerometer bias and/or apply scale correction if available.
-    3. Rotate acc and gyro into world frame using the alignment rotation matrix.
-       World-frame columns are written with ``_world`` suffix.
-       Original (bias-corrected) columns are updated in-place.
+    2. Subtract accelerometer bias and multiply by the scale factor when
+       available.  The scale convention matches
+       :func:`static_calibration.imu_static.apply_calibration_to_dataframe`:
+       ``corrected = scale * (raw - bias)``.
+    3. Rotate acc and gyro into world frame using the alignment rotation
+       matrix.  World-frame columns are written with ``_world`` suffix;
+       these are only valid at the alignment window and must not be used
+       as per-axis time series without real-time orientation (see module
+       docstring).  Bias- (and scale-) corrected body-frame columns are
+       updated in-place.
 
     Returns a new DataFrame with corrected columns.
     """
@@ -705,8 +780,7 @@ def apply_calibration(
         if intrinsics.acc_bias is not None:
             acc_corr -= np.array(intrinsics.acc_bias, dtype=float)
         if intrinsics.acc_scale is not None:
-            # Scale correction: divide each axis by its scale factor
-            acc_corr /= np.array(intrinsics.acc_scale, dtype=float)
+            acc_corr *= np.array(intrinsics.acc_scale, dtype=float)
         acc_world = (R @ acc_corr.T).T
         out["ax"] = acc_corr[:, 0]
         out["ay"] = acc_corr[:, 1]

@@ -92,8 +92,8 @@ def _load_labels_for_section(section_dir: Path) -> pd.DataFrame:
 def extract_features_for_section(
     section_dir: Path,
     *,
-    window_s: float = 2.0,
-    hop_s: float = 1.0,
+    window_s: float = 1.0,
+    hop_s: float = 0.5,
     min_samples: int = 10,
     sample_rate_hz: float = _SAMPLE_RATE_HZ_DEFAULT,
     force: bool = False,

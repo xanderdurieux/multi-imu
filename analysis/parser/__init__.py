@@ -18,6 +18,9 @@ __all__ = [
     "process_session",
     "compute_recording_stats",
     "write_recording_stats",
+    "compute_recording_integrity_summary",
+    "session_integrity_dataframe",
+    "generate_parsed_integrity_report",
     "find_calibration_segments",
     "split_recording",
 ]
@@ -30,6 +33,9 @@ _ATTR_TO_MODULE = {
     "process_session": (".session", "process_session"),
     "compute_recording_stats": (".stats", "compute_recording_stats"),
     "write_recording_stats": (".stats", "write_recording_stats"),
+    "compute_recording_integrity_summary": (".stats", "compute_recording_integrity_summary"),
+    "session_integrity_dataframe": (".stats", "session_integrity_dataframe"),
+    "generate_parsed_integrity_report": (".stats", "generate_parsed_integrity_report"),
     "find_calibration_segments": (".split_sections", "find_calibration_segments"),
     "split_recording": (".split_sections", "split_recording"),
 }

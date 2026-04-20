@@ -28,8 +28,6 @@ __all__ = [
     "data_root",
     "read_csv",
     "read_json_file",
-    "write_csv",
-    "write_json_file",
     "resolve_data_dir",
     "sensor_csv",
     "list_csv_files",
@@ -40,4 +38,6 @@ __all__ = [
     "recording_stage_dir",
     "section_dir",
     "section_stage_dir",
+    "write_csv",
+    "write_json_file",
 ]
