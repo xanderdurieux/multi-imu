@@ -16,12 +16,9 @@ METHOD_COLORS = {
     "one_anchor_prior": "#e67e22",
     "signal_only": "#3498db",
 }
-ALL_ORIENTATION_METHODS = ["madgwick", "mahony", "complementary", "ekf"]
+ALL_ORIENTATION_METHODS = ["mahony"]
 ORIENTATION_METHOD_COLORS = {
-    "madgwick": "#2ca02c",
     "mahony": "#9467bd",
-    "complementary": "#1f77b4",
-    "ekf": "#d62728",
     "unknown": "#95a5a6",
 }
 

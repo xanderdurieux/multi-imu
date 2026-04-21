@@ -26,7 +26,6 @@ import sys
 from pathlib import Path
 
 from common.paths import iter_sections_for_recording, parse_section_folder_name, section_dir
-from orientation.pipeline import DEFAULT_ORIENTATION_VARIANTS
 from visualization.stage_plots import plot_section_pipeline_stage
 
 
@@ -71,26 +70,15 @@ def _run_calibration(args: argparse.Namespace) -> None:
 def _run_orientation(args: argparse.Namespace) -> None:
     from orientation.pipeline import process_section_orientation, process_recording_orientation
 
-    variants = list(DEFAULT_ORIENTATION_VARIANTS)
     if args.recording:
-        results = process_recording_orientation(
-            args.recording,
-            canonical_variant=args.filter,
-            force=args.force,
-            variants=variants,
-        )
+        results = process_recording_orientation(args.recording, force=args.force)
         print(f"Processed {len(results)} section(s).")
         if not args.no_plots:
             _run_stage_plots_for_sections(args.recording, "orientation")
     else:
         d = _section_dir(args.target)
-        stats = process_section_orientation(
-            d,
-            canonical_variant=args.filter,
-            force=args.force,
-            variants=variants,
-        )
-        print(f"Done. Canonical: {args.filter}")
+        process_section_orientation(d, force=args.force)
+        print("Done.")
         if not args.no_plots:
             plot_section_pipeline_stage(d, "orientation")
 
@@ -184,18 +172,6 @@ def main(argv: list[str] | None = None) -> None:
         default="gravity_only",
         choices=["gravity_only", "gravity_plus_forward"],
         help="[calibration] Frame alignment mode.",
-    )
-    parser.add_argument(
-        "--filter",
-        default="madgwick",
-        choices=[
-            "madgwick",
-            "madgwick_marg",
-            "complementary",
-            "ekf",
-            "ekf_marg",
-        ],
-        help="[orientation] Preferred variant when scores tie; all variants still run.",
     )
     parser.add_argument(
         "--event-config",

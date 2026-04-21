@@ -532,23 +532,84 @@ def load_calibration_segments_from_json(
     recording_name: str,
     sensor: str,
 ) -> list[CalibrationSegment]:
-    """Load pre-detected calibration segments for *sensor* from the recording JSON.
-
-    Supports both the current format (``start_ms``/``end_ms``/``peak_ms``).
-    """
+    """Load pre-detected calibration segments for *sensor* from the recording JSON."""
     path = recording_stage_dir(recording_name, "parsed") / "calibration_segments.json"
     data = read_json_file(path)
-    sensor_data = data["sensors"][sensor]
-    segments: list[CalibrationSegment] = []
-    for rec in sensor_data.get("segments", []):
-        segments.append(
-            CalibrationSegment(
-                start_ms=float(rec.get("start_ms", 0.0)),
-                end_ms=float(rec.get("end_ms", 0.0)),
-                peak_ms=[float(p) for p in rec.get("peak_ms", [])],
-                peak_strength=float(rec.get("peak_strength", 0.0)),
-                static_pre_ms=float(rec.get("static_pre_ms", rec.get("pre_static_ms", 0.0))),
-                static_post_ms=float(rec.get("static_post_ms", rec.get("post_static_ms", 0.0))),
-            )
+    return _parse_segments(data["sensors"][sensor].get("segments", []))
+
+
+def _parse_segments(records: list[dict]) -> list[CalibrationSegment]:
+    return [
+        CalibrationSegment(
+            start_ms=float(r.get("start_ms", 0.0)),
+            end_ms=float(r.get("end_ms", 0.0)),
+            peak_ms=[float(p) for p in r.get("peak_ms", [])],
+            peak_strength=float(r.get("peak_strength", 0.0)),
+            static_pre_ms=float(r.get("static_pre_ms", r.get("pre_static_ms", 0.0))),
+            static_post_ms=float(r.get("static_post_ms", r.get("post_static_ms", 0.0))),
         )
-    return segments
+        for r in records
+    ]
+
+
+def _segments_to_records(segments: list[CalibrationSegment]) -> list[dict]:
+    return [
+        {
+            "start_ms": seg.start_ms,
+            "end_ms": seg.end_ms,
+            "peak_ms": seg.peak_ms,
+            "peak_strength": seg.peak_strength,
+            "static_pre_ms": seg.static_pre_ms,
+            "static_post_ms": seg.static_post_ms,
+        }
+        for seg in segments
+    ]
+
+
+def clip_segments_to_range(
+    segs: list[CalibrationSegment],
+    t_min: float,
+    t_max: float,
+) -> list[CalibrationSegment]:
+    """Clip segment boundaries to [t_min, t_max], adjusting static-flank durations."""
+    out: list[CalibrationSegment] = []
+    for seg in segs:
+        if seg.end_ms < t_min or seg.start_ms > t_max:
+            continue
+        new_start = max(seg.start_ms, t_min)
+        new_end = min(seg.end_ms, t_max)
+        pre_cut = new_start - seg.start_ms
+        post_cut = seg.end_ms - new_end
+        out.append(CalibrationSegment(
+            start_ms=new_start,
+            end_ms=new_end,
+            peak_ms=[p for p in seg.peak_ms if new_start <= p <= new_end],
+            peak_strength=seg.peak_strength,
+            static_pre_ms=max(0.0, seg.static_pre_ms - pre_cut),
+            static_post_ms=max(0.0, seg.static_post_ms - post_cut),
+        ))
+    return out
+
+
+def write_section_calibration_segments(
+    section_path: Path,
+    segments_by_sensor: dict[str, list[CalibrationSegment]],
+) -> None:
+    """Write per-section calibration segments (synced timestamps) to section directory."""
+    payload = {
+        "section": section_path.name,
+        "sensors": {sensor: _segments_to_records(segs) for sensor, segs in segments_by_sensor.items()},
+    }
+    path = section_path / "calibration_segments.json"
+    write_json_file(path, payload, indent=2)
+    log.debug("Wrote section calibration segments → %s", path)
+
+
+def load_section_calibration_segments(
+    section_path: Path,
+    sensor: str,
+) -> list[CalibrationSegment]:
+    """Load per-section calibration segments (synced timestamps) for *sensor*."""
+    path = section_path / "calibration_segments.json"
+    data = read_json_file(path)
+    return _parse_segments(data["sensors"].get(sensor, []))

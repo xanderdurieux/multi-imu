@@ -207,24 +207,22 @@ def aggregate_orientation_stats(
 
         rec_name = section_dir.name.rsplit("s", 1)[0] if "s" in section_dir.name else section_dir.name
 
+        method = data.get("method", data.get("selected_method", "mahony"))
         row: dict = {
             "section_id": section_dir.name,
             "recording_name": rec_name,
-            "selected_method": data.get("selected_method", ""),
+            "selected_method": method,
         }
 
         sensors_block = data.get("sensors", {})
-        all_methods_block = data.get("all_methods", {})
 
         for sensor in ("sporsa", "arduino"):
             sensor_sel = sensors_block.get(sensor, {})
-            row[f"{sensor}_selected_residual_ms2"] = sensor_sel.get("selected_residual_ms2")
+            residual = sensor_sel.get("gravity_residual_ms2", sensor_sel.get("selected_residual_ms2"))
+            row[f"{sensor}_selected_residual_ms2"] = residual
             row[f"{sensor}_quality"] = sensor_sel.get("quality", "")
-
-            sensor_methods = all_methods_block.get(sensor, {})
-            for method, mdata in sensor_methods.items():
-                row[f"{sensor}_{method}_residual_ms2"] = mdata.get("gravity_residual_ms2")
-                row[f"{sensor}_{method}_quality"] = mdata.get("quality", "")
+            row[f"{sensor}_{method}_residual_ms2"] = residual
+            row[f"{sensor}_{method}_quality"] = sensor_sel.get("quality", "")
 
         rows.append(row)
         log.debug("Loaded orientation stats for section %s", section_dir.name)
