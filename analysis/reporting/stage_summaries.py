@@ -11,8 +11,8 @@ generate_calibration_summary(cal_df, output_dir)
 generate_sync_summary(sync_df, output_dir)
     Method selection, correlation comparison, drift distribution.
 
-generate_orientation_summary(sections_root, output_dir)
-    Method selection, gravity alignment quality — collected from per-section JSON files.
+generate_orientation_summary(orientation_df, output_dir)
+    Method selection, residuals, and quality — read from orientation_stats.csv.
 
 generate_all_stage_summaries(exports_dir, sections_root_dir, output_dir)
     Top-level entry point — calls all three generators.
@@ -20,7 +20,6 @@ generate_all_stage_summaries(exports_dir, sections_root_dir, output_dir)
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -32,7 +31,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path, read_csv, sections_root
+from common.paths import project_relative_path, read_csv
 from visualization._utils import SENSOR_COLORS as _SENSOR_COLORS
 
 log = logging.getLogger(__name__)
@@ -60,16 +59,6 @@ _SYNC_METHOD_LABELS = {
     "one_anchor_prior":      "Prior",
     "signal_only":           "Signal-only",
 }
-
-_ORIENTATION_METHOD_COLORS = {
-    "madgwick":       "#2ca02c",
-    "madgwick_marg":  "#1a7a1a",
-    "complementary":  "#1f77b4",
-    "ekf":            "#d62728",
-    "ekf_marg":       "#9b1818",
-    "unknown":        "#95a5a6",
-}
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -523,223 +512,102 @@ def generate_sync_summary(
 # ORIENTATION SUMMARIES
 # ===========================================================================
 
-def _collect_orientation_stats(sections_root_dir: Path) -> pd.DataFrame:
-    """Walk all section directories and collect orientation_stats.json data."""
-    rows: list[dict] = []
-    if not sections_root_dir.exists():
-        return pd.DataFrame()
-
-    for sec_dir in sorted(sections_root_dir.iterdir()):
-        if not sec_dir.is_dir():
-            continue
-        stats_path = sec_dir / "orientation" / "orientation_stats.json"
-        if not stats_path.exists():
-            continue
-        try:
-            data = json.loads(stats_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-
-        row: dict = {
-            "section_id": sec_dir.name,
-            "selected_method": data.get("selected_method", "unknown"),
-        }
-        for sensor in ("sporsa", "arduino"):
-            sd = data.get(sensor, {})
-            row[f"{sensor}_gravity_alignment"] = sd.get("gravity_alignment", float("nan"))
-            row[f"{sensor}_pitch_std_deg"]     = sd.get("pitch_std_deg", float("nan"))
-            row[f"{sensor}_roll_std_deg"]      = sd.get("roll_std_deg", float("nan"))
-            row[f"{sensor}_quality"]           = sd.get("quality", "unknown")
-            row[f"{sensor}_score"]             = sd.get("score", float("nan"))
-        rows.append(row)
-
-    return pd.DataFrame(rows)
-
-
-def plot_orientation_method_selection(ori_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
-    """Bar chart: which orientation method was selected per section."""
-    if "selected_method" not in ori_df.columns or ori_df.empty:
-        log.warning("No orientation method data; skipping")
-        return None
-
-    counts = ori_df["selected_method"].value_counts()
-    methods = counts.index.tolist()
-    values = counts.values.tolist()
-    colors = [_ORIENTATION_METHOD_COLORS.get(m, "#95a5a6") for m in methods]
-
-    fig, ax = plt.subplots(figsize=(7, max(3, 0.55 * len(methods) + 1.5)))
-    bars = ax.barh(methods, values, color=colors, edgecolor="white", linewidth=0.4)
-
-    for bar, v in zip(bars, values):
-        ax.text(
-            bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
-            str(v), va="center", ha="left", fontsize=9,
-        )
-
-    ax.set_xlabel("Number of sections")
-    ax.set_title("Orientation method selected per section")
-    ax.set_xlim(0, max(values) * 1.3)
-    ax.grid(axis="x", alpha=0.3, lw=0.5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote orientation method selection → %s", project_relative_path(output_path))
-    return output_path
-
-
-def plot_orientation_gravity_alignment(ori_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
-    """Violin of gravity alignment quality score per sensor across sections."""
-    sensors = [s for s in ("sporsa", "arduino") if f"{s}_gravity_alignment" in ori_df.columns]
-    if not sensors:
-        log.warning("No gravity alignment columns; skipping")
-        return None
-
-    groups = []
-    labels_list = []
-    colors = []
-    for sensor in sensors:
-        vals = pd.to_numeric(ori_df[f"{sensor}_gravity_alignment"], errors="coerce").dropna().to_numpy(float)
-        groups.append(vals)
-        labels_list.append(_SENSOR_LABELS.get(sensor, sensor))
-        colors.append(_SENSOR_COLORS[sensor])
-
-    fig, ax = plt.subplots(figsize=(5, 4))
-    _violin_or_box(
-        ax, groups, labels_list, colors,
-        ylabel="Gravity alignment (0–1)",
-        title="Orientation gravity alignment across sections",
-        hline=1.0, hline_label="perfect alignment",
-    )
-    ax.set_ylim(0, 1.1)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote orientation gravity alignment → %s", project_relative_path(output_path))
-    return output_path
-
-
-def plot_orientation_angle_stability(ori_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
-    """Violin of pitch/roll standard deviation per sensor across sections."""
-    sensors = [s for s in ("sporsa", "arduino") if f"{s}_pitch_std_deg" in ori_df.columns]
-    if not sensors:
-        return None
-
-    metrics = [("pitch_std_deg", "Pitch std (deg)"), ("roll_std_deg", "Roll std (deg)")]
-    fig, axes = plt.subplots(1, 2, figsize=(9, 4), sharey=False)
-
-    for ax, (metric, ylabel) in zip(axes, metrics):
-        groups = []
-        labels_list = []
-        colors = []
-        for sensor in sensors:
-            col = f"{sensor}_{metric}"
-            vals = pd.to_numeric(ori_df[col], errors="coerce").dropna().to_numpy(float)
-            groups.append(vals)
-            labels_list.append(_SENSOR_LABELS.get(sensor, sensor))
-            colors.append(_SENSOR_COLORS[sensor])
-        _violin_or_box(ax, groups, labels_list, colors, ylabel=ylabel, title=ylabel)
-
-    fig.suptitle("Orientation angle stability across sections", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote orientation angle stability → %s", project_relative_path(output_path))
-    return output_path
-
-
-def plot_orientation_quality_per_section(ori_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
-    """Stacked bar showing per-sensor orientation quality per section."""
-    quality_cols = [c for c in ori_df.columns if c.endswith("_quality")]
-    if not quality_cols or ori_df.empty:
-        return None
-
-    sensor_labels = [c.replace("_quality", "") for c in quality_cols]
-    section_ids = ori_df["section_id"].tolist()
-    n_sections = len(section_ids)
-    n_sensors = len(quality_cols)
-
-    # Shorten section IDs for display
-    short_ids = [sid.replace("2026-02-26_", "") for sid in section_ids]
-
-    x = np.arange(n_sections)
-    width = 0.8 / max(n_sensors, 1)
-
-    fig, ax = plt.subplots(figsize=(max(8, 0.9 * n_sections), 4))
-
-    for i, (col, slabel) in enumerate(zip(quality_cols, sensor_labels)):
-        qualities = ori_df[col].fillna("unknown").tolist()
-        colors = [_QUALITY_COLORS.get(q, "#90A4AE") for q in qualities]
-        offset = (i - (n_sensors - 1) / 2) * width
-        bars = ax.bar(
-            x + offset, [1.0] * n_sections, width * 0.9,
-            color=colors, label=_SENSOR_LABELS.get(slabel, slabel),
-            edgecolor="white", linewidth=0.3, alpha=0.85,
-        )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(short_ids, rotation=35, ha="right", fontsize=7)
-    ax.set_ylabel("Orientation quality")
-    ax.set_yticks([])
-    ax.set_title("Orientation quality per section and sensor")
-    ax.set_ylim(0, 1.6)
-
-    # Quality legend
-    quality_handles = [
-        mpatches.Patch(color=_QUALITY_COLORS[q], label=q.capitalize())
-        for q in ("good", "marginal", "poor")
-    ]
-    # Sensor legend
-    sensor_handles = [
-        mpatches.Patch(color=_SENSOR_COLORS[s], label=_SENSOR_LABELS.get(s, s))
-        for s in ("sporsa", "arduino") if any(s in c for c in quality_cols)
-    ]
-    ax.legend(
-        handles=quality_handles + sensor_handles,
-        loc="upper right", fontsize=7, framealpha=0.85, ncol=2,
-    )
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Wrote orientation quality per section → %s", project_relative_path(output_path))
-    return output_path
-
-
 def generate_orientation_summary(
-    sections_root_dir: Path,
+    ori_df: pd.DataFrame,
     output_dir: Path,
 ) -> list[Path]:
-    """Collect orientation stats from all sections and generate summary figures."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    ori_df = _collect_orientation_stats(sections_root_dir)
+    """Generate orientation summary plots from ``orientation_stats.csv`` exports."""
     if ori_df.empty:
-        log.warning("No orientation stats found in sections; skipping orientation summary")
+        log.warning("orientation_stats.csv is empty — skipping orientation summary")
         return []
 
-    log.info("Collected orientation stats for %d sections", len(ori_df))
-    generated: list[Path] = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_name in (
+        "orientation_gravity_alignment.png",
+        "orientation_angle_stability.png",
+        "orientation_quality_per_section.png",
+    ):
+        stale_path = output_dir / stale_name
+        if stale_path.exists():
+            stale_path.unlink()
 
-    for fn, name in (
-        (plot_orientation_method_selection,     "orientation_method_selection.png"),
-        (plot_orientation_gravity_alignment,    "orientation_gravity_alignment.png"),
-        (plot_orientation_angle_stability,      "orientation_angle_stability.png"),
-        (plot_orientation_quality_per_section,  "orientation_quality_per_section.png"),
+    from visualization.plot_exports_orientation import (
+        plot_orientation_method_quality_counts,
+        plot_orientation_method_residual_heatmap,
+        plot_orientation_method_selection,
+        plot_orientation_quality_overview,
+        plot_orientation_selected_residuals,
+    )
+
+    generated: list[Path] = []
+    for fn in (
+        plot_orientation_method_selection,
+        plot_orientation_quality_overview,
+        plot_orientation_selected_residuals,
+        plot_orientation_method_residual_heatmap,
+        plot_orientation_method_quality_counts,
     ):
         try:
-            p = fn(ori_df, output_dir / name)
+            p = fn(ori_df, output_dir)
             if p is not None:
                 generated.append(p)
         except Exception as exc:
-            log.warning("Orientation summary plot '%s' failed: %s", name, exc)
+            log.warning("Orientation summary plot '%s' failed: %s", fn.__name__, exc)
 
     log.info(
         "Orientation summary: %d figures written to %s",
+        len(generated),
+        project_relative_path(output_dir),
+    )
+    return generated
+
+
+# ===========================================================================
+# PARSED STAGE SUMMARIES
+# ===========================================================================
+
+def generate_parsed_summary(
+    exports_dir: Path,
+    output_dir: Path,
+) -> list[Path]:
+    """Generate parsed-stage aggregate plots from ``parsed_recording_summary.csv``."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_csv = exports_dir / "parsed_recording_summary.csv"
+    if not parsed_csv.exists():
+        log.warning(
+            "parsed_recording_summary.csv not found in %s — skipping parsed summary",
+            project_relative_path(exports_dir),
+        )
+        return []
+
+    summary_df = read_csv(parsed_csv)
+    if summary_df.empty:
+        log.warning("parsed_recording_summary.csv is empty — skipping parsed summary")
+        return []
+
+    from visualization.plot_parsed_stats import (
+        plot_interval_jitter,
+        plot_packet_loss,
+        plot_session_bar_chart,
+    )
+
+    generated: list[Path] = []
+
+    for fn, name in (
+        (plot_session_bar_chart, "parsed_session_bar_chart.png"),
+        (plot_interval_jitter,   "parsed_interval_jitter.png"),
+        (plot_packet_loss,       "parsed_packet_loss.png"),
+    ):
+        try:
+            p = fn(summary_df, output_dir / name)
+            if p is not None:
+                generated.append(p)
+        except Exception as exc:
+            log.warning("parsed summary plot '%s' failed: %s", name, exc)
+
+    log.info(
+        "Parsed summary: %d figures written to %s",
         len(generated),
         project_relative_path(output_dir),
     )
@@ -760,12 +628,13 @@ def generate_all_stage_summaries(
     Parameters
     ----------
     exports_dir:
-        ``data/exports/`` directory containing ``calibration_params.csv``
-        and ``sync_params.csv``.
+        ``data/exports/`` directory containing ``parsed_recording_summary.csv``,
+        ``calibration_params.csv``, and ``sync_params.csv``.
     sections_root_dir:
-        ``data/sections/`` directory (for orientation stats JSON files).
+        Kept for compatibility with callers. Orientation summaries are generated
+        from ``orientation_stats.csv`` in ``exports_dir``.
     output_dir:
-        Root output directory; sub-folders ``calibration/``, ``sync/``,
+        Root output directory; sub-folders ``parsed/``, ``calibration/``, ``sync/``,
         ``orientation/`` are created automatically.
 
     Returns
@@ -773,10 +642,19 @@ def generate_all_stage_summaries(
     Dict mapping stage name → list of generated Path objects.
     """
     results: dict[str, list[Path]] = {
+        "parsed": [],
         "calibration": [],
         "sync": [],
         "orientation": [],
     }
+
+    # ---- Parsed ----
+    try:
+        results["parsed"] = generate_parsed_summary(
+            exports_dir, output_dir / "parsed"
+        )
+    except Exception as exc:
+        log.warning("Parsed summary generation failed: %s", exc)
 
     # ---- Calibration ----
     cal_csv = exports_dir / "calibration_params.csv"
@@ -807,12 +685,18 @@ def generate_all_stage_summaries(
                     project_relative_path(exports_dir))
 
     # ---- Orientation ----
-    try:
-        results["orientation"] = generate_orientation_summary(
-            sections_root_dir, output_dir / "orientation"
-        )
-    except Exception as exc:
-        log.warning("Orientation summary generation failed: %s", exc)
+    orientation_csv = exports_dir / "orientation_stats.csv"
+    if orientation_csv.exists():
+        try:
+            ori_df = read_csv(orientation_csv)
+            results["orientation"] = generate_orientation_summary(
+                ori_df, output_dir / "orientation"
+            )
+        except Exception as exc:
+            log.warning("Orientation summary generation failed: %s", exc)
+    else:
+        log.warning("orientation_stats.csv not found in %s — skipping orientation summary",
+                    project_relative_path(exports_dir))
 
     total = sum(len(v) for v in results.values())
     log.info("Stage summaries complete: %d figures total", total)

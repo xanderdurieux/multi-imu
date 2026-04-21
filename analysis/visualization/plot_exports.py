@@ -5,6 +5,7 @@ The original monolithic file was split into three focused siblings:
 - ``plot_exports_features``   — feature EDA (label distributions, PCA, violins)
 - ``plot_exports_calibration`` — per-section calibration audits
 - ``plot_exports_sync``       — per-recording / per-session sync audits
+- ``plot_exports_orientation`` — per-recording / per-session orientation audits
 
 Shared helpers live in ``_exports_common``.
 """
@@ -28,6 +29,14 @@ from visualization.plot_exports_features import (
     plot_section_overview,
     run_eda,
 )
+from visualization.plot_exports_orientation import (
+    plot_orientation_method_quality_counts,
+    plot_orientation_method_residual_heatmap,
+    plot_orientation_method_selection,
+    plot_orientation_quality_overview,
+    plot_orientation_selected_residuals,
+    run_orientation_eda,
+)
 from visualization.plot_exports_sync import (
     plot_sync_calibration_anchor_overview,
     plot_sync_correlation_overview,
@@ -49,6 +58,11 @@ __all__ = [
     "plot_forward_confidence",
     "plot_gravity_residuals",
     "plot_label_distribution",
+    "plot_orientation_method_quality_counts",
+    "plot_orientation_method_residual_heatmap",
+    "plot_orientation_method_selection",
+    "plot_orientation_quality_overview",
+    "plot_orientation_selected_residuals",
     "plot_pca_by_label",
     "plot_quality_distribution",
     "plot_section_overview",
@@ -66,5 +80,6 @@ __all__ = [
     "plot_sync_session_strip",
     "run_calibration_eda",
     "run_eda",
+    "run_orientation_eda",
     "run_sync_eda",
 ]

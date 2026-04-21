@@ -1,14 +1,15 @@
 """Orientation estimation for the dual-IMU cycling pipeline.
 
-Implements Madgwick (IMU/MARG), complementary, and quaternion EKF filters plus
-a section/recording pipeline that scores variants and flattens the best result.
+Four AHRS filters (Madgwick, Mahony, Complementary, EKF) are run and scored
+using a gravity-residual metric in the known-static opening windows.  The
+best-performing method's quaternion output is written as the canonical
+orientation for each section.
 
 Usage
 -----
 ::
 
-    from orientation import run_orientation_filters, process_section_orientation
-    from orientation import process_recording_orientation, OrientationStats
+    from orientation import process_section_orientation, process_recording_orientation
 
 CLI::
 
@@ -16,22 +17,13 @@ CLI::
     python -m orientation --recording <recording_name>
 """
 
-from .pipeline import (
-    ALL_ORIENTATION_METHODS,
-    DEFAULT_CANONICAL_ORIENTATION_METHOD,
-    DEFAULT_ORIENTATION_VARIANTS,
-    OrientationStats,
-    run_orientation_filters,
-    process_section_orientation,
-    process_recording_orientation,
-)
+from .filters import METHODS, DEFAULT_PARAMS, run_filter
+from .pipeline import process_section_orientation, process_recording_orientation
 
 __all__ = [
-    "ALL_ORIENTATION_METHODS",
-    "DEFAULT_CANONICAL_ORIENTATION_METHOD",
-    "DEFAULT_ORIENTATION_VARIANTS",
-    "OrientationStats",
-    "run_orientation_filters",
+    "METHODS",
+    "DEFAULT_PARAMS",
+    "run_filter",
     "process_section_orientation",
     "process_recording_orientation",
 ]

@@ -10,6 +10,7 @@ from typing import Any
 
 import re
 
+import numpy as np
 import pandas as pd
 
 from common.paths import (
@@ -29,7 +30,10 @@ from .core import (
     detect_protocol_landmarks,
     estimate_sensor_intrinsics,
     estimate_sensor_alignment,
-    _find_first_stable_window,
+    _gravity_from_ranges,
+    _gyro_bias_from_ranges,
+    _GYRO_BIAS_DRIFT_THRESHOLD_DEG_S,
+    _segment_static_ranges,
     apply_calibration,
 )
 
@@ -251,6 +255,7 @@ def calibrate_section(
     all_intrinsics: dict[str, SensorIntrinsics] = {}
     all_alignment: dict[str, SensorAlignment] = {}
     all_opening: dict[str, OpeningSequence] = {}
+    all_closing: dict[str, OpeningSequence] = {}
     all_quality_tags: list[str] = []
     protocol_detected_any = False
     fallback_used = False
@@ -276,7 +281,7 @@ def calibrate_section(
         sensor_static_cal = static_cal if sensor == _ARDUINO_SENSOR else None
 
         try:
-            opening_seg = _cal_sensor(
+            opening_seg, closing_seg = _cal_sensor(
                 df=df,
                 sensor=sensor,
                 section_dir=section_dir,
@@ -294,6 +299,8 @@ def calibrate_section(
                 intrin = all_intrinsics[sensor]
                 if "fallback_static" not in intrin.quality_tags:
                     protocol_detected_any = True
+            if closing_seg is not None:
+                all_closing[sensor] = _build_opening_sequence(closing_seg)
 
         except Exception as exc:
             log.error(
@@ -335,6 +342,7 @@ def calibrate_section(
     section_cal = SectionCalibration(
         protocol_detected=protocol_detected_any,
         opening_sequence=all_opening,
+        closing_sequence=all_closing,
         intrinsics=all_intrinsics,
         alignment=all_alignment,
         quality={"overall": overall, "tags": sorted(set(all_quality_tags))},
@@ -360,7 +368,7 @@ def _cal_sensor(
     all_alignment: dict,
     all_quality_tags: list,
     recording_name: str,
-) -> CalibrationSegment | None:
+) -> tuple[CalibrationSegment | None, CalibrationSegment | None]:
     """Estimate intrinsics and alignment for one sensor and update the dicts.
 
     Returns the opening :class:`CalibrationSegment` if one was found, else ``None``.
@@ -397,7 +405,7 @@ def _cal_sensor(
         ts = df["timestamp"].to_numpy(dtype=float)
         segs = _clip_segments_to_range(segs, float(ts[0]), float(ts[-1]))
 
-    opening_seg, static_ranges = detect_protocol_landmarks(segs)
+    opening_seg, static_ranges, closing_seg = detect_protocol_landmarks(segs)
 
     fallback_used = False
     if not static_ranges:
@@ -421,7 +429,7 @@ def _cal_sensor(
                 quality="poor", quality_tags=["no_static_found"]
             )
             all_alignment[sensor] = SensorAlignment()
-            return None
+            return None, closing_seg
 
     # Intrinsics
     intrinsics = estimate_sensor_intrinsics(df, static_ranges, static_cal=static_cal)
@@ -430,35 +438,48 @@ def _cal_sensor(
     all_intrinsics[sensor] = intrinsics
     all_quality_tags.extend(intrinsics.quality_tags)
 
-    # Alignment window
-    if sensor == _ARDUINO_SENSOR and opening_seg is not None:
-        # Arduino: find first stable post-mount window after the opening routine
-        post_mount_window = _find_first_stable_window(
-            df,
-            after_ms=opening_seg.end_ms,
-            min_duration_ms=3000.0,
-            threshold_ms2=1.5,
-        )
-        if post_mount_window is not None:
-            alignment_window = post_mount_window
-            log.debug(
-                "%s/%s: using post-mount window [%.1f, %.1f] ms for alignment",
-                section_name, sensor, *alignment_window,
-            )
-        else:
-            # Fallback: use opening static range for alignment
-            alignment_window = static_ranges[0]
-            all_quality_tags.append(f"no_post_mount_window_{sensor}")
-            log.warning(
-                "%s/%s: no post-mount stable window found — using opening static for alignment",
-                section_name, sensor,
-            )
-    else:
-        # Sporsa (no mount change): use the post-tap static flank, which is
-        # the window immediately preceding the activity — symmetrical in
-        # intent with Arduino's post-mount window.  Falls back to the
-        # pre-tap window when only one static flank was detected.
-        alignment_window = static_ranges[-1]
+    # Closing-sequence quality checks (independent validation at end-of-session)
+    if closing_seg is not None:
+        closing_ranges = _segment_static_ranges(closing_seg)
+        if closing_ranges:
+            # Gyro bias drift: re-estimate from closing window and compare.
+            closing_gyro_bias = _gyro_bias_from_ranges(df, closing_ranges)
+            drift = float(np.linalg.norm(
+                np.array(intrinsics.gyro_bias) - closing_gyro_bias
+            ))
+            if drift > _GYRO_BIAS_DRIFT_THRESHOLD_DEG_S:
+                tag = f"closing_gyro_drift_{drift:.2f}deg_s"
+                intrinsics.quality_tags.append(tag)
+                all_quality_tags.append(tag)
+                if intrinsics.quality == "good":
+                    intrinsics.quality = "marginal"
+                log.debug(
+                    "%s/%s: gyro bias drifted %.2f °/s over session",
+                    section_name, sensor, drift,
+                )
+
+            # Closing static gravity residual: held-out validation of acc calibration.
+            _, closing_residual = _gravity_from_ranges(df, closing_ranges)
+            if np.isfinite(closing_residual):
+                if closing_residual >= 1.5:
+                    tag = "closing_static_poor"
+                    if intrinsics.quality != "poor":
+                        intrinsics.quality = "marginal"
+                elif closing_residual >= 0.5:
+                    tag = "closing_static_marginal"
+                else:
+                    tag = None
+                if tag:
+                    intrinsics.quality_tags.append(tag)
+                    all_quality_tags.append(tag)
+                log.debug(
+                    "%s/%s: closing static gravity residual %.3f m/s²",
+                    section_name, sensor, closing_residual,
+                )
+
+    # Alignment window: use the post-tap static flank for both sensors.
+    # This is the window immediately after the taps, before motion starts.
+    alignment_window = static_ranges[-1]
 
     alignment = estimate_sensor_alignment(df, alignment_window, full_df=df)
     all_alignment[sensor] = alignment
@@ -468,7 +489,7 @@ def _cal_sensor(
         section_name, sensor, intrinsics.quality,
         alignment.yaw_source, alignment.gravity_residual_ms2,
     )
-    return opening_seg
+    return opening_seg, closing_seg
 
 
 # ---------------------------------------------------------------------------

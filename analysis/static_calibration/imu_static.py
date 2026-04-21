@@ -93,13 +93,24 @@ def summarize_stationary_recording(
     t_start = int(work["timestamp"].iloc[0])
     t_end = int(work["timestamp"].iloc[-1])
 
+    mag_cols = [c for c in ("mx", "my", "mz") if c in work.columns]
+    mean_mag: dict[str, float] | None = None
+    n_samples_mag = 0
+    if len(mag_cols) == 3:
+        mag = work[mag_cols].dropna()
+        if not mag.empty:
+            mean_mag = {axis: float(mag[f"m{axis}"].mean()) for axis in AXES}
+            n_samples_mag = int(len(mag))
+
     return {
         "stem": stem,
         "dominant_face": dominant,
         "n_samples_acc": int(len(acc)),
         "n_samples_gyro": int(len(gyro)),
+        "n_samples_mag": n_samples_mag,
         "mean_acc": {axis: float(acc[f"a{axis}"].mean()) for axis in AXES},
         "mean_gyro": {axis: float(gyro[f"g{axis}"].mean()) for axis in AXES},
+        "mean_mag": mean_mag,
         "t_start_ms": t_start,
         "t_end_ms": t_end,
         "selected_duration_seconds": float((t_end - t_start) / 1000.0),
@@ -158,8 +169,29 @@ def _estimate_accelerometer_axis(
     return float(bias), float(scale)
 
 
+def _estimate_mag_hard_iron(mag_means: list[np.ndarray]) -> np.ndarray:
+    """Estimate magnetometer hard-iron bias from multiple orientations via sphere fitting.
+
+    Given n measurements m_i = R_i * B_earth + b_hi (where b_hi is the hard-iron
+    bias), all corrected measurements should lie on a sphere. We find the sphere
+    centre b_hi using the algebraic least-squares method (Coope 1993).
+
+    Requires at least 4 measurements covering diverse orientations; 6-face
+    recordings from the static calibration provide 6 well-distributed points.
+    """
+    M = np.array(mag_means, dtype=float)
+    n = len(M)
+    if n < 4:
+        return np.zeros(3)
+    # Linear system: [2*m | 1] @ [cx, cy, cz, (||c||² - r²)]ᵀ = ||m||²
+    A = np.hstack([2.0 * M, np.ones((n, 1))])
+    b = np.sum(M ** 2, axis=1)
+    x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    return x[:3]
+
+
 def estimate_calibration_from_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Estimate accelerometer bias/scale and gyroscope bias from per-recording summaries."""
+    """Estimate accelerometer bias/scale, gyroscope bias, and magnetometer hard-iron from per-recording summaries."""
 
     if not summaries:
         raise ValueError("Need at least one recording summary.")
@@ -189,10 +221,26 @@ def estimate_calibration_from_summaries(summaries: list[dict[str, Any]]) -> dict
         for axis in AXES
     }
 
+    # Magnetometer hard-iron estimation from all faces with valid mag readings.
+    mag_hi: dict[str, float] | None = None
+    mag_means = [
+        np.array([s["mean_mag"]["x"], s["mean_mag"]["y"], s["mean_mag"]["z"]])
+        for s in summaries
+        if s.get("mean_mag") is not None
+    ]
+    if len(mag_means) >= 4:
+        hi = _estimate_mag_hard_iron(mag_means)
+        mag_hi = {"x": float(hi[0]), "y": float(hi[1]), "z": float(hi[2])}
+    else:
+        warnings.append(
+            f"Magnetometer hard-iron not estimated: only {len(mag_means)} faces had mag readings (need ≥ 4)."
+        )
+
     return {
         "gravity_m_s2": GRAVITY,
         "accelerometer": {"bias": acc_bias, "scale": acc_scale},
         "gyroscope": {"bias_deg_s": gyro_bias},
+        "magnetometer": {"hard_iron_bias": mag_hi},
         "face_counts": face_counts,
         "warnings": warnings,
     }

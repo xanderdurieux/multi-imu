@@ -122,10 +122,6 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
             if plot:
                 plot_sensor_data(dst, output_path=out_dir / f"{sensor}.png")
 
-        # Per-recording timing stats at recording root (see write_recording_stats).
-        stats_path = write_recording_stats(recording_name)
-        log.info("parse %s: wrote stats %s", recording_name, project_relative_path(stats_path))
-
         # Calibration-segment detection and JSON export.
         cal_json_payload: dict = {"recording_name": recording_name, "sensors": {}}
         for sensor_name in ("sporsa", "arduino"):
@@ -163,6 +159,29 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
                 "parse %s: wrote calibration segments for %s (%d found)",
                 recording_name, sensor_name, len(segments),
             )
+
+        # Per-recording timing stats — written after calibration_segments.json so
+        # segment counts are available for quality classification.
+        stats_path = write_recording_stats(recording_name)
+        log.info("parse %s: wrote stats %s", recording_name, project_relative_path(stats_path))
+
+        if plot:
+            from visualization.plot_parsed_stats import (
+                plot_interval_distribution,
+                plot_packet_loss_received,
+                plot_timestamp_continuity,
+            )
+            dfs = {
+                s: read_csv(out_dir / f"{s}.csv")
+                for s in ("sporsa", "arduino")
+                if (out_dir / f"{s}.csv").exists()
+            }
+            if dfs:
+                plot_timestamp_continuity(dfs, out_dir / "parsed_timing.png")
+                plot_interval_distribution(dfs, out_dir / "parsed_intervals.png")
+            if "arduino" in dfs and "timestamp_received" in dfs["arduino"].columns:
+                plot_packet_loss_received(dfs["arduino"], out_dir / "parsed_packet_loss.png")
+
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

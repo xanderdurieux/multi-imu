@@ -1,4 +1,4 @@
-"""Shared path resolution and CSV I/O helpers."""
+"""Shared path resolution and CSV/JSON I/O helpers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from common.signals import add_imu_norms
 
 
 # ---------------------------------------------------------------------------
-# CSV schema and shared I/O
+# CSV I/O
 # ---------------------------------------------------------------------------
 
 CSV_COLUMNS: list[str] = [
@@ -72,10 +72,10 @@ def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     return add_imu_norms(out)
- 
+
 
 def read_csv(csv_path: Path | str) -> pd.DataFrame:
-    """Load a CSV from disk"""
+    """Load a CSV from disk."""
     path = Path(csv_path)
     df = pd.read_csv(path)
     if _looks_like_imu_dataframe(df):
@@ -92,6 +92,14 @@ def write_csv(df: pd.DataFrame, csv_path: Path | str) -> None:
     out.to_csv(path, index=False)
 
 
+def list_csv_files(directory: Path | str) -> list[Path]:
+    """Return all CSV files directly inside *directory*, sorted by name."""
+    path = Path(directory)
+    if not path.is_dir():
+        raise FileNotFoundError(f"Directory not found: {path}")
+    return sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
+
+
 # ---------------------------------------------------------------------------
 # JSON I/O
 # ---------------------------------------------------------------------------
@@ -99,7 +107,12 @@ def write_csv(df: pd.DataFrame, csv_path: Path | str) -> None:
 def read_json_file(path: Path | str) -> Any:
     """Load a JSON file (UTF-8). Returns the decoded object (dict, list, etc.)."""
     p = Path(path)
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        import logging
+        logging.warning("Could not parse JSON file %s: %s", path, exc)
+        return {}
 
 
 def write_json_file(
@@ -194,7 +207,7 @@ def project_relative_path(path: Path | str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Recording and section naming
+# Recording and section paths
 # ---------------------------------------------------------------------------
 
 def session_input_dir(session_name: str) -> Path:
@@ -263,6 +276,22 @@ def iter_sections_for_recording(recording_name: str) -> list[Path]:
     return [p for _i, p in sorted(out, key=lambda t: t[0])]
 
 
+def recording_sort_key(name_or_path: Path | str) -> tuple[str, int]:
+    """Sort recording names like ``..._r1``, ``..._r2``, ``..._r10`` naturally."""
+    name = Path(name_or_path).name
+    match = re.search(r"_r(\d+)$", name)
+    prefix = name[: match.start()] if match else name
+    return prefix, int(match.group(1)) if match else 0
+
+
+def section_sort_key(name_or_path: Path | str) -> tuple[str, int, int]:
+    """Sort section names like ``..._r1s1`` naturally."""
+    name = Path(name_or_path).name
+    match = re.search(r"_r(\d+)s(\d+)$", name)
+    prefix = name[: match.start()] if match else name
+    return prefix, int(match.group(1)) if match else 0, int(match.group(2)) if match else 0
+
+
 # ---------------------------------------------------------------------------
 # Directory resolution
 # ---------------------------------------------------------------------------
@@ -300,16 +329,8 @@ def resolve_data_dir(target: str | Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# CSV lookup helpers
+# Stage artifact paths
 # ---------------------------------------------------------------------------
-
-def list_csv_files(directory: Path | str) -> list[Path]:
-    """Return all CSV files directly inside *directory*, sorted by name."""
-    path = Path(directory)
-    if not path.is_dir():
-        raise FileNotFoundError(f"Directory not found: {path}")
-    return sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
-
 
 def sensor_csv(ref: str, sensor_name: str) -> Path:
     """Return ``<sensor_name>.csv`` inside the resolved directory.
@@ -323,10 +344,6 @@ def sensor_csv(ref: str, sensor_name: str) -> Path:
     return csv_path
 
 
-# ---------------------------------------------------------------------------
-# Label path helpers
-# ---------------------------------------------------------------------------
-
 def recording_labels_csv(recording_name: str) -> Path:
     """Return the label CSV path for a recording."""
     return labels_root() / f"labels_intervals_{recording_name}.csv"
@@ -337,8 +354,14 @@ def section_labels_csv(sec_dir: Path | str) -> Path:
     return Path(sec_dir) / "labels" / "labels.csv"
 
 
+def static_calibration_json() -> Path:
+    """Return the path to the static (device-level) calibration JSON."""
+    return calibrations_root() / "calibration.json"
+
+
+
 # ---------------------------------------------------------------------------
-# Config JSON helpers
+# Config paths and loading
 # ---------------------------------------------------------------------------
 
 def default_workflow_config_path() -> Path:
@@ -354,6 +377,11 @@ def default_calibration_segments_config_path() -> Path:
 def default_sync_config_path() -> Path:
     """Return the path to the default sync search-parameter config file."""
     return configs_root() / "sync_args.json"
+
+
+def default_orientation_config_path() -> Path:
+    """Return the path to the default orientation filter config file."""
+    return configs_root() / "orientation.default.json"
 
 
 def _merge_nested_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -399,6 +427,15 @@ def load_calibration_segments_config_data(override_path: Path | str | None = Non
 def load_sync_config_data(override_path: Path | str | None = None) -> dict:
     """Load sync config data with default-as-base merging."""
     default_payload = read_json_file(default_sync_config_path())
+    if override_path is None:
+        return dict(default_payload)
+    override_payload = read_json_file(override_path)
+    return _merge_nested_dicts(default_payload, override_payload)
+
+
+def load_orientation_config_data(override_path: Path | str | None = None) -> dict:
+    """Load orientation config data with default-as-base merging."""
+    default_payload = read_json_file(default_orientation_config_path())
     if override_path is None:
         return dict(default_payload)
     override_payload = read_json_file(override_path)

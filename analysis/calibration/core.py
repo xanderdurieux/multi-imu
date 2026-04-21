@@ -190,6 +190,7 @@ class SectionCalibration:
 
     protocol_detected: bool = False
     opening_sequence: dict[str, OpeningSequence] = field(default_factory=dict)
+    closing_sequence: dict[str, OpeningSequence] = field(default_factory=dict)
     intrinsics: dict[str, SensorIntrinsics] = field(default_factory=dict)
     alignment: dict[str, SensorAlignment] = field(default_factory=dict)
     quality: dict[str, Any] = field(
@@ -202,6 +203,7 @@ class SectionCalibration:
             "schema_version": 2,
             "protocol_detected": self.protocol_detected,
             "opening_sequence": {k: v.to_dict() for k, v in self.opening_sequence.items()},
+            "closing_sequence": {k: v.to_dict() for k, v in self.closing_sequence.items()},
             "intrinsics": {k: v.to_dict() for k, v in self.intrinsics.items()},
             "alignment": {k: v.to_dict() for k, v in self.alignment.items()},
             "quality": self.quality,
@@ -216,9 +218,16 @@ class SectionCalibration:
             for sensor, payload in raw_opening.items()
             if payload
         }
+        raw_closing = d.get("closing_sequence") or {}
+        closing = {
+            sensor: OpeningSequence.from_dict(payload)
+            for sensor, payload in raw_closing.items()
+            if payload
+        }
         return cls(
             protocol_detected=bool(d.get("protocol_detected", False)),
             opening_sequence=opening,
+            closing_sequence=closing,
             intrinsics={k: SensorIntrinsics.from_dict(v) for k, v in d.get("intrinsics", {}).items()},
             alignment={k: SensorAlignment.from_dict(v) for k, v in d.get("alignment", {}).items()},
             quality=dict(d.get("quality", {"overall": "good", "tags": []})),
@@ -269,6 +278,90 @@ def _gravity_from_ranges(
         g_body = g_body * (_G / g_norm)
 
     return g_body, float(residual)
+
+
+def _gravity_from_ranges_robust(
+    df: pd.DataFrame,
+    ranges: list[tuple[float, float]],
+    *,
+    outlier_iqr_multiplier: float = 1.5,
+) -> tuple[np.ndarray, float, dict[str, Any]]:
+    """Estimate gravity with IQR-based outlier rejection.
+
+    More robust to vibration and acceleration spikes. Detects and excludes
+    samples where ||a|| is an outlier (via interquartile range), then uses
+    the clean subset for gravity estimation.
+
+    Parameters
+    ----------
+    df:
+        Raw IMU DataFrame.
+    ranges:
+        List of ``(start_ms, end_ms)`` timestamp pairs defining static windows.
+    outlier_iqr_multiplier:
+        IQR multiplier for outlier bounds. Standard is 1.5 (Tukey's fences).
+        Increase for more permissive (fewer outliers removed), decrease for stricter.
+
+    Returns
+    -------
+    (gravity_vector_body, residual_ms2, diagnostics)
+        ``diagnostics``: dict with:
+        - ``n_samples_total``: total samples in ranges
+        - ``n_samples_after_filter``: samples kept
+        - ``n_outliers_removed``: samples rejected
+        - ``pct_outliers``: percentage of outliers
+        - ``norm_before_filter``: median ||a|| before filtering
+        - ``norm_after_filter``: mean ||a|| after filtering
+    """
+    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
+    if not acc_cols or not ranges:
+        return np.array([0.0, 0.0, _G]), float("nan"), {"error": "no_data"}
+
+    ts = df["timestamp"].to_numpy(dtype=float)
+    chunks: list[np.ndarray] = []
+    for s_ms, e_ms in ranges:
+        mask = (ts >= s_ms) & (ts <= e_ms)
+        chunk = df.loc[mask, acc_cols].to_numpy(dtype=float)
+        finite = np.all(np.isfinite(chunk), axis=1)
+        if finite.any():
+            chunks.append(chunk[finite])
+
+    if not chunks:
+        return np.array([0.0, 0.0, _G]), float("nan"), {"error": "no_finite_data"}
+
+    combined = np.vstack(chunks)
+    n_total = len(combined)
+
+    # Compute acceleration norms and identify outliers
+    norms = np.linalg.norm(combined, axis=1)
+    Q1, Q3 = np.percentile(norms, [25, 75])
+    IQR = Q3 - Q1
+    lower = Q1 - outlier_iqr_multiplier * IQR
+    upper = Q3 + outlier_iqr_multiplier * IQR
+
+    keep_mask = (norms >= lower) & (norms <= upper)
+    n_kept = keep_mask.sum()
+    n_outliers = n_total - n_kept
+
+    # Estimate gravity from non-outlier samples
+    g_body = np.nanmean(combined[keep_mask], axis=0)
+    g_norm = np.linalg.norm(g_body)
+    residual = abs(g_norm - _G)
+
+    if g_norm > 0.1:
+        g_body = g_body * (_G / g_norm)
+
+    diagnostics = {
+        "n_samples_total": int(n_total),
+        "n_samples_kept": int(n_kept),
+        "n_outliers_removed": int(n_outliers),
+        "pct_outliers": float(100.0 * n_outliers / n_total if n_total > 0 else 0.0),
+        "norm_before_filter": float(np.median(norms)),
+        "norm_after_filter": float(g_norm),
+        "outlier_bounds": [float(lower), float(upper)],
+    }
+
+    return g_body, float(residual), diagnostics
 
 
 def _gyro_bias_from_ranges(
@@ -447,93 +540,48 @@ def _apply_yaw(R_gravity: np.ndarray, yaw_angle_rad: float) -> np.ndarray:
 
 
 
-# ---------------------------------------------------------------------------
-# Protocol detection
-# ---------------------------------------------------------------------------
+def _segment_static_ranges(seg: "CalibrationSegment") -> list[tuple[float, float]]:
+    """Extract the genuinely-static flank windows from a calibration segment.
 
-
-def _find_first_stable_window(
-    df: pd.DataFrame,
-    after_ms: float,
-    *,
-    min_duration_ms: float = 3000.0,
-    threshold_ms2: float = 1.5,
-) -> tuple[float, float] | None:
-    """Find the first stable (low-motion) window that starts at or after *after_ms*.
-
-    A sample is stable when ``||acc_norm| - g| < threshold_ms2``.  Duration
-    is measured in milliseconds from the timestamp column.
-
-    Returns ``(start_ms, end_ms)`` or ``None`` when no window is found.
+    Falls back to the full segment span when no flank durations are recorded.
     """
-    acc_cols = [c for c in ("ax", "ay", "az") if c in df.columns]
-    if not acc_cols:
-        return None
-
-    ts = df["timestamp"].to_numpy(dtype=float)
-    mask_after = ts >= after_ms
-    if not np.any(mask_after):
-        return None
-
-    ts_after = ts[mask_after]
-    acc = df.loc[mask_after, acc_cols].to_numpy(dtype=float)
-    norm = np.sqrt(np.nansum(acc ** 2, axis=1))
-    is_stable = np.abs(norm - _G) < threshold_ms2
-
-    run_start: int | None = None
-    for i, flag in enumerate(is_stable):
-        if flag and run_start is None:
-            run_start = i
-        elif not flag and run_start is not None:
-            if ts_after[i - 1] - ts_after[run_start] >= min_duration_ms:
-                return float(ts_after[run_start]), float(ts_after[i - 1])
-            run_start = None
-
-    if run_start is not None:
-        if ts_after[-1] - ts_after[run_start] >= min_duration_ms:
-            return float(ts_after[run_start]), float(ts_after[-1])
-
-    return None
+    ranges: list[tuple[float, float]] = []
+    pre_end = seg.start_ms + seg.static_pre_ms
+    if seg.static_pre_ms > 0 and pre_end > seg.start_ms:
+        ranges.append((seg.start_ms, pre_end))
+    post_start = seg.end_ms - seg.static_post_ms
+    if seg.static_post_ms > 0 and seg.end_ms > post_start:
+        ranges.append((post_start, seg.end_ms))
+    if not ranges:
+        ranges.append((seg.start_ms, seg.end_ms))
+    return ranges
 
 
 def detect_protocol_landmarks(
     segments: list[CalibrationSegment],
-) -> tuple[CalibrationSegment | None, list[tuple[float, float]]]:
-    """Derive opening-routine static ranges from pre-detected calibration segments.
+) -> tuple[CalibrationSegment | None, list[tuple[float, float]], CalibrationSegment | None]:
+    """Derive opening- and closing-routine static ranges from pre-detected segments.
 
-    The first detected segment is the opening routine.  Its ``static_pre_ms``
-    and ``static_post_ms`` durations define the actual genuinely-static flanks
-    at the segment boundaries; the span between the last peak and the end of
-    the segment can include post-tap settling motion and must not be treated
-    as static.
+    The first detected segment is the opening routine; the last segment (when
+    more than one is present) is the closing routine.
 
     Returns
     -------
-    (opening_segment, static_ranges)
+    (opening_segment, static_ranges, closing_segment)
         ``opening_segment``: the first :class:`CalibrationSegment`, or ``None``.
         ``static_ranges``: list of ``(start_ms, end_ms)`` timestamp pairs
-        for the pre- and post-tap static flanks (in chronological order).
+        for the opening pre- and post-tap static flanks (in chronological order).
         Empty when no segments were found.
+        ``closing_segment``: the last :class:`CalibrationSegment` if a second
+        segment is present, else ``None``.
     """
     if not segments:
-        return None, []
+        return None, [], None
 
-    seg = segments[0]  # opening routine = first calibration sequence
-    static_ranges: list[tuple[float, float]] = []
-
-    pre_end = seg.start_ms + seg.static_pre_ms
-    if seg.static_pre_ms > 0 and pre_end > seg.start_ms:
-        static_ranges.append((seg.start_ms, pre_end))
-
-    post_start = seg.end_ms - seg.static_post_ms
-    if seg.static_post_ms > 0 and seg.end_ms > post_start:
-        static_ranges.append((post_start, seg.end_ms))
-
-    if not static_ranges:
-        # No reliable flank durations recorded — fall back to the segment span.
-        static_ranges.append((seg.start_ms, seg.end_ms))
-
-    return seg, static_ranges
+    opening = segments[0]
+    static_ranges = _segment_static_ranges(opening)
+    closing = segments[-1] if len(segments) > 1 else None
+    return opening, static_ranges, closing
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +598,7 @@ def estimate_sensor_intrinsics(
     static_ranges: list[tuple[float, float]],
     *,
     static_cal: dict[str, Any] | None = None,
+    use_robust_gravity: bool = True,
 ) -> SensorIntrinsics:
     """Estimate sensor intrinsics from static windows.
 
@@ -578,6 +627,9 @@ def estimate_sensor_intrinsics(
         Optional static hardware calibration reference dict.  Expected
         sub-dicts: ``accelerometer.bias``, ``accelerometer.scale``,
         ``gyroscope.bias_deg_s``.
+    use_robust_gravity:
+        If ``True`` (default), use IQR-based outlier rejection for gravity
+        estimation. If ``False``, use simple mean (faster but less robust).
 
     Returns
     -------
@@ -589,7 +641,14 @@ def estimate_sensor_intrinsics(
     gyro_bias = _gyro_bias_from_ranges(df, static_ranges)
 
     # Raw body-frame gravity for quality assessment.
-    g_body, residual = _gravity_from_ranges(df, static_ranges)
+    if use_robust_gravity:
+        g_body, residual, gravity_diag = _gravity_from_ranges_robust(df, static_ranges)
+        if gravity_diag.get("n_outliers_removed", 0) > 0:
+            n_outliers = gravity_diag.get("n_outliers_removed", 0)
+            pct_outliers = gravity_diag.get("pct_outliers", 0.0)
+            quality_tags.append(f"gravity_outliers_removed_{n_outliers}_{pct_outliers:.1f}pct")
+    else:
+        g_body, residual = _gravity_from_ranges(df, static_ranges)
 
     if np.isnan(residual) or residual > 2.0:
         quality = "poor"

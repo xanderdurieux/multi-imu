@@ -14,13 +14,10 @@ from common.paths import (
     exports_root,
     iter_sections_for_recording,
     project_relative_path,
+    recording_sort_key,
     recording_stage_dir,
     recordings_root,
     write_json_file,
-)
-from orientation.pipeline import (
-    DEFAULT_CANONICAL_ORIENTATION_METHOD,
-    DEFAULT_ORIENTATION_VARIANTS,
 )
 from visualization.stage_plots import (
     plot_recording_pipeline_stage,
@@ -44,13 +41,13 @@ def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
     recordings: list[str] = []
     for session in cfg.sessions:
         prefix = f"{session}_r"
-        for d in sorted(root.iterdir()):
+        for d in sorted(root.iterdir(), key=recording_sort_key):
             if d.is_dir() and d.name.startswith(prefix):
                 recordings.append(d.name)
 
     if not recordings and not cfg.sessions:
         # Default: all recordings.
-        recordings = sorted(d.name for d in root.iterdir() if d.is_dir())
+        recordings = sorted((d.name for d in root.iterdir() if d.is_dir()), key=recording_sort_key)
 
     return recordings
 
@@ -146,32 +143,17 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "orientation":
         from orientation.pipeline import process_recording_orientation
-        canonical = (
-            DEFAULT_CANONICAL_ORIENTATION_METHOD
-            if cfg.orientation_filter == "auto"
-            else cfg.orientation_filter
-        )
-        variants = (
-            list(DEFAULT_ORIENTATION_VARIANTS)
-            if cfg.orientation_filter == "auto"
-            else [cfg.orientation_filter]
-        )
+        orient_method = cfg.orientation_filter  # "auto" or specific method name
         for rec in recordings:
             try:
                 results = process_recording_orientation(
                     rec,
-                    canonical_variant=canonical,
-                    variants=variants,
+                    method=orient_method,
                     sample_rate_hz=cfg.sample_rate_hz,
                     force=cfg.force,
                 )
                 result["ok"] += len(results)
-                if not cfg.no_plots:
-                    for section_dir in iter_sections_for_recording(rec):
-                        try:
-                            plot_section_pipeline_stage(section_dir, "orientation")
-                        except Exception as exc:
-                            log.warning("orientation plots failed for %s: %s", section_dir.name, exc)
+                # Plots are now generated inside process_recording_orientation.
             except Exception as exc:
                 log.error("orientation failed for %s: %s", rec, exc)
                 result["failed"] += 1
@@ -247,6 +229,17 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
         except Exception as exc:
             log.error("exports failed: %s", exc)
             result["failed"] += 1
+        if not cfg.no_plots:
+            try:
+                from common.paths import sections_root
+                from reporting.stage_summaries import generate_all_stage_summaries
+                generate_all_stage_summaries(
+                    exports_dir=exports_root(),
+                    sections_root_dir=sections_root(),
+                    output_dir=data_root() / "report" / "figures",
+                )
+            except Exception as exc:
+                log.warning("stage summary plots failed during exports: %s", exc)
 
     elif stage == "dataset_summary":
         # Reads: data/exports/features_fused.csv

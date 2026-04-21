@@ -262,6 +262,7 @@ def plot_calibration_protocol(
     cal_dir = section_dir / "calibrated"
 
     opening_block = cal_data.get("opening_sequence") or {}
+    closing_block = cal_data.get("closing_sequence") or {}
     alignment_block = cal_data.get("alignment", {})
     protocol_detected = cal_data.get("protocol_detected", False)
 
@@ -296,29 +297,31 @@ def plot_calibration_protocol(
                 ax.axvspan(x0, x1, facecolor=facecolor, alpha=alpha, label=label)
 
         if protocol_detected and opening_seq:
-            _shade(opening_seq.get("pre_static_start_ms", 0),
-                   opening_seq.get("pre_static_end_ms", 0),
-                   "green", "pre-tap static (bias)")
-            _shade(opening_seq.get("post_static_start_ms", 0),
-                   opening_seq.get("post_static_end_ms", 0),
-                   "lime", "post-tap static")
+            _shade(
+                opening_seq.get("pre_static_start_ms", 0),
+                opening_seq.get("pre_static_end_ms", 0),
+                "green", "opening pre-tap static (bias)",
+            )
+            _shade(
+                opening_seq.get("post_static_start_ms", 0),
+                opening_seq.get("post_static_end_ms", 0),
+                "lime", "opening post-tap static",
+            )
 
-            # Mark tap peaks
-            tap_times_ms = opening_seq.get("tap_times_ms") or []
-            if tap_times_ms:
-                tap_ts_s: list[float] = []
-                tap_vals: list[float] = []
-                for tap_ms in tap_times_ms:
-                    idx = int(np.abs(ts - float(tap_ms)).argmin())
-                    tap_ts_s.append((ts[idx] - t0) / 1000.0)
-                    tap_vals.append(float(acc_norm[idx]))
-                ax.scatter(tap_ts_s, tap_vals, color="red", s=25, zorder=5, label="taps")
-            else:
-                tap_indices = opening_seq.get("tap_cluster", [])
-                if tap_indices:
-                    tap_ts_s = [(ts[i] - t0) / 1000.0 for i in tap_indices if 0 <= i < len(ts)]
-                    tap_vals = [acc_norm[i] for i in tap_indices if 0 <= i < len(acc_norm)]
-                    ax.scatter(tap_ts_s, tap_vals, color="red", s=25, zorder=5, label="taps")
+        closing_seq = closing_block.get(sensor) or {}
+        if protocol_detected and closing_seq:
+            _shade(
+                closing_seq.get("pre_static_start_ms", 0),
+                closing_seq.get("pre_static_end_ms", 0),
+                "#ffb347", "closing pre-static",
+                alpha=0.14,
+            )
+            _shade(
+                closing_seq.get("post_static_start_ms", 0),
+                closing_seq.get("post_static_end_ms", 0),
+                "#c77dff", "closing post-static",
+                alpha=0.14,
+            )
 
         # Alignment window
         aln = alignment_block.get(sensor, {})

@@ -1,15 +1,18 @@
-"""Aggregate calibration and sync parameters from sections/recordings."""
+"""Aggregate parsed, calibration, and sync parameters from sections/recordings."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import pandas as pd
 
 from common.paths import (
     project_relative_path,
+    recording_sort_key,
+    section_sort_key,
     recordings_root,
     sections_root,
 )
@@ -74,7 +77,7 @@ def aggregate_calibration_params(
 
     rows: list[dict] = []
 
-    for section_dir in sorted(root.iterdir()):
+    for section_dir in sorted(root.iterdir(), key=section_sort_key):
         if not section_dir.is_dir():
             continue
 
@@ -157,6 +160,84 @@ def aggregate_calibration_params(
     return df
 
 
+# ---------------------------------------------------------------------------
+# Orientation stats aggregation
+# ---------------------------------------------------------------------------
+
+def aggregate_orientation_stats(
+    recording_names: list[str] | None = None,
+) -> pd.DataFrame:
+    """Collect orientation_stats.json from all sections into a flat DataFrame.
+
+    One row per section.  Columns:
+
+    ``section_id``, ``recording_name``, ``selected_method``.
+
+    Per-sensor (sporsa / arduino):
+        ``<sensor>_selected_residual_ms2``, ``<sensor>_quality``.
+
+    Per-method per-sensor (for every method found in any section):
+        ``<sensor>_<method>_residual_ms2``, ``<sensor>_<method>_quality``.
+    """
+    root = sections_root()
+    if not root.exists():
+        log.warning("sections_root does not exist: %s", project_relative_path(root))
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+
+    for section_dir in sorted(root.iterdir(), key=section_sort_key):
+        if not section_dir.is_dir():
+            continue
+
+        if recording_names is not None:
+            if not any(section_dir.name.startswith(rec) for rec in recording_names):
+                continue
+
+        stats_path = section_dir / "orientation" / "orientation_stats.json"
+        if not stats_path.exists():
+            log.debug("No orientation_stats.json for section %s", section_dir.name)
+            continue
+
+        try:
+            data = json.loads(stats_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("Failed to read %s: %s", project_relative_path(stats_path), exc)
+            continue
+
+        rec_name = section_dir.name.rsplit("s", 1)[0] if "s" in section_dir.name else section_dir.name
+
+        row: dict = {
+            "section_id": section_dir.name,
+            "recording_name": rec_name,
+            "selected_method": data.get("selected_method", ""),
+        }
+
+        sensors_block = data.get("sensors", {})
+        all_methods_block = data.get("all_methods", {})
+
+        for sensor in ("sporsa", "arduino"):
+            sensor_sel = sensors_block.get(sensor, {})
+            row[f"{sensor}_selected_residual_ms2"] = sensor_sel.get("selected_residual_ms2")
+            row[f"{sensor}_quality"] = sensor_sel.get("quality", "")
+
+            sensor_methods = all_methods_block.get(sensor, {})
+            for method, mdata in sensor_methods.items():
+                row[f"{sensor}_{method}_residual_ms2"] = mdata.get("gravity_residual_ms2")
+                row[f"{sensor}_{method}_quality"] = mdata.get("quality", "")
+
+        rows.append(row)
+        log.debug("Loaded orientation stats for section %s", section_dir.name)
+
+    if not rows:
+        log.warning("No orientation_stats.json files found under %s", project_relative_path(root))
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    log.info("Aggregated orientation stats: %d sections", len(df))
+    return df
+
+
 def _unpack3(value, default: float) -> tuple[float, float, float]:
     """Unpack a 3-element list, filling with default on failure.
 
@@ -207,9 +288,7 @@ def aggregate_sync_params(
 
     rows: list[dict] = []
 
-    targets = sorted(root.iterdir()) if recording_names is None else [
-        root / name for name in recording_names
-    ]
+    targets = sorted([root / name for name in recording_names], key=recording_sort_key) if recording_names is not None else sorted(root.iterdir(), key=recording_sort_key)
 
     for rec_dir in targets:
         if not rec_dir.is_dir():
@@ -294,3 +373,67 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
 
     log.debug("Loaded sync params for recording %s", recording_name)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Parsed parameter aggregation
+# ---------------------------------------------------------------------------
+
+def aggregate_parsed_params(
+    recording_names: list[str] | None = None,
+) -> pd.DataFrame:
+    """Collect recording_stats.json from all parsed recordings into a flat DataFrame.
+
+    One row per recording with columns:
+    ``recording_name``, ``session_name``, ``quality_category``, ``quality_reason``,
+    ``sporsa_segments``, ``arduino_segments``, and per-sensor timing fields
+    prefixed ``sporsa_`` / ``arduino_``.
+    """
+    root = recordings_root()
+    if not root.exists():
+        log.warning("recordings_root does not exist: %s", project_relative_path(root))
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+
+    targets = sorted([root / name for name in recording_names], key=recording_sort_key) if recording_names is not None else sorted(root.iterdir(), key=recording_sort_key)
+
+    for rec_dir in targets:
+        if not rec_dir.is_dir():
+            continue
+
+        stats_path = rec_dir / "parsed" / "recording_stats.json"
+        if not stats_path.exists():
+            log.debug("No recording_stats.json for %s", rec_dir.name)
+            continue
+
+        try:
+            data = json.loads(stats_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("Failed to read %s: %s", project_relative_path(stats_path), exc)
+            continue
+
+        row: dict = {
+            "recording_name": data.get("recording_name", rec_dir.name),
+            "session_name": data.get("session_name", ""),
+            "quality_category": data.get("quality_category", ""),
+            "quality_reason": data.get("quality_reason", ""),
+            "sporsa_segments": data.get("sporsa_segments"),
+            "arduino_segments": data.get("arduino_segments"),
+        }
+
+        for sensor in ("sporsa", "arduino"):
+            stream = data.get("streams", {}).get(sensor, {})
+            for k, v in stream.items():
+                row[f"{sensor}_{k}"] = v
+
+        rows.append(row)
+        log.debug("Loaded parsed stats for recording %s", rec_dir.name)
+
+    if not rows:
+        log.warning("No recording_stats.json files found under %s", project_relative_path(root))
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    log.info("Aggregated parsed params: %d recordings", len(df))
+    return df

@@ -14,10 +14,11 @@ from common.paths import (
     data_root,
     project_relative_path,
     read_csv,
+    section_sort_key,
     sections_root,
     write_csv,
 )
-from exports.aggregate import aggregate_calibration_params, aggregate_sync_params
+from exports.aggregate import aggregate_calibration_params, aggregate_orientation_stats, aggregate_parsed_params, aggregate_sync_params
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def aggregate_features(
 
     frames: list[pd.DataFrame] = []
 
-    for section_dir in sorted(root.iterdir()):
+    for section_dir in sorted(root.iterdir(), key=section_sort_key):
         if not section_dir.is_dir():
             continue
 
@@ -262,23 +263,8 @@ def run_exports(
         output_dir = data_root() / "exports"
     output_dir = Path(output_dir)
 
-    manifest_path = output_dir / "export_manifest.json"
-    if not force and manifest_path.exists():
-        log.info(
-            "Export already exists at %s (use force=True to re-run)",
-            project_relative_path(output_dir),
-        )
-        existing: dict[str, Path] = {}
-        try:
-            data = json.loads(manifest_path.read_text())
-            for name, rel_path in data.get("tables", {}).items():
-                existing[name] = analysis_root() / rel_path
-        except Exception:
-            pass
-        existing["export_manifest"] = manifest_path
-        if not no_plots:
-            _run_eda_safe(existing.get("features_fused"), output_dir)
-        return existing
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
 
     log.info(
         "Running export pipeline (min_quality=%s, recordings=%s)",
@@ -286,12 +272,69 @@ def run_exports(
         recording_names,
     )
 
+    # Always write params tables — independent of whether features exist or cache is valid.
+    parsed_df = aggregate_parsed_params(recording_names)
+    if not parsed_df.empty:
+        parsed_path = output_dir / "parsed_recording_summary.csv"
+        parsed_df.to_csv(parsed_path, index=False)
+        paths["parsed_recording_summary"] = parsed_path
+        log.info("Wrote parsed_recording_summary.csv (%d recordings)", len(parsed_df))
+    else:
+        log.warning("No parsed stats found; parsed_recording_summary.csv not written")
+
+    cal_df = aggregate_calibration_params(recording_names)
+    if not cal_df.empty:
+        cal_path = output_dir / "calibration_params.csv"
+        cal_df.to_csv(cal_path, index=False)
+        paths["calibration_params"] = cal_path
+        log.info("Wrote calibration_params.csv (%d sections)", len(cal_df))
+    else:
+        log.warning("No calibration params found; calibration_params.csv not written")
+
+    sync_df = aggregate_sync_params(recording_names)
+    if not sync_df.empty:
+        sync_path = output_dir / "sync_params.csv"
+        sync_df.to_csv(sync_path, index=False)
+        paths["sync_params"] = sync_path
+        log.info("Wrote sync_params.csv (%d recordings)", len(sync_df))
+    else:
+        log.warning("No sync params found; sync_params.csv not written")
+
+    orient_df = aggregate_orientation_stats(recording_names)
+    if not orient_df.empty:
+        orient_path = output_dir / "orientation_stats.csv"
+        orient_df.to_csv(orient_path, index=False)
+        paths["orientation_stats"] = orient_path
+        log.info("Wrote orientation_stats.csv (%d sections)", len(orient_df))
+    else:
+        log.warning("No orientation stats found; orientation_stats.csv not written")
+
+    # Feature tables: honour the manifest cache.
+    manifest_path = output_dir / "export_manifest.json"
+    if not force and manifest_path.exists():
+        log.info(
+            "Feature export cache exists at %s (use force=True to re-run features)",
+            project_relative_path(output_dir),
+        )
+        try:
+            data = json.loads(manifest_path.read_text())
+            for name, rel_path in data.get("tables", {}).items():
+                paths[name] = analysis_root() / rel_path
+        except Exception:
+            pass
+        paths["export_manifest"] = manifest_path
+        if not no_plots:
+            _run_eda_safe(paths.get("features_fused"), output_dir)
+            _run_params_eda_safe(cal_df, sync_df, orient_df, output_dir)
+        return paths
+
     df = aggregate_features(recording_names, min_quality_label=min_quality_label)
     if df.empty:
-        log.warning("No data after aggregation; nothing to export.")
-        return {}
+        log.warning("No features after aggregation; skipping feature tables and EDA plots.")
+        return paths
 
-    paths, cal_df, sync_df = export_feature_tables(df, output_dir, recording_names=recording_names)
+    feature_paths, _, _ = export_feature_tables(df, output_dir, recording_names=recording_names)
+    paths.update(feature_paths)
 
     if not no_plots:
         try:
@@ -301,9 +344,10 @@ def run_exports(
             log.warning("Feature EDA figure generation failed: %s", exc)
 
         try:
-            from visualization.plot_exports import run_calibration_eda, run_sync_eda
+            from visualization.plot_exports import run_calibration_eda, run_orientation_eda, run_sync_eda
             run_calibration_eda(cal_df, output_dir)
             run_sync_eda(sync_df, output_dir)
+            run_orientation_eda(orient_df, output_dir)
         except Exception as exc:
             log.warning("Params EDA figure generation failed: %s", exc)
 
@@ -321,3 +365,19 @@ def _run_eda_safe(fused_path: Path | None, output_dir: Path) -> None:
             run_eda(df, output_dir)
     except Exception as exc:
         log.warning("EDA figure generation failed: %s", exc)
+
+
+def _run_params_eda_safe(
+    cal_df: pd.DataFrame,
+    sync_df: pd.DataFrame,
+    orient_df: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    """Run parameter export EDA figures best-effort."""
+    try:
+        from visualization.plot_exports import run_calibration_eda, run_orientation_eda, run_sync_eda
+        run_calibration_eda(cal_df, output_dir)
+        run_sync_eda(sync_df, output_dir)
+        run_orientation_eda(orient_df, output_dir)
+    except Exception as exc:
+        log.warning("Params EDA figure generation failed: %s", exc)
