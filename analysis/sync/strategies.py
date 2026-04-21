@@ -7,7 +7,7 @@ Every estimator returns ``(SyncModel, meta)`` and shares one signature:
                       config=None) -> (SyncModel, meta)
 
 Tier hierarchy (strongest to weakest):
-  1. multi_anchor        — all calibration anchors, affine fit
+    1. multi_anchor        — first+last calibration anchors, affine fit
   2. one_anchor_adaptive — opening anchor + causal windowed refinement
   3. one_anchor_prior    — opening anchor + fixed drift prior (ppm)
   4. signal_only         — coarse xcorr + non-causal windowed refinement
@@ -143,7 +143,7 @@ def estimate_multi_anchor(
     target_sensor: str = "arduino",
     config: SyncConfig | None = None,
 ) -> tuple[SyncModel, dict[str, Any]]:
-    """Fit offset and drift from all matched calibration anchors."""
+    """Fit offset and drift from boundary anchors (first and last)."""
     config = config or default_sync_config()
     anchors = load_calibration_anchors(
         recording_name,
@@ -158,13 +158,15 @@ def estimate_multi_anchor(
         )
 
     target_origin_s = _target_origin_seconds(tgt_df)
-    target_times = np.asarray([a.tgt_ms / 1000.0 for a in anchors], dtype=float)
-    offsets = np.asarray([a.offset_s for a in anchors], dtype=float)
+    sorted_anchors = sorted(anchors, key=lambda a: a.tgt_ms)
+    boundary_anchors = [sorted_anchors[0], sorted_anchors[-1]]
+    target_times = np.asarray([a.tgt_ms / 1000.0 for a in boundary_anchors], dtype=float)
+    offsets = np.asarray([a.offset_s for a in boundary_anchors], dtype=float)
     offset_seconds, drift, fit_r2 = fit_offset_drift(
         target_times,
         offsets,
         target_origin_seconds=target_origin_s,
-        weights=np.ones(len(anchors), dtype=float),
+        weights=np.ones(len(boundary_anchors), dtype=float),
     )
 
     model = SyncModel(

@@ -532,20 +532,14 @@ def generate_orientation_summary(
             stale_path.unlink()
 
     from visualization.plot_exports_orientation import (
-        plot_orientation_method_quality_counts,
-        plot_orientation_method_residual_heatmap,
-        plot_orientation_method_selection,
         plot_orientation_quality_overview,
-        plot_orientation_selected_residuals,
+        plot_orientation_residuals,
     )
 
     generated: list[Path] = []
     for fn in (
-        plot_orientation_method_selection,
         plot_orientation_quality_overview,
-        plot_orientation_selected_residuals,
-        plot_orientation_method_residual_heatmap,
-        plot_orientation_method_quality_counts,
+        plot_orientation_residuals,
     ):
         try:
             p = fn(ori_df, output_dir)

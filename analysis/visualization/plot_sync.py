@@ -869,10 +869,6 @@ def plot_sync_method_metrics(
     return save_figure(fig, output_path, dpi=150)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def plot_anchor_fits(
     recording_name: str,
     *,
@@ -921,10 +917,31 @@ def plot_anchor_fits(
         return (seg.start_ms + seg.static_pre_ms + seg.end_ms - seg.static_post_ms) / 2.0
 
     n = len(ref_segs)
-    fig, axes = imu_figure(n, row_height=2.6, width=14.0, sharex=False)
+    fig, axes = imu_figure(n, row_height=2.6, width=14.0, sharex=True)
+
+    # Use one shared x-scale across anchors, centered on each ref median peak.
+    # Span is based on peak-cluster duration with +/- 5 s padding.
+    segment_meta: list[tuple[float, float]] = []
+    global_half_span_s = 0.0
+    for ref_seg in ref_segs:
+        ref_start_ms = float(ref_seg.start_ms)
+        ref_end_ms = float(ref_seg.end_ms)
+        duration_s = (ref_end_ms - ref_start_ms) / 1000.0
+        if ref_seg.peak_ms:
+            ref_peak_s = (np.asarray(ref_seg.peak_ms, dtype=float) - ref_start_ms) / 1000.0
+            median_peak_s = float(np.median(ref_peak_s))
+            peak_cluster_len_s = float(ref_peak_s.max() - ref_peak_s.min()) if ref_peak_s.size > 1 else 0.0
+        else:
+            median_peak_s = duration_s / 2.0
+            peak_cluster_len_s = 0.0
+
+        half_span_s = 0.5 * peak_cluster_len_s + 5.0
+        global_half_span_s = max(global_half_span_s, half_span_s)
+        segment_meta.append((duration_s, median_peak_s))
 
     for i, (ref_seg, tgt_seg) in enumerate(zip(ref_segs, tgt_segs)):
         ax = axes[i]
+        duration_s, median_peak_s = segment_meta[i]
 
         ref_center = _shake_center(ref_seg)
         tgt_center = _shake_center(tgt_seg)
@@ -965,12 +982,18 @@ def plot_anchor_fits(
         tgt_coarse_t_s = (tgt_raw_t_ms + coarse_offset_s * 1000.0 - ref_start) / 1000.0
         tgt_refined_t_s = (tgt_raw_t_ms + refined_offset_s * 1000.0 - ref_start) / 1000.0
 
-        duration_s = (ref_end - ref_start) / 1000.0
+        # Recenter every trace on the reference median peak so all subplots share the same x-axis values.
+        ref_t_s = ref_t_s - median_peak_s
+        tgt_coarse_t_s = tgt_coarse_t_s - median_peak_s
+        tgt_refined_t_s = tgt_refined_t_s - median_peak_s
 
-        # Shade shake zone
-        shake_start_s = ref_seg.static_pre_ms / 1000.0
-        shake_end_s = duration_s - ref_seg.static_post_ms / 1000.0
-        ax.axvspan(shake_start_s, shake_end_s, color="#e8e8e8", alpha=0.6, zorder=0, label="shake zone")
+        # Shade peak-detection window (where actual signal activity occurs for anchor refinement).
+        if ref_seg.peak_ms:
+            peak_min_ms = float(np.min(ref_seg.peak_ms))
+            peak_max_ms = float(np.max(ref_seg.peak_ms))
+            peak_start_s = (peak_min_ms - ref_start) / 1000.0 - median_peak_s
+            peak_end_s = (peak_max_ms - ref_start) / 1000.0 - median_peak_s
+            ax.axvspan(peak_start_s, peak_end_s, color="#e8e8e8", alpha=0.6, zorder=0, label="peak detection window")
 
         # Draw signals
         draw_signal(ax, ref_t_s, ref_y, label=f"{_REF_SENSOR} (ref)", color=_COLOR_REF, lw=1.0, alpha=0.9)
@@ -979,26 +1002,26 @@ def plot_anchor_fits(
 
         # Ref peaks
         for peak_ms in ref_seg.peak_ms:
-            peak_rel_s = (peak_ms - ref_start) / 1000.0
+            peak_rel_s = (peak_ms - ref_start) / 1000.0 - median_peak_s
             ax.axvline(peak_rel_s, color=_COLOR_REF, lw=0.7, linestyle=":", alpha=0.8, zorder=4)
 
         # Tgt peaks shifted to ref timeline (refined)
         for peak_ms in tgt_seg.peak_ms:
-            peak_rel_s = (peak_ms + refined_offset_s * 1000.0 - ref_start) / 1000.0
+            peak_rel_s = (peak_ms + refined_offset_s * 1000.0 - ref_start) / 1000.0 - median_peak_s
             ax.axvline(peak_rel_s, color=_COLOR_TGT, lw=0.7, linestyle=":", alpha=0.8, zorder=4)
 
-        ax.set_xlim(-0.5, duration_s + 0.5)
+        ax.set_xlim(-global_half_span_s, global_half_span_s)
         ax.set_ylabel("|acc| (m/s²)", fontsize=8)
         ax.legend(fontsize=7, loc="upper right", ncol=3)
         ax.grid(alpha=0.2, lw=0.35)
 
         delta_str = f"Δ={refined_offset_s - coarse_offset_s:+.3f}s"
         ax.set_title(
-            f"Anchor {i}  |  coarse={coarse_offset_s:+.4f}s  refined={refined_offset_s:+.4f}s  {delta_str}  score={score_str}",
+            f"Anchor {i + 1}  |  coarse={coarse_offset_s:+.4f}s  refined={refined_offset_s:+.4f}s  {delta_str}  score={score_str}",
             fontsize=9,
         )
 
-    axes[-1].set_xlabel("Time from ref segment start (s)")
+    axes[-1].set_xlabel("Time from ref median peak (s)")
     fig.suptitle(f"{recording_name} — calibration anchor fits", fontsize=12, y=0.999)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.995))
 
@@ -1007,6 +1030,10 @@ def plot_anchor_fits(
 
     return save_figure(fig, output_path, dpi=150)
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def plot_sync_stage(recording_name: str, output_path: Path | None = None):
     """Plot the sync stage for a recording."""

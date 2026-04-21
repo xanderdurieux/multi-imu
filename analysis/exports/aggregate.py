@@ -169,15 +169,8 @@ def aggregate_orientation_stats(
 ) -> pd.DataFrame:
     """Collect orientation_stats.json from all sections into a flat DataFrame.
 
-    One row per section.  Columns:
-
-    ``section_id``, ``recording_name``, ``selected_method``.
-
-    Per-sensor (sporsa / arduino):
-        ``<sensor>_selected_residual_ms2``, ``<sensor>_quality``.
-
-    Per-method per-sensor (for every method found in any section):
-        ``<sensor>_<method>_residual_ms2``, ``<sensor>_<method>_quality``.
+    One row per section.  Columns: ``section_id``, ``recording_name``,
+    ``<sensor>_residual_ms2``, ``<sensor>_quality``.
     """
     root = sections_root()
     if not root.exists():
@@ -206,23 +199,17 @@ def aggregate_orientation_stats(
             continue
 
         rec_name = section_dir.name.rsplit("s", 1)[0] if "s" in section_dir.name else section_dir.name
-
-        method = data.get("method", data.get("selected_method", "mahony"))
         row: dict = {
             "section_id": section_dir.name,
             "recording_name": rec_name,
-            "selected_method": method,
         }
 
         sensors_block = data.get("sensors", {})
-
         for sensor in ("sporsa", "arduino"):
-            sensor_sel = sensors_block.get(sensor, {})
-            residual = sensor_sel.get("gravity_residual_ms2", sensor_sel.get("selected_residual_ms2"))
-            row[f"{sensor}_selected_residual_ms2"] = residual
-            row[f"{sensor}_quality"] = sensor_sel.get("quality", "")
-            row[f"{sensor}_{method}_residual_ms2"] = residual
-            row[f"{sensor}_{method}_quality"] = sensor_sel.get("quality", "")
+            sensor_data = sensors_block.get(sensor, {})
+            residual = sensor_data.get("gravity_residual_ms2", sensor_data.get("selected_residual_ms2"))
+            row[f"{sensor}_residual_ms2"] = residual
+            row[f"{sensor}_quality"] = sensor_data.get("quality", "")
 
         rows.append(row)
         log.debug("Loaded orientation stats for section %s", section_dir.name)

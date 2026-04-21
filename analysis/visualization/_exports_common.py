@@ -16,11 +16,6 @@ METHOD_COLORS = {
     "one_anchor_prior": "#e67e22",
     "signal_only": "#3498db",
 }
-ALL_ORIENTATION_METHODS = ["mahony"]
-ORIENTATION_METHOD_COLORS = {
-    "mahony": "#9467bd",
-    "unknown": "#95a5a6",
-}
 
 META_COLS = frozenset({
     "section_id",
