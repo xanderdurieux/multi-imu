@@ -25,6 +25,13 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from common.paths import project_relative_path, read_csv, write_csv
+from features.labels import to_activity_label, to_binary_label, to_coarse_label
+
+_DERIVED_LABEL_MAPPERS: dict[str, Any] = {
+    "scenario_label_activity": to_activity_label,
+    "scenario_label_coarse": to_coarse_label,
+    "scenario_label_binary": to_binary_label,
+}
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +46,7 @@ _META_COLS = {
     "window_duration_s",
     # Labels
     "scenario_label",
+    "scenario_label_activity",
     "scenario_label_coarse",
     "scenario_label_binary",
     # Quality summary (section- and window-level)
@@ -224,11 +232,12 @@ def run_evaluation(
     features_path: Path | str,
     *,
     output_dir: Path | str,
-    label_col: str = "scenario_label",
+    label_col: str = "scenario_label_activity",
     group_col: str = "section_id",
     seed: int = 42,
     min_quality: str = "marginal",
     feature_sets: dict[str, list[str]] | None = None,
+    exclude_non_riding: bool = False,
     no_plots: bool = False,
 ) -> dict:
     """Train and evaluate models on feature table.
@@ -249,6 +258,9 @@ def run_evaluation(
         Minimum quality label. Rows below this are dropped.
     feature_sets:
         Mapping of set name → list of column prefixes. ``None`` = auto-detect.
+    exclude_non_riding:
+        If ``True``, drop windows whose binary label is ``non_riding`` before
+        evaluating any target label scheme.
     no_plots:
         If ``True``, skip thesis figure generation.
 
@@ -280,6 +292,34 @@ def run_evaluation(
         before = len(df)
         df = df[df["overall_quality_label"].isin(valid)].copy()
         log.info("Quality filter: %d → %d rows", before, len(df))
+
+    # Derive missing coarse/activity/binary labels on the fly so existing
+    # feature tables (written before a new taxonomy was added) stay usable
+    # without a full re-extraction.
+    if label_col not in df.columns and label_col in _DERIVED_LABEL_MAPPERS:
+        if "scenario_label" not in df.columns:
+            raise ValueError(
+                f"Cannot derive {label_col!r}: source column 'scenario_label' missing."
+            )
+        mapper = _DERIVED_LABEL_MAPPERS[label_col]
+        df[label_col] = df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
+        log.info("Derived %s from scenario_label", label_col)
+
+    if exclude_non_riding:
+        binary_col = "scenario_label_binary"
+        if binary_col not in df.columns:
+            if "scenario_label" not in df.columns:
+                raise ValueError(
+                    "Cannot exclude non-riding windows: source column "
+                    "'scenario_label' missing."
+                )
+            df[binary_col] = (
+                df["scenario_label"].fillna("unlabeled").astype(str).map(to_binary_label)
+            )
+            log.info("Derived %s from scenario_label", binary_col)
+        before = len(df)
+        df = df[df[binary_col] != "non_riding"].copy()
+        log.info("Excluded non-riding rows: %d → %d", before, len(df))
 
     # Drop unlabeled rows
     if label_col not in df.columns:
@@ -465,6 +505,7 @@ def run_evaluation(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
         "label_col": label_col,
+        "exclude_non_riding": exclude_non_riding,
         "n_windows": int(len(df)),
         "n_classes": len(classes),
         "classes": classes,

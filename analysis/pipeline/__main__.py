@@ -4,7 +4,7 @@ Usage::
 
     python -m pipeline <stage> [target] [options]
 
-Stages: calibration, orientation, derived, events, features, exports
+Stages: calibration, orientation, derived, features, exports
 
 Examples::
 
@@ -13,7 +13,6 @@ Examples::
     python -m pipeline calibration --recording 2026-02-26_r1 --frame gravity_plus_forward
     python -m pipeline orientation 2026-02-26_r1s1 --filter madgwick
     python -m pipeline derived --recording 2026-02-26_r1
-    python -m pipeline events 2026-02-26_r1s1
     python -m pipeline features --recording 2026-02-26_r1 --window 2.0 --hop 1.0
     python -m pipeline exports --quality good
 """
@@ -94,19 +93,6 @@ def _run_derived(args: argparse.Namespace) -> None:
         print("OK" if ok else "FAILED")
 
 
-def _run_events(args: argparse.Namespace) -> None:
-    from events.pipeline import process_section_events, process_recording_events
-    from events.config import EventConfig
-    cfg = EventConfig.load(Path(args.event_config)) if args.event_config else None
-    if args.recording:
-        process_recording_events(args.recording, config=cfg, force=args.force)
-        print("Done.")
-    else:
-        d = _section_dir(args.target)
-        events = process_section_events(d, config=cfg, force=args.force)
-        print(f"Detected {len(events)} event(s).")
-
-
 def _run_features(args: argparse.Namespace) -> None:
     from features.pipeline import process_section_features, process_recording_features
     if args.recording:
@@ -141,7 +127,6 @@ _STAGE_RUNNERS = {
     "calibration": _run_calibration,
     "orientation": _run_orientation,
     "derived": _run_derived,
-    "events": _run_events,
     "features": _run_features,
     "exports": _run_exports,
 }
@@ -172,11 +157,6 @@ def main(argv: list[str] | None = None) -> None:
         default="gravity_only",
         choices=["gravity_only", "gravity_plus_forward"],
         help="[calibration] Frame alignment mode.",
-    )
-    parser.add_argument(
-        "--event-config",
-        default="",
-        help="[events] Path to event_config.json.",
     )
     parser.add_argument(
         "--window",

@@ -76,6 +76,26 @@ _COARSE_MAP: dict[str, str] = {
     "fall": "incident",
 }
 
+_ACTIVITY_MAP: dict[str, str] = {
+    "calibration_sequence": "non_riding",
+    "grounded": "non_riding",
+    "riding": "steady_seated",
+    "forest": "steady_seated",
+    "uneven_road": "steady_seated",
+    "riding_standing": "standing",
+    "sprint_standing": "standing",
+    "accelerating": "longitudinal_effort",
+    "braking": "longitudinal_effort",
+    "sprinting": "longitudinal_effort",
+    "hard_braking": "longitudinal_effort",
+    "fall": "longitudinal_effort",
+    "cornering": "turning",
+    "swerving": "turning",
+    "helmet_move": "non_riding",
+    "head_movement": "head_motion",
+    "shoulder_check": "head_motion",
+}
+
 _INCIDENT_LABELS: frozenset[str] = frozenset({"hard_braking", "swerving", "fall"})
 _NON_RIDING_LABELS: frozenset[str] = frozenset({"calibration_sequence", "helmet_move", "grounded"})
 
@@ -105,6 +125,12 @@ _SCHEME_COLORS: dict[str, str] = {
     "steady_riding": "#2196F3",
     "active_riding": "#4CAF50",
     "incident": "#F44336",
+    # Activity (6-class dual-IMU taxonomy)
+    "steady_seated": "#2196F3",
+    "standing": "#1565C0",
+    "longitudinal_effort": "#4CAF50",
+    "turning": "#FF9800",
+    "head_motion": "#00BCD4",
     # Binary
     "normal": "#4CAF50",
     # incident already defined above
@@ -129,6 +155,12 @@ def _to_coarse(label: str) -> str:
     return _COARSE_MAP.get(label, "unknown")
 
 
+def _to_activity(label: str) -> str:
+    if label == "unlabeled":
+        return "unlabeled"
+    return _ACTIVITY_MAP.get(label, "unknown")
+
+
 def _to_binary(label: str) -> str:
     if label == "unlabeled":
         return "unlabeled"
@@ -140,7 +172,7 @@ def _to_binary(label: str) -> str:
 
 
 def _ensure_derived_label_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``scenario_label_coarse`` and ``scenario_label_binary`` if absent.
+    """Add the activity / coarse / binary label columns if absent.
 
     The columns are written during feature extraction if the dataset was
     (re-)extracted after the labelling redesign.  For existing CSVs that
@@ -151,6 +183,8 @@ def _ensure_derived_label_cols(df: pd.DataFrame) -> pd.DataFrame:
     if "scenario_label" not in df.columns:
         return df
     fine = df["scenario_label"].fillna("unlabeled").astype(str)
+    if "scenario_label_activity" not in df.columns:
+        df["scenario_label_activity"] = fine.map(_to_activity)
     if "scenario_label_coarse" not in df.columns:
         df["scenario_label_coarse"] = fine.map(_to_coarse)
     if "scenario_label_binary" not in df.columns:
@@ -213,6 +247,7 @@ def _build_label_scheme_counts(df: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict] = []
     scheme_col = {
         "fine": "scenario_label",
+        "activity": "scenario_label_activity",
         "coarse": "scenario_label_coarse",
         "binary": "scenario_label_binary",
     }

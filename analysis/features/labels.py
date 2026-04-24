@@ -56,6 +56,34 @@ COARSE_MAP: dict[str, str] = {
     "fall": "incident",
 }
 
+# Activity 6-class taxonomy — grouped so each class has a distinct dual-IMU
+# signature (bike frame vs. helmet). Merges happen along two principles:
+#   1. Fine distinctions that single-sensor features already encode well
+#      (e.g. uneven_road is a spectral variant of riding) collapse to a
+#      single class.
+#   2. Classes that *require* cross-sensor information to separate from
+#      seated riding (standing posture, head yaw, swerve-vs-lean) are kept
+#      distinct so the evaluation actually rewards bimodal feature sets.
+ACTIVITY_MAP: dict[str, str] = {
+    "calibration_sequence": "non_riding",
+    "grounded": "non_riding",
+    "helmet_move": "head_motion",
+    "riding": "steady_seated",
+    "forest": "steady_seated",
+    "uneven_road": "steady_seated",
+    "riding_standing": "standing",
+    "sprint_standing": "standing",
+    "accelerating": "longitudinal_effort",
+    "braking": "longitudinal_effort",
+    "sprinting": "longitudinal_effort",
+    "hard_braking": "longitudinal_effort",
+    "fall": "longitudinal_effort",
+    "cornering": "turning",
+    "swerving": "turning",
+    "head_movement": "head_motion",
+    "shoulder_check": "head_motion",
+}
+
 INCIDENT_LABELS: frozenset[str] = frozenset({"hard_braking", "swerving", "fall"})
 NON_RIDING_LABELS: frozenset[str] = frozenset({"calibration_sequence", "helmet_move", "grounded"})
 
@@ -156,6 +184,13 @@ def to_coarse_label(fine_label: str) -> str:
     if fine_label == "unlabeled":
         return "unlabeled"
     return COARSE_MAP.get(fine_label, "unknown")
+
+
+def to_activity_label(fine_label: str) -> str:
+    """Map a fine-grained label to one of six dual-IMU activity classes."""
+    if fine_label == "unlabeled":
+        return "unlabeled"
+    return ACTIVITY_MAP.get(fine_label, "unknown")
 
 
 def to_binary_label(fine_label: str) -> str:

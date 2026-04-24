@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 _EVALUATION_LABEL_COLS = [
     "scenario_label",
+    "scenario_label_activity",
     "scenario_label_coarse",
     "scenario_label_binary",
 ]
@@ -185,22 +186,6 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 log.error("derived failed for %s: %s", rec, exc)
                 result["failed"] += 1
 
-    elif stage == "events":
-        from events.pipeline import process_recording_events
-        from events.config import EventConfig
-        event_cfg = None
-        if cfg.event_config_path:
-            p = Path(cfg.event_config_path)
-            if p.exists():
-                event_cfg = EventConfig.load(p)
-        for rec in recordings:
-            try:
-                process_recording_events(rec, config=event_cfg, force=cfg.force)
-                result["ok"] += 1
-            except Exception as exc:
-                log.error("events failed for %s: %s", rec, exc)
-                result["failed"] += 1
-
     elif stage == "features":
         from features.pipeline import process_recording_features
         for rec in recordings:
@@ -282,9 +267,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 eval_runs = [cfg.evaluation_label_col]
 
             for label_col in eval_runs:
-                # Preserve legacy location for coarse-label outputs so downstream
-                # report/bundle stages continue to read data/evaluation/ by default.
-                run_out = out if label_col == "scenario_label_coarse" else out / label_col
+                run_out = out / label_col
                 try:
                     log.info(
                         "Running evaluation for label_col=%s -> %s",
@@ -297,6 +280,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                         label_col=label_col,
                         seed=cfg.evaluation_seed,
                         min_quality=cfg.min_quality_label,
+                        exclude_non_riding=cfg.evaluation_exclude_non_riding,
                         no_plots=cfg.no_plots,
                     )
                     result["ok"] += 1

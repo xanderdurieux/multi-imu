@@ -15,7 +15,6 @@ _KNOWN_STAGES = [
     "calibration",
     "orientation",
     "derived",
-    "events",
     "features",
     "exports",
     "dataset_summary",   # compact thesis-ready dataset audit (reads features_fused.csv)
@@ -40,11 +39,7 @@ class WorkflowConfig:
     orientation_filter: str = "auto"                 # madgwick[_marg]|complementary|ekf[_marg]|auto
     sample_rate_hz: float = 100.0
 
-    # Feature / event options
-    event_config_path: str = ""
-    event_centered_features: bool = False
-    min_event_confidence: float = 0.3
-    event_types: list[str] = field(default_factory=lambda: ["bump", "brake", "swerve", "disagree", "fall"])
+    # Feature options
     labels_path: str = ""
     window_s: float = 2.0
     hop_s: float = 1.0
@@ -55,7 +50,8 @@ class WorkflowConfig:
     force: bool = False
     skip_exports: bool = False
     evaluation_seed: int = 42
-    evaluation_label_col: str = "scenario_label_coarse"
+    evaluation_label_col: str = "scenario_label_activity"
+    evaluation_exclude_non_riding: bool = False
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
 
@@ -102,6 +98,7 @@ class WorkflowConfig:
         valid_eval_label_cols = {
             "auto",
             "scenario_label",
+            "scenario_label_activity",
             "scenario_label_coarse",
             "scenario_label_binary",
         }
@@ -110,6 +107,8 @@ class WorkflowConfig:
                 "evaluation_label_col must be one of "
                 f"{valid_eval_label_cols}, got {self.evaluation_label_col!r}"
             )
+        if not isinstance(self.evaluation_exclude_non_riding, bool):
+            errors.append("evaluation_exclude_non_riding must be a boolean")
         return errors
 
 

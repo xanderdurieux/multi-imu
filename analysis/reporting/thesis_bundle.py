@@ -37,6 +37,7 @@ from common.paths import (
     exports_root,
     project_relative_path,
     read_csv,
+    resolve_evaluation_dir,
     sections_root,
     write_csv,
 )
@@ -219,12 +220,25 @@ def _render_confusion_matrix(
     output_path: Path,
 ) -> bool:
     """Read the CSV confusion matrix for best_fs/best_model and render as PNG."""
-    cm_csv = evaluation_dir / f"confusion_matrix_{best_fs}_{best_model}.csv"
-    if not cm_csv.exists():
-        log.warning("Confusion matrix CSV not found: %s", cm_csv)
-        # Try to copy from figures/ if already rendered
-        cm_png = evaluation_dir / "figures" / f"confusion_matrix_{best_fs}_{best_model}.png"
-        return _copy_file(cm_png, output_path)
+    csv_candidates = [
+        evaluation_dir / best_model / f"confusion_matrix_{best_fs}.csv",
+        evaluation_dir / f"confusion_matrix_{best_fs}_{best_model}.csv",
+    ]
+    cm_csv = next((path for path in csv_candidates if path.exists()), None)
+    if cm_csv is None:
+        log.warning(
+            "Confusion matrix CSV not found for feature set %s and model %s",
+            best_fs,
+            best_model,
+        )
+        png_candidates = [
+            evaluation_dir / best_model / "figures" / f"confusion_matrix_{best_fs}.png",
+            evaluation_dir / "figures" / f"confusion_matrix_{best_fs}_{best_model}.png",
+        ]
+        for cm_png in png_candidates:
+            if _copy_file(cm_png, output_path):
+                return True
+        return False
 
     try:
         cm_df = pd.read_csv(cm_csv, index_col=0)
@@ -291,9 +305,24 @@ def _render_feature_importances(
     top_n: int = 20,
 ) -> bool:
     """Read feature_importance CSV and render top-N importance bar chart."""
-    fi_csv = evaluation_dir / f"feature_importance_{best_model}_{best_fs}.csv"
-    if not fi_csv.exists():
-        log.warning("Feature importance CSV not found: %s", fi_csv)
+    csv_candidates = [
+        evaluation_dir / best_model / f"feature_importance_{best_fs}.csv",
+        evaluation_dir / f"feature_importance_{best_model}_{best_fs}.csv",
+    ]
+    fi_csv = next((path for path in csv_candidates if path.exists()), None)
+    if fi_csv is None:
+        log.warning(
+            "Feature importance CSV not found for model %s and feature set %s",
+            best_model,
+            best_fs,
+        )
+        png_candidates = [
+            evaluation_dir / best_model / "figures" / f"feature_importance_{best_fs}.png",
+            evaluation_dir / "figures" / f"feature_importance_{best_model}_{best_fs}.png",
+        ]
+        for fi_png in png_candidates:
+            if _copy_file(fi_png, output_path):
+                return True
         return False
 
     try:
@@ -542,7 +571,14 @@ def run_thesis_bundle(
     # ------------------------------------------------------------------
     # 2. Identify best model from evaluation_summary.json
     # ------------------------------------------------------------------
-    evaluation_dir = Path(evaluation_dir)
+    requested_evaluation_dir = Path(evaluation_dir)
+    evaluation_dir = resolve_evaluation_dir(requested_evaluation_dir)
+    if evaluation_dir != requested_evaluation_dir:
+        log.info(
+            "Resolved evaluation directory from %s to %s",
+            requested_evaluation_dir,
+            evaluation_dir,
+        )
     summary = _load_json(evaluation_dir / "evaluation_summary.json")
     results = summary.get("results", {})
 

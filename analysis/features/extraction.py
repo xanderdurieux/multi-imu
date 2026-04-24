@@ -9,7 +9,6 @@ Feature families (split into sibling modules):
 - ``spectral``      - FFT-based centroid / band energies / dominant freq
 - ``orientation_features`` - pitch/roll mean/std + rate std
 - ``cross_sensor``  - inter-sensor agreement, disagreement, energy ratio
-- ``event_features`` - per-window event overlap counts and confidences
 - ``labels``        - fine/coarse/binary label taxonomy + assignment
 - ``quality``       - multi-IMU quality scoring
 
@@ -18,7 +17,6 @@ Naming conventions for feature columns:
 - ``bike_``  prefix -> sporsa sensor (frame / bike)
 - ``rider_`` prefix -> arduino sensor (rider / body)
 - ``cross_`` prefix -> cross-sensor comparison features
-- ``events_`` prefix -> event-overlap features
 """
 
 from __future__ import annotations
@@ -28,9 +26,8 @@ import logging
 import pandas as pd
 
 from .cross_sensor import cross_sensor_features
-from .event_features import event_features
-from .labels import label_feature, to_binary_label, to_coarse_label
-from .orientation_features import orientation_features
+from .labels import label_feature, to_activity_label, to_binary_label, to_coarse_label
+from .orientation_features import orientation_cross_features, orientation_features
 from .quality import quality_features
 from .spectral import spectral_features
 from .stats_helpers import (
@@ -65,7 +62,6 @@ def extract_window_features(
     sync_confidence: float = 1.0,
     yaw_conf_sporsa: float = 1.0,
     yaw_conf_arduino: float = 1.0,
-    events_df: pd.DataFrame | None = None,
     labels_df: pd.DataFrame | None = None,
 ) -> dict[str, float | str | int]:
     """Extract all features for one window and return a flat dict.
@@ -140,6 +136,9 @@ def extract_window_features(
     # ------------------------------------------------------------------
     feats.update(orientation_features("bike", window_orientation_sporsa))
     feats.update(orientation_features("rider", window_orientation_arduino))
+    feats.update(orientation_cross_features(
+        window_orientation_sporsa, window_orientation_arduino,
+    ))
 
     # ------------------------------------------------------------------
     # 6. Cross-sensor features
@@ -147,19 +146,16 @@ def extract_window_features(
     feats.update(cross_sensor_features(window_cross))
 
     # ------------------------------------------------------------------
-    # 7. Event features
-    # ------------------------------------------------------------------
-    feats.update(event_features(events_df, window_start_ms, window_end_ms))
-
-    # ------------------------------------------------------------------
-    # 8. Labels - three parallel representations of the same annotation.
+    # 7. Labels - four parallel representations of the same annotation.
     #
-    #   scenario_label        fine-grained (17 classes) - for inspection / audit
-    #   scenario_label_coarse 4-class taxonomy           - recommended main target
-    #   scenario_label_binary incident / normal          - binary safety target
+    #   scenario_label          fine-grained (17 classes) - for inspection / audit
+    #   scenario_label_activity 6-class dual-IMU taxonomy - default training target
+    #   scenario_label_coarse   4-class taxonomy          - legacy/reporting target
+    #   scenario_label_binary   incident / normal         - binary safety target
     # ------------------------------------------------------------------
     fine = label_feature(labels_df, window_start_ms, window_end_ms)
     feats["scenario_label"] = fine
+    feats["scenario_label_activity"] = to_activity_label(fine)
     feats["scenario_label_coarse"] = to_coarse_label(fine)
     feats["scenario_label_binary"] = to_binary_label(fine)
 

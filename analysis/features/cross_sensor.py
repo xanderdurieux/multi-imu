@@ -10,7 +10,7 @@ import pandas as pd
 from common.statistics import safe_max, safe_mean, safe_min, safe_std
 from .stats_helpers import get_col
 
-# Mirrors EventConfig.disagree_threshold — fraction-above feature uses same boundary.
+# Boundary used by cross_disagree_fraction; values above this count as "disagreeing".
 _DISAGREE_THRESH = 4.0
 
 

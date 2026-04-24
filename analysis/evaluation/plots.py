@@ -31,6 +31,13 @@ _MODEL_COLORS: dict[str, str] = {
     "logistic_regression": "#e74c3c",
 }
 
+_FEATURE_SET_COLORS: dict[str, str] = {
+    "bike": "#3498db",
+    "rider": "#e74c3c",
+    "fused_no_cross": "#f39c12",
+    "fused": "#2ecc71",
+}
+
 # Matches _FS_DISPLAY in experiments.py — kept local to avoid cross-module import.
 _FS_DISPLAY: dict[str, str] = {
     "bike": "Bike only",
@@ -363,6 +370,99 @@ def plot_per_class_f1(
     return output_path
 
 
+def plot_per_class_f1_feature_set_comparison(
+    all_results: dict,
+    classes: list[str],
+    output_path: Path,
+    *,
+    feature_sets: tuple[str, ...] = ("bike", "rider", "fused"),
+    title: str = "Per-class F1-score by feature set",
+) -> Path | None:
+    """Plot per-class F1 with feature sets grouped side by side for each model."""
+    models = [
+        model_name
+        for model_name in _MODEL_DISPLAY
+        if any(f"{feature_set}__{model_name}" in all_results for feature_set in feature_sets)
+    ]
+    if not models:
+        log.debug("No per-class results available for feature-set comparison plot")
+        return None
+
+    available_feature_sets = [
+        feature_set
+        for feature_set in feature_sets
+        if any(f"{feature_set}__{model_name}" in all_results for model_name in models)
+    ]
+    if not available_feature_sets:
+        log.debug("Requested feature sets are not available for comparison plot")
+        return None
+
+    x = np.arange(len(classes))
+    n_feature_sets = len(available_feature_sets)
+    width = min(0.24, 0.78 / max(n_feature_sets, 1))
+    offsets = np.linspace(
+        -(n_feature_sets - 1) / 2,
+        (n_feature_sets - 1) / 2,
+        n_feature_sets,
+    ) * width
+
+    fig, axes = plt.subplots(
+        len(models),
+        1,
+        figsize=(max(8, 0.9 * len(classes) + 2), max(3.6 * len(models), 4)),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+
+    for ax, model_name in zip(axes_flat, models):
+        for feature_set, offset in zip(available_feature_sets, offsets):
+            key = f"{feature_set}__{model_name}"
+            per_class = all_results.get(key, {}).get("per_class", {})
+            f1_vals = [float(per_class.get(cls, {}).get("f1-score", 0.0)) for cls in classes]
+
+            ax.bar(
+                x + offset,
+                f1_vals,
+                width,
+                label=_FS_DISPLAY.get(feature_set, feature_set.replace("_", " ").title()),
+                color=_FEATURE_SET_COLORS.get(feature_set, "#7f8c8d"),
+                alpha=0.88,
+                edgecolor="white",
+            )
+
+        ax.set_ylim(0, 1.08)
+        ax.set_ylabel("F1-score")
+        ax.set_title(_MODEL_DISPLAY.get(model_name, model_name), fontsize=10)
+        ax.grid(axis="y", alpha=0.3, lw=0.5)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    axes_flat[-1].set_xticks(x)
+    axes_flat[-1].set_xticklabels(classes, rotation=30, ha="right", fontsize=8)
+
+    handles, labels_text = axes_flat[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels_text,
+        loc="lower center",
+        ncol=len(available_feature_sets),
+        fontsize=8,
+        framealpha=0.85,
+        bbox_to_anchor=(0.5, -0.02),
+    )
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.info(
+        "Wrote per-class F1 feature-set comparison → %s",
+        project_relative_path(output_path),
+    )
+    return output_path
+
+
 # ---------------------------------------------------------------------------
 # Batch generation from saved artefacts
 # ---------------------------------------------------------------------------
@@ -476,6 +576,18 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
                     generated.append(result)
             except Exception as exc:
                 log.warning("Failed to plot per-class F1 for %s: %s", fs_name, exc)
+
+        out = figures_dir / "per_class_f1_feature_sets.png"
+        try:
+            result = plot_per_class_f1_feature_set_comparison(
+                all_results_disk,
+                classes_disk,
+                out,
+            )
+            if result:
+                generated.append(result)
+        except Exception as exc:
+            log.warning("Failed to plot per-class F1 feature-set comparison: %s", exc)
 
     log.info(
         "Evaluation figures: %d written to %s",

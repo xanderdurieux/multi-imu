@@ -193,15 +193,6 @@ def extract_features_for_section(
             df_ref["timestamp"] = pd.to_numeric(df_ref["timestamp"], errors="coerce")
 
     # ------------------------------------------------------------------
-    # Load events (optional).
-    # ------------------------------------------------------------------
-    events_df = _load_optional_csv(section_dir / "events" / "event_candidates.csv")
-    if not events_df.empty:
-        for col in ("start_ms", "end_ms"):
-            if col in events_df.columns:
-                events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
-
-    # ------------------------------------------------------------------
     # Load labels (optional).
     # ------------------------------------------------------------------
     labels_df = _load_labels_for_section(section_dir)
@@ -323,7 +314,6 @@ def extract_features_for_section(
                 sync_confidence=sync_confidence,
                 yaw_conf_sporsa=yaw_conf_sporsa,
                 yaw_conf_arduino=yaw_conf_arduino,
-                events_df=events_df if not events_df.empty else None,
                 labels_df=labels_df if not labels_df.empty else None,
             )
             rows.append(feat_dict)

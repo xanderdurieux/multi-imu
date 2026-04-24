@@ -37,6 +37,7 @@ from common.paths import (
     exports_root,
     project_relative_path,
     read_csv,
+    resolve_evaluation_dir,
     sections_root,
 )
 
@@ -44,17 +45,39 @@ log = logging.getLogger(__name__)
 
 
 def _copy_evaluation_figures(evaluation_dir: Path, report_eval_dir: Path) -> int:
-    """Copy PNG figures from evaluation/figures/ into report/figures/evaluation/."""
-    src = evaluation_dir / "figures"
-    if not src.exists():
-        log.warning("Evaluation figures directory not found: %s", src)
+    """Copy evaluation PNGs into ``report/figures/evaluation/``."""
+    if not evaluation_dir.is_dir():
+        log.warning("Evaluation directory not found: %s", evaluation_dir)
+        return 0
+
+    sources: list[tuple[Path, Path]] = []
+
+    root_figures_dir = evaluation_dir / "figures"
+    if root_figures_dir.is_dir():
+        sources.extend(
+            (png, Path(png.name))
+            for png in sorted(root_figures_dir.glob("*.png"))
+        )
+
+    for model_dir in sorted(d for d in evaluation_dir.iterdir() if d.is_dir() and d.name != "figures"):
+        model_figures_dir = model_dir / "figures"
+        if not model_figures_dir.is_dir():
+            continue
+        sources.extend(
+            (png, Path(model_dir.name) / png.name)
+            for png in sorted(model_figures_dir.glob("*.png"))
+        )
+
+    if not sources:
+        log.warning("No evaluation figures found under %s", evaluation_dir)
         return 0
 
     report_eval_dir.mkdir(parents=True, exist_ok=True)
     n = 0
-    for png in sorted(src.glob("*.png")):
-        dest = report_eval_dir / png.name
-        shutil.copy2(png, dest)
+    for src_path, relative_dest in sources:
+        dest = report_eval_dir / relative_dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dest)
         n += 1
     log.info("Copied %d evaluation figures to %s", n, project_relative_path(report_eval_dir))
     return n
@@ -197,9 +220,16 @@ def run_report(
     if evaluation_dir is None:
         evaluation_dir = evaluation_root()
 
-    output_dir    = Path(output_dir)
+    output_dir = Path(output_dir)
     features_path = Path(features_path)
-    evaluation_dir = Path(evaluation_dir)
+    requested_evaluation_dir = Path(evaluation_dir)
+    evaluation_dir = resolve_evaluation_dir(requested_evaluation_dir)
+    if evaluation_dir != requested_evaluation_dir:
+        log.info(
+            "Resolved evaluation directory from %s to %s",
+            requested_evaluation_dir,
+            evaluation_dir,
+        )
 
     dataset_dir = output_dir / "figures" / "dataset"
     signals_dir = output_dir / "figures" / "signals"

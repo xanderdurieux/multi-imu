@@ -24,7 +24,7 @@ _EXCLUDE_COLS = {
     "section_id",
     "label",
 }
-_DEFAULT_PREFIXES = ("bike_", "rider_", "cross_", "events_")
+_DEFAULT_PREFIXES = ("bike_", "rider_", "cross_")
 
 
 def _resolve_features_csv(target: str | Path) -> Path:

@@ -63,7 +63,7 @@ _EXCLUDE_FEATURE_COLS = frozenset({
     "overall_quality_score",
     "overall_quality_label",
 })
-_FEATURE_PREFIXES = ("bike_", "rider_", "cross_", "events_")
+_FEATURE_PREFIXES = ("bike_", "rider_", "cross_")
 
 
 # ---------------------------------------------------------------------------

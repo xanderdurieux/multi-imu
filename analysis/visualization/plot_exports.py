@@ -30,11 +30,8 @@ from visualization.plot_exports_features import (
     run_eda,
 )
 from visualization.plot_exports_orientation import (
-    plot_orientation_method_quality_counts,
-    plot_orientation_method_residual_heatmap,
-    plot_orientation_method_selection,
     plot_orientation_quality_overview,
-    plot_orientation_selected_residuals,
+    plot_orientation_residuals,
     run_orientation_eda,
 )
 from visualization.plot_exports_sync import (
@@ -58,11 +55,8 @@ __all__ = [
     "plot_forward_confidence",
     "plot_gravity_residuals",
     "plot_label_distribution",
-    "plot_orientation_method_quality_counts",
-    "plot_orientation_method_residual_heatmap",
-    "plot_orientation_method_selection",
     "plot_orientation_quality_overview",
-    "plot_orientation_selected_residuals",
+    "plot_orientation_residuals",
     "plot_pca_by_label",
     "plot_quality_distribution",
     "plot_section_overview",

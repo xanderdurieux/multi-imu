@@ -244,7 +244,6 @@ def plot_feature_correlation(
         c.replace("bike_", "B:")
         .replace("rider_", "R:")
         .replace("cross_", "X:")
-        .replace("events_", "E:")
         for c in top_cols
     ]
 

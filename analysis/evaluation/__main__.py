@@ -6,8 +6,9 @@ Usage::
                          [--output outputs/evaluation]
                          [--seed 42]
                          [--quality marginal]
-                         [--label scenario_label]
+                         [--label scenario_label_activity]
                          [--group section_id]
+                         [--exclude-non-riding]
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import logging
 import sys
 from pathlib import Path
 
-from common.paths import evaluation_root, fused_features_csv
+from common.paths import evaluation_root, exports_root
 from evaluation.experiments import run_evaluation
 
 
@@ -29,7 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--features",
         metavar="PATH",
-        default=str(fused_features_csv()),
+        default=str(exports_root() / "features_fused.csv"),
         help="Path to feature CSV (default: data/exports/features_fused.csv).",
     )
     parser.add_argument(
@@ -55,9 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--label",
         metavar="COL",
-        default="scenario_label",
+        default="scenario_label_activity",
         dest="label_col",
-        help="Target label column (default: scenario_label).",
+        help="Target label column (default: scenario_label_activity).",
     )
     parser.add_argument(
         "--group",
@@ -65,6 +66,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="section_id",
         dest="group_col",
         help="Group column for CV splitting (default: section_id).",
+    )
+    parser.add_argument(
+        "--exclude-non-riding",
+        action="store_true",
+        default=False,
+        help="Drop windows with scenario_label_binary=non_riding before evaluation.",
     )
     parser.add_argument(
         "--verbose",
@@ -93,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             group_col=args.group_col,
             seed=args.seed,
             min_quality=args.min_quality,
+            exclude_non_riding=args.exclude_non_riding,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

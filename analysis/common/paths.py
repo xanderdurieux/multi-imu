@@ -359,6 +359,64 @@ def static_calibration_json() -> Path:
     return calibrations_root() / "calibration.json"
 
 
+_EVALUATION_LABEL_DIR_PRIORITY = (
+    "scenario_label_activity",
+    "scenario_label_coarse",
+    "scenario_label",
+    "scenario_label_binary",
+)
+
+
+def _looks_like_evaluation_run_dir(path: Path) -> bool:
+    """Return True when *path* looks like one concrete evaluation run directory."""
+    if not path.is_dir():
+        return False
+
+    if (path / "evaluation_summary.json").exists() or (path / "metrics_table.csv").exists():
+        return True
+
+    figures_dir = path / "figures"
+    if figures_dir.is_dir() and any(figures_dir.glob("*.png")):
+        return True
+
+    for child in path.iterdir():
+        if not child.is_dir() or child.name == "figures":
+            continue
+        if any(child.glob("confusion_matrix_*.csv")):
+            return True
+        if any(child.glob("per_class_report_*.json")):
+            return True
+        if any(child.glob("feature_importance_*.csv")):
+            return True
+        if any(child.glob("fold_scores_*.csv")):
+            return True
+
+    return False
+
+
+def resolve_evaluation_dir(path: Path | str) -> Path:
+    """Resolve *path* to one concrete evaluation run directory when possible."""
+    evaluation_dir = Path(path)
+    if _looks_like_evaluation_run_dir(evaluation_dir):
+        return evaluation_dir
+
+    if not evaluation_dir.is_dir():
+        return evaluation_dir
+
+    candidates = [
+        child
+        for child in sorted(evaluation_dir.iterdir())
+        if _looks_like_evaluation_run_dir(child)
+    ]
+    if not candidates:
+        return evaluation_dir
+
+    candidates_by_name = {candidate.name: candidate for candidate in candidates}
+    for label_name in _EVALUATION_LABEL_DIR_PRIORITY:
+        if label_name in candidates_by_name:
+            return candidates_by_name[label_name]
+
+    return candidates[0]
 
 # ---------------------------------------------------------------------------
 # Config paths and loading

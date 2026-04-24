@@ -286,8 +286,10 @@ def compute_cross_sensor_signals(
     out["vertical_diff"] = arduino_vert - sporsa_vert
 
     # Disagree score: normalize each diff to [0,1] range then combine.
-    acc_diff_max = acc_diff.max()
-    gyro_diff_max = gyro_diff.max()
+    # Use nanmax because interpolation over sensor gaps propagates NaNs;
+    # a plain .max() would poison the whole column.
+    acc_diff_max = np.nanmax(acc_diff) if np.any(np.isfinite(acc_diff)) else np.nan
+    gyro_diff_max = np.nanmax(gyro_diff) if np.any(np.isfinite(gyro_diff)) else np.nan
     acc_diff_norm = acc_diff / (acc_diff_max + 1e-9)
     gyro_diff_norm_scaled = gyro_diff / (gyro_diff_max + 1e-9)
     out["disagree_score"] = 0.6 * acc_diff_norm + 0.4 * gyro_diff_norm_scaled
