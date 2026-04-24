@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -60,13 +60,13 @@ _META_COLS = {
 
 _MODEL_REGISTRY: dict[str, Any] = {
     "random_forest": RandomForestClassifier,
-    "gradient_boosting": GradientBoostingClassifier,
+    "hist_gradient_boosting": HistGradientBoostingClassifier,
     "logistic_regression": LogisticRegression,
 }
 
 _MODEL_DISPLAY: dict[str, str] = {
     "random_forest": "Random Forest",
-    "gradient_boosting": "Gradient Boosting",
+    "hist_gradient_boosting": "Hist. Gradient Boosting",
     "logistic_regression": "Logistic Regression",
 }
 
@@ -118,6 +118,11 @@ def _build_model(name: str, seed: int) -> Any:
     kwargs: dict[str, Any] = {"random_state": seed}
     if name == "logistic_regression":
         kwargs["max_iter"] = 1000
+        kwargs["class_weight"] = "balanced"
+    if name == "random_forest":
+        kwargs["class_weight"] = "balanced"
+    if name == "hist_gradient_boosting":
+        kwargs["class_weight"] = "balanced"
     return cls(**kwargs)
 
 
@@ -187,10 +192,15 @@ def _cv_evaluate(
     # --- OOF aggregate metrics -------------------------------------------------
     # classification_report and confusion_matrix are computed on the stacked OOF
     # predictions, which cover all samples exactly once under GroupKFold.
+    labels = np.unique(y)
     report = classification_report(
-        y, oof_pred, target_names=class_names, output_dict=True, zero_division=0
+        y, oof_pred,
+        labels=labels,
+        target_names=class_names,
+        output_dict=True,
+        zero_division=0,
     )
-    cm = confusion_matrix(y, oof_pred)
+    cm = confusion_matrix(y, oof_pred, labels=labels)
 
     # Mean feature importances across folds (None for models that lack them).
     importances: list[float] | None = None
@@ -351,6 +361,7 @@ def run_evaluation(
         for model_name in _MODEL_REGISTRY:
             key = f"{fs_name}__{model_name}"
             log.info("Evaluating %s ...", key)
+            (output_dir / model_name).mkdir(exist_ok=True)
 
             model = _build_model(model_name, seed)
             try:
@@ -388,7 +399,7 @@ def run_evaluation(
 
             # Write confusion matrix — rows = true class, cols = predicted class.
             # Built from OOF predictions; label index preserved for readability.
-            cm_path = output_dir / f"confusion_matrix_{fs_name}_{model_name}.csv"
+            cm_path = output_dir / model_name / f"confusion_matrix_{fs_name}.csv"
             cm_df = pd.DataFrame(
                 result["confusion_matrix"],
                 index=le.classes_,
@@ -398,13 +409,13 @@ def run_evaluation(
             log.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
 
             # Write per-class report (OOF-based)
-            per_class_path = output_dir / f"per_class_report_{fs_name}_{model_name}.json"
+            per_class_path = output_dir / model_name /f"per_class_report_{fs_name}.json"
             per_class_path.write_text(
                 json.dumps(result["per_class"], indent=2), encoding="utf-8"
             )
 
             # Write fold-wise scores so variance is inspectable
-            fold_path = output_dir / f"fold_scores_{fs_name}_{model_name}.csv"
+            fold_path = output_dir / model_name / f"fold_scores_{fs_name}.csv"
             fold_df = pd.DataFrame(
                 {
                     "fold": range(1, n_splits + 1),
@@ -417,7 +428,7 @@ def run_evaluation(
 
             # Write feature importances (mean across folds)
             if result["feature_importances"] is not None:
-                fi_path = output_dir / f"feature_importance_{model_name}_{fs_name}.csv"
+                fi_path = output_dir / model_name / f"feature_importance_{fs_name}.csv"
                 fi_df = pd.DataFrame(
                     {
                         "feature": feat_cols,
@@ -473,19 +484,6 @@ def run_evaluation(
     summary_path = output_dir / "evaluation_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
     log.info("Wrote evaluation summary to %s", project_relative_path(summary_path))
-
-    # ------------------------------------------------------------------
-    # 7. Write THESIS_SUMMARY.md
-    # ------------------------------------------------------------------
-    _write_thesis_summary(
-        output_dir=output_dir,
-        summary=summary,
-        metrics_rows=metrics_rows,
-        best_key=best_key,
-        all_results=all_results,
-        label_display=_MODEL_DISPLAY,
-        fs_display=_FS_DISPLAY,
-    )
 
     # ------------------------------------------------------------------
     # 8. Generate thesis figures
@@ -555,137 +553,3 @@ def _pivot_table_lines(
                 cells.append("—")
         lines.append(f"| {mdl} | " + " | ".join(cells) + " |")
     return lines
-
-
-def _write_thesis_summary(
-    output_dir: Path,
-    summary: dict,
-    metrics_rows: list[dict],
-    best_key: str | None,
-    all_results: dict,
-    label_display: dict[str, str],
-    fs_display: dict[str, str],
-) -> None:
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    ordered_fs = _ordered_feature_sets(metrics_rows)
-
-    lines = [
-        "# Evaluation Summary",
-        "",
-        f"**Date:** {date_str}  "
-        f"**Seed:** {summary['seed']}  "
-        f"**Windows:** {summary['n_windows']}",
-        "",
-        "> All metrics are out-of-fold (OOF) estimates from GroupKFold CV.",
-        "> Mean ± std are percentages computed over individual folds (ddof=1).",
-        "",
-        "## Full Results",
-        "",
-        "| Feature Set | n | Model | Accuracy | Macro-F1 |",
-        "|---|---|---|---|---|",
-    ]
-
-    for row in sorted(
-        metrics_rows,
-        key=lambda r: (
-            _FS_ORDER.index(r["feature_set"]) if r["feature_set"] in _FS_ORDER else 99,
-            list(_MODEL_REGISTRY).index(r["model"]) if r["model"] in _MODEL_REGISTRY else 99,
-        ),
-    ):
-        fs_label = fs_display.get(row["feature_set"], row["feature_set"])
-        n_feat = row.get("n_features", "—")
-        mdl = label_display.get(row["model"], row["model"])
-        acc = f"{row['accuracy'] * 100:.1f} ± {row['accuracy_std'] * 100:.1f}%"
-        f1 = f"{row['macro_f1'] * 100:.1f} ± {row['macro_f1_std'] * 100:.1f}%"
-        lines.append(f"| {fs_label} | {n_feat} | {mdl} | {acc} | {f1} |")
-
-    # ------------------------------------------------------------------
-    # Pivot table 1: macro-F1 (models × feature sets)
-    # ------------------------------------------------------------------
-    lines += [
-        "",
-        "## Macro-F1 Comparison — mean ± std % (models × feature sets)",
-        "",
-    ]
-    lines += _pivot_table_lines(
-        metrics_rows, "macro_f1", "macro_f1_std", ordered_fs, label_display, fs_display
-    )
-
-    # ------------------------------------------------------------------
-    # Pivot table 2: accuracy (models × feature sets)
-    # ------------------------------------------------------------------
-    lines += [
-        "",
-        "## Accuracy Comparison — mean ± std % (models × feature sets)",
-        "",
-    ]
-    lines += _pivot_table_lines(
-        metrics_rows, "accuracy", "accuracy_std", ordered_fs, label_display, fs_display
-    )
-
-    # ------------------------------------------------------------------
-    # Key findings
-    # ------------------------------------------------------------------
-    lines += ["", "## Key Findings", ""]
-
-    if best_key and best_key in all_results:
-        f1_pct = all_results[best_key]["macro_f1"] * 100
-        f1_std_pct = all_results[best_key]["macro_f1_std"] * 100
-        fs_part, _, mdl_part = best_key.partition("__")
-        mdl_disp = label_display.get(mdl_part, mdl_part)
-        fs_disp = fs_display.get(fs_part, fs_part)
-        lines.append(
-            f"- **Best:** {fs_disp} + {mdl_disp} — "
-            f"macro-F1 {f1_pct:.1f} ± {f1_std_pct:.1f}%"
-        )
-
-        # Cross-sensor contribution: fused vs fused_no_cross for same best model.
-        # This quantifies whether the cross-sensor alignment/disagreement features
-        # add predictive value beyond naive sensor fusion.
-        if mdl_part:
-            fused_key = f"fused__{mdl_part}"
-            no_cross_key = f"fused_no_cross__{mdl_part}"
-            if fused_key in all_results and no_cross_key in all_results:
-                delta_f1 = (
-                    all_results[fused_key]["macro_f1"]
-                    - all_results[no_cross_key]["macro_f1"]
-                ) * 100
-                sign = "+" if delta_f1 >= 0 else ""
-                lines.append(
-                    f"- **Cross-sensor contribution** (fused vs fused_no_cross, {mdl_disp}): "
-                    f"{sign}{delta_f1:.1f} pp macro-F1"
-                )
-
-            # Sensor contribution: fused_no_cross vs best single-sensor set.
-            bike_key = f"bike__{mdl_part}"
-            rider_key = f"rider__{mdl_part}"
-            if no_cross_key in all_results and bike_key in all_results and rider_key in all_results:
-                best_single_f1 = max(
-                    all_results[bike_key]["macro_f1"],
-                    all_results[rider_key]["macro_f1"],
-                )
-                best_single_name = (
-                    "Bike only"
-                    if all_results[bike_key]["macro_f1"] >= all_results[rider_key]["macro_f1"]
-                    else "Rider only"
-                )
-                delta_fusion = (
-                    all_results[no_cross_key]["macro_f1"] - best_single_f1
-                ) * 100
-                sign = "+" if delta_fusion >= 0 else ""
-                lines.append(
-                    f"- **Sensor fusion gain** (fused_no_cross vs {best_single_name}, {mdl_disp}): "
-                    f"{sign}{delta_fusion:.1f} pp macro-F1"
-                )
-    else:
-        lines.append("- No results available.")
-
-    lines += [
-        f"- Classes evaluated: {', '.join(summary['classes'])}",
-        f"- Total labeled windows: {summary['n_windows']}",
-        "",
-    ]
-
-    md_path = output_dir / "THESIS_SUMMARY.md"
-    md_path.write_text("\n".join(lines))
-    log.info("Wrote thesis summary to %s", project_relative_path(md_path))

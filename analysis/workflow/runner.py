@@ -28,6 +28,12 @@ from .config import WorkflowConfig
 
 log = logging.getLogger(__name__)
 
+_EVALUATION_LABEL_COLS = [
+    "scenario_label",
+    "scenario_label_coarse",
+    "scenario_label_binary",
+]
+
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
     """Resolve the list of recording names to process."""
     explicit = list(cfg.recordings)
@@ -270,19 +276,33 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
         fused = exports_root() / "features_fused.csv"
         out = evaluation_root()
         if fused.exists():
-            try:
-                run_evaluation(
-                    fused,
-                    output_dir=out,
-                    label_col=cfg.evaluation_label_col,
-                    seed=cfg.evaluation_seed,
-                    min_quality=cfg.min_quality_label,
-                    no_plots=cfg.no_plots,
-                )
-                result["ok"] += 1
-            except Exception as exc:
-                log.error("evaluation failed: %s", exc)
-                result["failed"] += 1
+            if cfg.evaluation_label_col == "auto":
+                eval_runs = _EVALUATION_LABEL_COLS
+            else:
+                eval_runs = [cfg.evaluation_label_col]
+
+            for label_col in eval_runs:
+                # Preserve legacy location for coarse-label outputs so downstream
+                # report/bundle stages continue to read data/evaluation/ by default.
+                run_out = out if label_col == "scenario_label_coarse" else out / label_col
+                try:
+                    log.info(
+                        "Running evaluation for label_col=%s -> %s",
+                        label_col,
+                        project_relative_path(run_out),
+                    )
+                    run_evaluation(
+                        fused,
+                        output_dir=run_out,
+                        label_col=label_col,
+                        seed=cfg.evaluation_seed,
+                        min_quality=cfg.min_quality_label,
+                        no_plots=cfg.no_plots,
+                    )
+                    result["ok"] += 1
+                except Exception as exc:
+                    log.error("evaluation failed for label_col=%s: %s", label_col, exc)
+                    result["failed"] += 1
         else:
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1

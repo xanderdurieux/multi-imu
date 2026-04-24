@@ -102,8 +102,8 @@ def _build_section_calibration_segments(
     recording_name: str,
     sensors: list[str],
     reference_sensor: str,
-    reference_segs_open: CalibrationSegment,
-    reference_segs_close: CalibrationSegment,
+    reference_segs_open: CalibrationSegment | None,
+    reference_segs_close: CalibrationSegment | None,
     sync_params: dict[str, float] | None,
     t_min: float,
     t_max: float,
@@ -113,12 +113,13 @@ def _build_section_calibration_segments(
     The reference sensor segments are the two bounding calibrations (already
     on the synced timeline). Non-reference sensors have their recording-level
     segments loaded, sync-transformed where needed, and clipped to [t_min, t_max].
+    Pass None for either reference segment when no calibration protocol exists.
     """
     result: dict[str, list[CalibrationSegment]] = {}
 
     for sensor in sensors:
         if sensor == reference_sensor:
-            result[sensor] = [reference_segs_open, reference_segs_close]
+            result[sensor] = [s for s in (reference_segs_open, reference_segs_close) if s is not None]
             continue
 
         try:
@@ -304,8 +305,7 @@ def split_recording(
         )
         ts_full_0 = float(ref_df["timestamp"].iloc[0])
         ts_full_1 = float(ref_df["timestamp"].iloc[-1])
-        dummy = CalibrationSegment(start_ms=ts_full_0, end_ms=ts_full_0, peak_ms=[])
-        return _write_section(1, sensor_dfs, ts_full_0, ts_full_1, dummy, dummy)
+        return _write_section(1, sensor_dfs, ts_full_0, ts_full_1, None, None)
 
     written: list[Path] = []
     for i, (c_open, c_close) in enumerate(zip(calibrations, calibrations[1:]), start=1):

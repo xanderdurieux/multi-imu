@@ -99,6 +99,17 @@ class WorkflowConfig:
             errors.append("window_s must be > 0")
         if self.hop_s <= 0:
             errors.append("hop_s must be > 0")
+        valid_eval_label_cols = {
+            "auto",
+            "scenario_label",
+            "scenario_label_coarse",
+            "scenario_label_binary",
+        }
+        if self.evaluation_label_col not in valid_eval_label_cols:
+            errors.append(
+                "evaluation_label_col must be one of "
+                f"{valid_eval_label_cols}, got {self.evaluation_label_col!r}"
+            )
         return errors
 
 

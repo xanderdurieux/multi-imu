@@ -334,9 +334,9 @@ def estimate_sensor_intrinsics(
             ])
             drift = float(np.linalg.norm(gyro_bias - static_gyro_bias))
             if drift > _GYRO_BIAS_DRIFT_THRESHOLD_DEG_S:
+                # Informational only: dynamic bias is used for correction regardless,
+                # so drift vs. the hardware reference does not degrade correction quality.
                 quality_tags.append(f"gyro_bias_drift_{drift:.2f}deg_s")
-                if quality == "good":
-                    quality = "marginal"
 
         if acc_bias is not None or acc_scale is not None:
             corrected = g_body.copy()

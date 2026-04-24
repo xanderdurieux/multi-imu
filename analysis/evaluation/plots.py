@@ -21,13 +21,13 @@ _DPI = 150
 
 _MODEL_DISPLAY: dict[str, str] = {
     "random_forest": "Random Forest",
-    "gradient_boosting": "Gradient Boosting",
+    "hist_gradient_boosting": "Hist. Gradient Boosting",
     "logistic_regression": "Logistic Regression",
 }
 
 _MODEL_COLORS: dict[str, str] = {
     "random_forest": "#3498db",
-    "gradient_boosting": "#2ecc71",
+    "hist_gradient_boosting": "#2ecc71",
     "logistic_regression": "#e74c3c",
 }
 
@@ -368,14 +368,22 @@ def plot_per_class_f1(
 # ---------------------------------------------------------------------------
 
 def generate_evaluation_figures(output_dir: Path) -> list[Path]:
-    """Read evaluation CSV artefacts and generate all thesis figures.
+    """Read evaluation artefacts from the per-model subfolder structure and generate thesis figures.
 
-    Reads from *output_dir*:
-    - ``metrics_table.csv``
-    - ``confusion_matrix_<set>_<model>.csv``
-    - ``feature_importance_<model>_<set>.csv``
+    Expected on-disk layout::
 
-    Figures are written to ``output_dir/figures/``.
+        output_dir/
+          metrics_table.csv
+          figures/                       ← cross-model figures written here
+          <model_name>/
+            confusion_matrix_<fs>.csv
+            feature_importance_<fs>.csv
+            per_class_report_<fs>.json
+            figures/                     ← per-model figures written here
+
+    Cross-model figures (model_comparison, per_class_f1) go to ``output_dir/figures/``.
+    Per-model figures (confusion matrices, feature importances) go to
+    ``output_dir/<model_name>/figures/``.
     """
     output_dir = Path(output_dir)
     figures_dir = output_dir / "figures"
@@ -383,7 +391,7 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
 
     generated: list[Path] = []
 
-    # ---- model comparison ----
+    # ---- model comparison (cross-model, top-level figures/) ----
     metrics_path = output_dir / "metrics_table.csv"
     if metrics_path.exists():
         try:
@@ -399,66 +407,61 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             project_relative_path(output_dir),
         )
 
-    # ---- confusion matrices ----
-    for cm_path in sorted(output_dir.glob("confusion_matrix_*.csv")):
-        try:
-            cm_df = pd.read_csv(cm_path, index_col=0)
-            stem = cm_path.stem
-            _, _, rest = stem.partition("confusion_matrix_")
-            human = rest.replace("_", " / ").title()
-            out = figures_dir / f"{stem}.png"
-            plot_confusion_matrix(cm_df, out, title=f"Confusion matrix — {human}")
-            generated.append(out)
-        except Exception as exc:
-            log.warning("Failed to plot confusion matrix %s: %s", cm_path.name, exc)
-
-    # ---- feature importances ----
-    for fi_path in sorted(output_dir.glob("feature_importance_*.csv")):
-        try:
-            fi_df = pd.read_csv(fi_path)
-            stem = fi_path.stem
-            _, _, rest = stem.partition("feature_importance_")
-            human = rest.replace("_", " / ").title()
-            out = figures_dir / f"{stem}.png"
-            plot_feature_importance(fi_df, out, title=f"Feature importance — {human}")
-            generated.append(out)
-        except Exception as exc:
-            log.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
-
-    # ---- per-class F1 ----
-    # Collect all per_class_report_<fs>_<model>.json files, group by feature set.
-    per_class_files = sorted(output_dir.glob("per_class_report_*.csv")) + sorted(
-        output_dir.glob("per_class_report_*.json")
-    )
-    # Build all_results and classes from saved reports
+    # ---- per-model figures: confusion matrices and feature importances ----
     all_results_disk: dict[str, dict] = {}
-    for pc_path in per_class_files:
-        try:
-            stem = pc_path.stem  # per_class_report_<fs>_<model>
-            _, _, rest = stem.partition("per_class_report_")
-            data = json.loads(pc_path.read_text(encoding="utf-8"))
-            # rest = "<fs>_<model>" — split on last known model suffix
-            for model_key in ("random_forest", "gradient_boosting", "logistic_regression"):
-                suffix = f"_{model_key}"
-                if rest.endswith(suffix):
-                    fs_name = rest[: -len(suffix)]
-                    all_results_disk[f"{fs_name}__{model_key}"] = {"per_class": data}
-                    break
-        except Exception as exc:
-            log.warning("Failed to load per-class report %s: %s", pc_path.name, exc)
+    model_dirs = sorted(d for d in output_dir.iterdir() if d.is_dir() and d.name != "figures")
 
+    for model_dir in model_dirs:
+        model_name = model_dir.name
+        model_figures_dir = model_dir / "figures"
+        model_figures_dir.mkdir(exist_ok=True)
+
+        for cm_path in sorted(model_dir.glob("confusion_matrix_*.csv")):
+            try:
+                cm_df = pd.read_csv(cm_path, index_col=0)
+                _, _, fs_name = cm_path.stem.partition("confusion_matrix_")
+                human = (
+                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                    f"{fs_name.replace('_', ' ').title()}"
+                )
+                out = model_figures_dir / f"{cm_path.stem}.png"
+                plot_confusion_matrix(cm_df, out, title=f"Confusion matrix — {human}")
+                generated.append(out)
+            except Exception as exc:
+                log.warning("Failed to plot confusion matrix %s: %s", cm_path.name, exc)
+
+        for fi_path in sorted(model_dir.glob("feature_importance_*.csv")):
+            try:
+                fi_df = pd.read_csv(fi_path)
+                _, _, fs_name = fi_path.stem.partition("feature_importance_")
+                human = (
+                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                    f"{fs_name.replace('_', ' ').title()}"
+                )
+                out = model_figures_dir / f"{fi_path.stem}.png"
+                plot_feature_importance(fi_df, out, title=f"Feature importance — {human}")
+                generated.append(out)
+            except Exception as exc:
+                log.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
+
+        for pc_path in sorted(model_dir.glob("per_class_report_*.json")):
+            try:
+                _, _, fs_name = pc_path.stem.partition("per_class_report_")
+                data = json.loads(pc_path.read_text(encoding="utf-8"))
+                all_results_disk[f"{fs_name}__{model_name}"] = {"per_class": data}
+            except Exception as exc:
+                log.warning("Failed to load per-class report %s: %s", pc_path.name, exc)
+
+    # ---- per-class F1 (cross-model, top-level figures/, grouped by feature set) ----
     if all_results_disk:
-        # Derive class list from union of keys (exclude aggregate keys)
         _aggregate_keys = {"accuracy", "macro avg", "weighted avg"}
         classes_set: set[str] = set()
         for v in all_results_disk.values():
-            classes_set.update(
-                k for k in v.get("per_class", {}) if k not in _aggregate_keys
-            )
+            classes_set.update(k for k in v.get("per_class", {}) if k not in _aggregate_keys)
         classes_disk = sorted(classes_set)
-
         feature_sets_disk = sorted({k.split("__")[0] for k in all_results_disk})
         metrics_df_disk = pd.DataFrame(columns=["feature_set", "model"])
+
         for fs_name in feature_sets_disk:
             out = figures_dir / f"per_class_f1_{fs_name}.png"
             try:
@@ -477,6 +480,6 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
     log.info(
         "Evaluation figures: %d written to %s",
         len(generated),
-        project_relative_path(figures_dir),
+        project_relative_path(output_dir),
     )
     return generated

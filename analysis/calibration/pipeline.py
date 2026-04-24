@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 
 _SENSORS = ("sporsa", "arduino")
 _ARDUINO_SENSOR = "arduino"
+_NO_PROTOCOL_FALLBACK_MS = 5_000.0  # first 5 s used as pseudo-static window when no protocol
 
 
 def _build_opening_sequence(seg) -> OpeningSequence:
@@ -182,6 +183,11 @@ def _cal_sensor(
         segs = []
 
     opening_seg, static_ranges, closing_seg = detect_protocol_landmarks(segs)
+
+    if not static_ranges:
+        t0 = float(df["timestamp"].iloc[0])
+        static_ranges = [(t0, t0 + _NO_PROTOCOL_FALLBACK_MS)]
+        all_quality_tags.append("no_protocol")
 
     intrinsics = estimate_sensor_intrinsics(df, static_ranges, static_cal=static_cal)
     all_intrinsics[sensor] = intrinsics
