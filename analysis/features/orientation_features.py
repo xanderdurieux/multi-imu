@@ -7,12 +7,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common.statistics import safe_max, safe_mean, safe_std
+from common.statistics import safe_iqr, safe_max, safe_mean, safe_skew, safe_std
 
 _PITCH_ROLL_KEYS = ("pitch_mean", "pitch_std", "roll_mean", "roll_std",
                     "pitch_rate_std", "roll_rate_std",
                     "pitch_range", "roll_range",
-                    "yaw_rate_std", "yaw_rate_max_abs")
+                    "yaw_rate_std", "yaw_rate_max_abs",
+                    # Extra yaw-rate stats targeted at brief, asymmetric head
+                    # turns (shoulder check, head_movement).  std + max alone
+                    # under-represent these because they are dwarfed by the
+                    # within-window noise floor unless the turn is sustained.
+                    "yaw_rate_mean_abs", "yaw_rate_p95_abs",
+                    "yaw_rate_range", "yaw_rate_skew", "yaw_rate_iqr")
 
 
 def _finite(arr: np.ndarray) -> np.ndarray:
@@ -74,8 +80,19 @@ def orientation_features(
         finite = _finite(yaw)
         if finite.size >= 2:
             yaw_rate = _angular_diff_deg(finite)
+            abs_rate = np.abs(yaw_rate)
             base[f"{sensor_prefix}_yaw_rate_std"] = safe_std(yaw_rate)
-            base[f"{sensor_prefix}_yaw_rate_max_abs"] = safe_max(np.abs(yaw_rate))
+            base[f"{sensor_prefix}_yaw_rate_max_abs"] = safe_max(abs_rate)
+            base[f"{sensor_prefix}_yaw_rate_mean_abs"] = safe_mean(abs_rate)
+            # p95 catches brief peaks (shoulder-check duration < window) that
+            # mean/max blur or saturate.
+            base[f"{sensor_prefix}_yaw_rate_p95_abs"] = float(np.percentile(abs_rate, 95))
+            base[f"{sensor_prefix}_yaw_rate_range"] = float(np.max(yaw_rate) - np.min(yaw_rate))
+            # Head turns are typically one-sided within a window (look left OR
+            # right), so signed-rate skew is informative; a steady cornering
+            # rate is symmetric around its mean and produces low skew.
+            base[f"{sensor_prefix}_yaw_rate_skew"] = safe_skew(yaw_rate)
+            base[f"{sensor_prefix}_yaw_rate_iqr"] = safe_iqr(yaw_rate)
 
     return base
 
@@ -93,6 +110,13 @@ _CROSS_ORIENT_KEYS = (
     "cross_roll_corr",
     "cross_yaw_rate_diff_std",
     "cross_yaw_rate_diff_max_abs",
+    # Head-turn-specific yaw decoupling.  When the rider checks over their
+    # shoulder, the helmet yaws while the bike heading is steady, so
+    # |rider_rate - bike_rate| spikes briefly.  These complement the
+    # std/max stats with a robust mean and a normalised decoupling ratio.
+    "cross_yaw_rate_diff_mean_abs",
+    "cross_yaw_rate_diff_p95_abs",
+    "cross_yaw_rate_decoupling_ratio",
 )
 
 
@@ -177,6 +201,25 @@ def orientation_cross_features(
         base["cross_yaw_rate_diff_std"] = safe_std(diff_rate)
         finite = _finite(diff_rate)
         if finite.size > 0:
-            base["cross_yaw_rate_diff_max_abs"] = float(np.max(np.abs(finite)))
+            abs_diff = np.abs(finite)
+            base["cross_yaw_rate_diff_max_abs"] = float(np.max(abs_diff))
+            base["cross_yaw_rate_diff_mean_abs"] = float(np.mean(abs_diff))
+            base["cross_yaw_rate_diff_p95_abs"] = float(np.percentile(abs_diff, 95))
+
+        # Decoupling ratio: how much rider yaw is *not* explained by bike yaw.
+        # During cornering both rotate together (low ratio); during a shoulder
+        # check the bike is steady so the diff is dominated by rider motion,
+        # pushing the ratio close to 1.
+        b_rate_finite = _finite(b_rate)
+        r_rate_finite = _finite(r_rate)
+        if (
+            finite.size > 0
+            and b_rate_finite.size > 0
+            and r_rate_finite.size > 0
+        ):
+            diff_std = safe_std(diff_rate)
+            r_std = safe_std(r_rate)
+            if r_std > 1e-6:
+                base["cross_yaw_rate_decoupling_ratio"] = float(diff_std / r_std)
 
     return base
