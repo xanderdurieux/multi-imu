@@ -238,6 +238,20 @@ def compute_cross_sensor_signals(
     acc_ratio            - acc_norm_arduino / (acc_norm_sporsa + 1e-6)
     vertical_diff        - acc_vertical_arduino - acc_vertical_sporsa
     disagree_score       - weighted combination: 0.6*norm(acc_diff_norm) + 0.4*norm(gyro_diff_norm)
+
+    HF coupling columns (road-vibration band, helmet-on-head indicator):
+
+    acc_hf_correlation   - rolling Pearson r of acc_hf between sensors (2s window).
+                           High when road-induced vibration couples into both
+                           sensors (helmet on head, bike moving); near zero when
+                           the helmet is decoupled from the bike (helmet off
+                           head, stationary bike, etc.).
+    acc_hf_ratio         - rolling RMS(arduino_acc_hf) / RMS(sporsa_acc_hf).
+                           ≈1 when both sensors see the same road excitation,
+                           >>1 when the helmet sensor is being shaken
+                           independent of the bike.
+    gyro_hf_correlation  - rolling Pearson r of gyro_hf between sensors (2s).
+                           Same idea on angular rate.
     """
     # Build common time grid over overlap.
     t_start = max(sporsa_df["timestamp"].iloc[0], arduino_df["timestamp"].iloc[0])
@@ -253,6 +267,9 @@ def compute_cross_sensor_signals(
             "acc_ratio",
             "vertical_diff",
             "disagree_score",
+            "acc_hf_correlation",
+            "acc_hf_ratio",
+            "gyro_hf_correlation",
         ])
 
     dt_ms = 1000.0 / sample_rate_hz
@@ -293,5 +310,39 @@ def compute_cross_sensor_signals(
     acc_diff_norm = acc_diff / (acc_diff_max + 1e-9)
     gyro_diff_norm_scaled = gyro_diff / (gyro_diff_max + 1e-9)
     out["disagree_score"] = 0.6 * acc_diff_norm + 0.4 * gyro_diff_norm_scaled
+
+    # ------------------------------------------------------------------
+    # HF coupling (road-vibration band).  Uses acc_hf / gyro_hf columns
+    # computed by compute_sensor_signals (acc_norm minus 2 Hz lowpass).
+    # These let us distinguish helmet-on-head (coupled) from helmet-off-head
+    # (decoupled) without relying on explicit labels.
+    # ------------------------------------------------------------------
+    def _interp_if_present(src: pd.DataFrame, col: str) -> np.ndarray | None:
+        if col not in src.columns:
+            return None
+        return _interp_series(src, col, common_ts)
+
+    sporsa_acc_hf = _interp_if_present(sporsa_df, "acc_hf")
+    arduino_acc_hf = _interp_if_present(arduino_df, "acc_hf")
+    if sporsa_acc_hf is not None and arduino_acc_hf is not None:
+        s_hf = pd.Series(sporsa_acc_hf)
+        a_hf = pd.Series(arduino_acc_hf)
+        out["acc_hf_correlation"] = s_hf.rolling(
+            window=corr_window, min_periods=20
+        ).corr(a_hf).values
+
+        rms_window = max(int(1.0 * sample_rate_hz), 20)
+        sporsa_hf_rms = s_hf.pow(2).rolling(window=rms_window, min_periods=20).mean().pow(0.5)
+        arduino_hf_rms = a_hf.pow(2).rolling(window=rms_window, min_periods=20).mean().pow(0.5)
+        out["acc_hf_ratio"] = (arduino_hf_rms / (sporsa_hf_rms + 1e-6)).values
+
+    sporsa_gyro_hf = _interp_if_present(sporsa_df, "gyro_hf")
+    arduino_gyro_hf = _interp_if_present(arduino_df, "gyro_hf")
+    if sporsa_gyro_hf is not None and arduino_gyro_hf is not None:
+        s_ghf = pd.Series(sporsa_gyro_hf)
+        a_ghf = pd.Series(arduino_gyro_hf)
+        out["gyro_hf_correlation"] = s_ghf.rolling(
+            window=corr_window, min_periods=20
+        ).corr(a_ghf).values
 
     return out

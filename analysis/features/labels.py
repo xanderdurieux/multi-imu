@@ -67,7 +67,12 @@ COARSE_MAP: dict[str, str] = {
 ACTIVITY_MAP: dict[str, str] = {
     "calibration_sequence": "non_riding",
     "grounded": "non_riding",
-    "helmet_move": "head_motion",
+    # helmet_move = helmet handled while OFF the rider's head (e.g. picked up,
+    # placed on the bars).  Semantically this is not head motion at all — it's
+    # a non-riding/off-head state — so it belongs in non_riding, not
+    # head_motion.  Keeping it in head_motion poisons the class with windows
+    # that have completely decoupled helmet-vs-bike motion.
+    "helmet_move": "non_riding",
     "riding": "steady_seated",
     "forest": "steady_seated",
     "uneven_road": "steady_seated",
