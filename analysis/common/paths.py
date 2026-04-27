@@ -355,8 +355,15 @@ def section_labels_csv(sec_dir: Path | str) -> Path:
 
 
 def static_calibration_json() -> Path:
-    """Return the path to the static (device-level) calibration JSON."""
-    return calibrations_root() / "calibration.json"
+    """Return the path to the static (device-level) IMU calibration JSON.
+
+    The static_calibration stage writes ``arduino_imu_calibration.json``
+    (per :mod:`static_calibration.run`).  An older ``calibration.json``
+    sibling existed historically and downstream loaders kept silently
+    falling back to a non-existent path; this returns the canonical
+    filename so things like the Mahony hard-iron load actually find it.
+    """
+    return calibrations_root() / "arduino_imu_calibration.json"
 
 
 _EVALUATION_LABEL_DIR_PRIORITY = (

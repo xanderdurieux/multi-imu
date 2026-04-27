@@ -39,9 +39,18 @@ from common.paths import (
     write_csv,
     write_json_file,
 )
-from common.quaternion import euler_from_quat, quat_conjugate, quat_from_rotation_matrix, quat_normalize, quat_rotate, tilt_quat_from_acc
+from common.quaternion import (
+    euler_from_quat,
+    quat_conjugate,
+    quat_from_rotation_matrix,
+    quat_normalize,
+    quat_rotate,
+    quat_rotate_batch,
+    tilt_quat_from_acc,
+)
 
 from .filters import run_mahony, _DEFAULT_KP, _DEFAULT_KI
+from .mag_calibration import MagCalibration, fit_mag_ellipsoid
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +96,16 @@ def _static_windows(cal: dict[str, Any], sensor: str) -> list[tuple[float, float
     return windows
 
 
-def _load_mag_hard_iron(sensor: str) -> np.ndarray | None:
+def _load_static_mag_calibration(sensor: str) -> MagCalibration | None:
+    """Load a stored ellipsoid (or hard-iron-only) mag calibration.
+
+    Layered design:
+    * If the static-calibration JSON has a full ellipsoid (``offset`` +
+      ``transform``), use it directly.
+    * If it has only a legacy ``hard_iron_bias`` block, lift it to a
+      hard-iron-only :class:`MagCalibration` (identity transform).
+    * Otherwise return None — caller will fit an ellipsoid in-section.
+    """
     if sensor != "arduino":
         return None
     cal_path = static_calibration_json()
@@ -95,12 +113,53 @@ def _load_mag_hard_iron(sensor: str) -> np.ndarray | None:
         return None
     try:
         cal = read_json_file(cal_path)
-        hi = cal.get("magnetometer", {}).get("hard_iron_bias")
+        mag_block = cal.get("magnetometer") or {}
+
+        ellipsoid = mag_block.get("ellipsoid")
+        if isinstance(ellipsoid, dict) and "offset" in ellipsoid and "transform" in ellipsoid:
+            return MagCalibration(
+                offset=np.array(ellipsoid["offset"], dtype=float),
+                transform=np.array(ellipsoid["transform"], dtype=float),
+                radius=float(ellipsoid.get("radius", 0.0)),
+                residual=float(ellipsoid.get("residual", float("nan"))),
+                n_samples=int(ellipsoid.get("n_samples", 0)),
+            )
+
+        hi = mag_block.get("hard_iron_bias")
         if hi is not None:
-            return np.array([hi["x"], hi["y"], hi["z"]], dtype=float)
+            return MagCalibration(
+                offset=np.array([hi["x"], hi["y"], hi["z"]], dtype=float),
+                transform=np.eye(3),
+                radius=0.0,
+                residual=float("nan"),
+                n_samples=0,
+            )
     except Exception as exc:
-        log.warning("Could not load mag hard-iron: %s", exc)
+        log.warning("Could not load mag calibration: %s", exc)
     return None
+
+
+def _resolve_mag_calibration(sensor: str, mag: np.ndarray | None) -> MagCalibration | None:
+    """Pick the best mag calibration available for this section.
+
+    Priority: stored static cal (loaded from disk) > in-section ellipsoid fit
+    on the actual cycling data > None (filter runs gyro+acc only).  The fit
+    requires enough rotation diversity, which a full cycling section
+    typically provides whereas the six-face static recordings did not.
+    """
+    if sensor != "arduino" or mag is None:
+        return None
+
+    static_cal = _load_static_mag_calibration(sensor)
+    if static_cal is not None and static_cal.n_samples > 0:
+        return static_cal  # full ellipsoid from a previous run
+
+    fitted = fit_mag_ellipsoid(mag)
+    if fitted.n_samples >= 100:
+        return fitted
+
+    # Fall back to legacy hard-iron-only correction if loaded above.
+    return static_cal
 
 
 # ---------------------------------------------------------------------------
@@ -145,19 +204,39 @@ def _quality_label(residual: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_output_df(timestamps: np.ndarray, Q: np.ndarray) -> pd.DataFrame:
-    rows = []
-    for i, q in enumerate(Q):
-        yaw_r, pitch_r, roll_r = euler_from_quat(q)
-        rows.append({
-            "timestamp": float(timestamps[i]),
-            "qw": float(q[0]), "qx": float(q[1]),
-            "qy": float(q[2]), "qz": float(q[3]),
-            "roll_deg":  float(roll_r  * _DEG),
-            "pitch_deg": float(pitch_r * _DEG),
-            "yaw_deg":   float(yaw_r   * _DEG),
-        })
-    return pd.DataFrame(rows)
+def _build_output_df(
+    timestamps: np.ndarray,
+    Q: np.ndarray,
+    gyro_dps: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Build the per-sample orientation CSV frame.
+
+    When ``gyro_dps`` is provided, the calibrated body-frame gyroscope is
+    rotated into the world frame using the time-varying quaternion to give
+    instantaneous angular rate around each world axis.  ``gyro_world_z_dps``
+    is the directly-measured yaw rate — preferred over differencing
+    ``yaw_deg`` because it has no Mahony lag, no ±180° wraparound, and uses
+    the full sensor bandwidth (head turns of <0.5 s are visible).
+    """
+    eulers = np.array([euler_from_quat(q) for q in Q], dtype=float)  # (N, 3) yaw, pitch, roll
+    out = pd.DataFrame({
+        "timestamp": timestamps.astype(float),
+        "qw": Q[:, 0].astype(float),
+        "qx": Q[:, 1].astype(float),
+        "qy": Q[:, 2].astype(float),
+        "qz": Q[:, 3].astype(float),
+        "roll_deg":  (eulers[:, 2] * _DEG).astype(float),
+        "pitch_deg": (eulers[:, 1] * _DEG).astype(float),
+        "yaw_deg":   (eulers[:, 0] * _DEG).astype(float),
+    })
+
+    if gyro_dps is not None and len(gyro_dps) == len(Q):
+        gyro_world = quat_rotate_batch(Q, gyro_dps)
+        out["gyro_world_x_dps"] = gyro_world[:, 0]
+        out["gyro_world_y_dps"] = gyro_world[:, 1]
+        out["gyro_world_z_dps"] = gyro_world[:, 2]
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -222,19 +301,22 @@ def process_section_orientation(
 
         timestamps = df["timestamp"].to_numpy(dtype=float)
         acc = df[["ax", "ay", "az"]].to_numpy(dtype=float)
-        gyro_rad = df[["gx", "gy", "gz"]].to_numpy(dtype=float) * _RAD
+        gyro_dps = df[["gx", "gy", "gz"]].to_numpy(dtype=float)
+        gyro_rad = gyro_dps * _RAD
 
         dt_arr = np.diff(timestamps, prepend=timestamps[0] - dt_nominal * 1000.0) / 1000.0
         dt_arr = np.clip(dt_arr, dt_nominal * 0.1, dt_nominal * 10.0)
 
         mag_cols = [c for c in ("mx", "my", "mz") if c in df.columns]
         mag: np.ndarray | None = None
+        mag_cal: MagCalibration | None = None
         if len(mag_cols) == 3:
-            mag = df[mag_cols].to_numpy(dtype=float)
-            mag_hi = _load_mag_hard_iron(sensor)
-            if mag_hi is not None:
-                valid = np.all(np.isfinite(mag), axis=1)
-                mag[valid] -= mag_hi
+            mag_raw = df[mag_cols].to_numpy(dtype=float)
+            mag_cal = _resolve_mag_calibration(sensor, mag_raw)
+            if mag_cal is not None:
+                mag = mag_cal.apply(mag_raw)
+            else:
+                mag = mag_raw
 
         q0 = _initial_quaternion(cal, sensor)
         mag_available = mag is not None and np.any(np.all(np.isfinite(mag), axis=1))
@@ -252,12 +334,13 @@ def process_section_orientation(
         static_wins = _static_windows(cal, sensor)
         residual = _gravity_residual(timestamps, acc, Q, static_wins)
 
-        out_df = _build_output_df(timestamps, Q)
+        out_df = _build_output_df(timestamps, Q, gyro_dps=gyro_dps)
         write_csv(out_df, orient_dir / f"{sensor}.csv")
 
         stats["sensors"][sensor] = {
             "gravity_residual_ms2": round(residual, 4) if np.isfinite(residual) else None,
             "quality": _quality_label(residual),
+            "mag_calibration": mag_cal.to_dict() if mag_cal is not None else None,
         }
         log.info(
             "%s/%s: gravity_residual=%.4f m/s² (%s)",

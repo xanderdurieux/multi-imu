@@ -103,6 +103,33 @@ def quat_rotate(q_bw: np.ndarray, v_body: Iterable[float]) -> np.ndarray:
     return rotated[1:]
 
 
+def quat_rotate_batch(Q: np.ndarray, V_body: np.ndarray) -> np.ndarray:
+    """Rotate ``(N, 3)`` body-frame vectors into world frame using ``(N, 4)`` quaternions.
+
+    Vectorised equivalent of looping :func:`quat_rotate` per row, but with a
+    single closed-form rotation matrix expansion — much faster for streams of
+    IMU samples.  Inputs must have matching first dimension.
+    """
+    Q = np.asarray(Q, dtype=float)
+    V = np.asarray(V_body, dtype=float)
+    if Q.ndim != 2 or Q.shape[1] != 4:
+        raise ValueError(f"Q must have shape (N, 4), got {Q.shape}")
+    if V.ndim != 2 or V.shape[1] != 3:
+        raise ValueError(f"V_body must have shape (N, 3), got {V.shape}")
+    if len(Q) != len(V):
+        raise ValueError(f"length mismatch: Q={len(Q)} V={len(V)}")
+
+    qw, qx, qy, qz = Q[:, 0], Q[:, 1], Q[:, 2], Q[:, 3]
+    x, y, z = V[:, 0], V[:, 1], V[:, 2]
+
+    # R(q) @ v written out per element; identical to quat_rotate but vectorised.
+    out = np.empty_like(V)
+    out[:, 0] = (1 - 2*(qy**2 + qz**2)) * x + 2*(qx*qy - qw*qz) * y + 2*(qx*qz + qw*qy) * z
+    out[:, 1] = 2*(qx*qy + qw*qz) * x + (1 - 2*(qx**2 + qz**2)) * y + 2*(qy*qz - qw*qx) * z
+    out[:, 2] = 2*(qx*qz - qw*qy) * x + 2*(qy*qz + qw*qx) * y + (1 - 2*(qx**2 + qy**2)) * z
+    return out
+
+
 def quat_slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     """Spherical linear interpolation between two unit quaternions.
 
