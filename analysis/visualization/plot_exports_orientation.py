@@ -126,6 +126,15 @@ def plot_orientation_residuals(df: pd.DataFrame, output_dir: Path) -> Path | Non
     ax.set_ylabel("Gravity residual (m/s2)")
     ax.set_title("Orientation residual per section (Mahony)")
     ax.grid(axis="y", alpha=0.3, lw=0.5)
+
+    # Draw horizontal quality-threshold lines and annotate them.
+    thresholds = ((0.5, "good"), (1.5, "marginal"))
+    # x position for labels: just to the right of the last bar group
+    x_text = float(x[-1]) + 0.5 if len(x) > 0 else 0.5
+    for val, q in thresholds:
+        ax.axhline(val, color=QUALITY_COLORS.get(q, "#888888"), linestyle="--", linewidth=0.8, alpha=0.9)
+        ax.text(x_text, val, f" {q} ({val})", va="center", ha="left", fontsize=7, color=QUALITY_COLORS.get(q, "#444444"))
+
     ax.legend(fontsize=8, framealpha=0.85)
     fig.tight_layout()
     return save_figure(fig, out_path, dpi=DPI)
