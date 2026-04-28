@@ -44,60 +44,13 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, write_csv
+from features.labels import non_riding_labels, to_activity_label, to_binary_label, to_coarse_label
 
 log = logging.getLogger(__name__)
 
 _DPI = 200
 
 _QUALITY_ORDER = ["poor", "marginal", "good"]
-
-# ---------------------------------------------------------------------------
-# Label scheme mappings — kept local to avoid importing from features.extraction
-# so this module can run on any feature CSV regardless of re-extraction state.
-# ---------------------------------------------------------------------------
-
-_COARSE_MAP: dict[str, str] = {
-    "calibration_sequence": "non_riding",
-    "helmet_move": "non_riding",
-    "grounded": "non_riding",
-    "riding": "steady_riding",
-    "riding_standing": "steady_riding",
-    "forest": "steady_riding",
-    "uneven_road": "steady_riding",
-    "head_movement": "active_riding",
-    "shoulder_check": "active_riding",
-    "accelerating": "active_riding",
-    "cornering": "active_riding",
-    "braking": "active_riding",
-    "sprinting": "active_riding",
-    "sprint_standing": "active_riding",
-    "hard_braking": "incident",
-    "swerving": "incident",
-    "fall": "incident",
-}
-
-_ACTIVITY_MAP: dict[str, str] = {
-    "calibration_sequence": "non_riding",
-    "grounded": "non_riding",
-    "riding": "steady_seated",
-    "forest": "steady_seated",
-    "uneven_road": "steady_seated",
-    "riding_standing": "standing",
-    "sprint_standing": "standing",
-    "accelerating": "longitudinal_effort",
-    "braking": "longitudinal_effort",
-    "sprinting": "longitudinal_effort",
-    "hard_braking": "longitudinal_effort",
-    "fall": "longitudinal_effort",
-    "cornering": "turning",
-    "swerving": "turning",
-    "helmet_move": "non_riding",
-    "head_movement": "head_motion",
-    "shoulder_check": "head_motion",
-}
-
-_INCIDENT_LABELS: frozenset[str] = frozenset({"hard_braking", "swerving", "fall"})
-_NON_RIDING_LABELS: frozenset[str] = frozenset({"calibration_sequence", "helmet_move", "grounded"})
 
 # Colours used across both figures.
 _SCHEME_COLORS: dict[str, str] = {
@@ -150,25 +103,15 @@ def _class_color(label: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _to_coarse(label: str) -> str:
-    if label == "unlabeled":
-        return "unlabeled"
-    return _COARSE_MAP.get(label, "unknown")
+    return to_coarse_label(label)
 
 
 def _to_activity(label: str) -> str:
-    if label == "unlabeled":
-        return "unlabeled"
-    return _ACTIVITY_MAP.get(label, "unknown")
+    return to_activity_label(label)
 
 
 def _to_binary(label: str) -> str:
-    if label == "unlabeled":
-        return "unlabeled"
-    if label in _NON_RIDING_LABELS:
-        return "non_riding"
-    if label in _INCIDENT_LABELS:
-        return "incident"
-    return "normal"
+    return to_binary_label(label)
 
 
 def _ensure_derived_label_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -314,7 +257,7 @@ def _build_exclusion_funnel(df: pd.DataFrame, *, min_quality: str = "marginal") 
     if "scenario_label_binary" in df2.columns:
         df3 = df2[df2["scenario_label_binary"] != "non_riding"]
     elif "scenario_label" in df2.columns:
-        df3 = df2[~df2["scenario_label"].isin(_NON_RIDING_LABELS)]
+        df3 = df2[~df2["scenario_label"].isin(non_riding_labels())]
     else:
         df3 = df2
     _step("riding", len(df3), len(df2), "non_riding windows excluded (binary target)")

@@ -203,6 +203,7 @@ def split_recording(
     sensors: list[str] | None = None,
     *,
     reference_sensor: str = "sporsa",
+    label_set: str | None = None,
     plot: bool = True,
 ) -> list[Path]:
     """Split a recording into sections using saved sync and parse outputs.
@@ -219,6 +220,9 @@ def split_recording(
         reference sensor is prepended automatically if missing.
     reference_sensor:
         Sensor whose saved calibration segments define section boundaries.
+    label_set:
+        Label-set directory under ``data/_labels``. Defaults to the active
+        label set from ``MULTI_IMU_LABEL_SET`` or ``v1``.
     plot:
         If ``True``, generate sensor and comparison plots for every section.
 
@@ -245,6 +249,7 @@ def split_recording(
     source_interval_rows = load_recording_interval_rows_for_transfer(
         recording_name,
         recording_origin_ms=recording_origin_ms,
+        label_set=label_set,
     )
     if source_interval_rows:
         log.info(
@@ -359,6 +364,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Sensor whose saved calibration segments define sections (default: sporsa).",
     )
     parser.add_argument(
+        "--label-set",
+        default=None,
+        help="Label set directory under data/_labels (default: MULTI_IMU_LABEL_SET or v1).",
+    )
+    parser.add_argument(
         "--no-plot",
         action="store_true",
         help="Skip generating plots for each section.",
@@ -375,6 +385,7 @@ def main(argv: list[str] | None = None) -> None:
         stage=args.stage,
         sensors=args.sensors,
         reference_sensor=args.reference_sensor,
+        label_set=args.label_set,
         plot=not args.no_plot,
     )
 

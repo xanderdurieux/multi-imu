@@ -26,6 +26,7 @@ import logging
 import pandas as pd
 
 from .cross_sensor import cross_sensor_features
+from .label_config import LabelConfig
 from .labels import label_feature, to_activity_label, to_binary_label, to_coarse_label
 from .orientation_features import orientation_cross_features, orientation_features
 from .quality import quality_features
@@ -63,6 +64,7 @@ def extract_window_features(
     yaw_conf_sporsa: float = 1.0,
     yaw_conf_arduino: float = 1.0,
     labels_df: pd.DataFrame | None = None,
+    label_config: LabelConfig | None = None,
 ) -> dict[str, float | str | int]:
     """Extract all features for one window and return a flat dict.
 
@@ -153,10 +155,10 @@ def extract_window_features(
     #   scenario_label_coarse   4-class taxonomy          - legacy/reporting target
     #   scenario_label_binary   incident / normal         - binary safety target
     # ------------------------------------------------------------------
-    fine = label_feature(labels_df, window_start_ms, window_end_ms)
+    fine = label_feature(labels_df, window_start_ms, window_end_ms, config=label_config)
     feats["scenario_label"] = fine
-    feats["scenario_label_activity"] = to_activity_label(fine)
-    feats["scenario_label_coarse"] = to_coarse_label(fine)
-    feats["scenario_label_binary"] = to_binary_label(fine)
+    feats["scenario_label_activity"] = to_activity_label(fine, config=label_config)
+    feats["scenario_label_coarse"] = to_coarse_label(fine, config=label_config)
+    feats["scenario_label_binary"] = to_binary_label(fine, config=label_config)
 
     return feats

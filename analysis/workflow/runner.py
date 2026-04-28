@@ -122,6 +122,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 split_recording(
                     rec,
                     stage=cfg.split_stage,
+                    label_set=cfg.label_set,
                     plot=not cfg.no_plots,
                 )
                 result["ok"] += 1
@@ -194,6 +195,8 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     rec,
                     window_s=cfg.window_s,
                     hop_s=cfg.hop_s,
+                    label_set=cfg.label_set,
+                    label_config_path=cfg.label_config_path or None,
                     force=cfg.force,
                 )
                 result["ok"] += 1

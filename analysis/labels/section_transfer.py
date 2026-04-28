@@ -36,13 +36,15 @@ def load_recording_interval_rows_for_transfer(
     recording_name: str,
     *,
     recording_origin_ms: float | None = None,
+    label_set: str | None = None,
 ) -> list[LabelRow]:
     """Load recording-level label rows for section transfer.
 
-    Reads from the canonical path ``data/_labels/labels_intervals_<recording>.csv``.
+    Reads from the canonical path
+    ``data/_labels/<label_set>/labels_intervals_<recording>.csv``.
     Returns an empty list if the file does not exist or contains no rows.
     """
-    path = recording_labels_csv(recording_name)
+    path = recording_labels_csv(recording_name, label_set=label_set)
     if not path.exists():
         return []
     rows = load_labels(path, time_origin_ms=recording_origin_ms)
@@ -128,7 +130,7 @@ def write_section_labels_from_recording_intervals(
     )
 
 
-def transfer_labels_to_sections(recording_name: str) -> None:
+def transfer_labels_to_sections(recording_name: str, *, label_set: str | None = None) -> None:
     """Transfer recording-level labels from ``data/_labels/`` to all existing sections.
 
     This is a convenience function for the common workflow where the event
@@ -176,6 +178,7 @@ def transfer_labels_to_sections(recording_name: str) -> None:
     intervals = load_recording_interval_rows_for_transfer(
         recording_name,
         recording_origin_ms=recording_origin_ms,
+        label_set=label_set,
     )
 
     if not intervals:
@@ -246,8 +249,13 @@ def main(argv: list[str] | None = None) -> None:
         "recording_name",
         help="Recording name (e.g. 2026-02-26_r2).",
     )
+    parser.add_argument(
+        "--label-set",
+        default=None,
+        help="Label set directory under data/_labels (default: MULTI_IMU_LABEL_SET or v1).",
+    )
     args = parser.parse_args(argv)
-    transfer_labels_to_sections(args.recording_name)
+    transfer_labels_to_sections(args.recording_name, label_set=args.label_set)
 
 
 if __name__ == "__main__":

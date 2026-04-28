@@ -175,6 +175,16 @@ def labels_root() -> Path:
     return data_root() / "_labels"
 
 
+def default_label_set() -> str:
+    """Return the active recording-label set name."""
+    return os.environ.get("MULTI_IMU_LABEL_SET", "v1").strip() or "v1"
+
+
+def label_set_dir(label_set: str | None = None) -> Path:
+    """Return the directory for a versioned recording-label set."""
+    return labels_root() / (label_set or default_label_set())
+
+
 def sessions_root() -> Path:
     """Return the directory containing raw session input folders."""
     return data_root() / "_sessions"
@@ -344,9 +354,13 @@ def sensor_csv(ref: str, sensor_name: str) -> Path:
     return csv_path
 
 
-def recording_labels_csv(recording_name: str) -> Path:
-    """Return the label CSV path for a recording."""
-    return labels_root() / f"labels_intervals_{recording_name}.csv"
+def recording_labels_csv(recording_name: str, label_set: str | None = None) -> Path:
+    """Return the label CSV path for a recording in the active label set."""
+    versioned = label_set_dir(label_set) / f"labels_intervals_{recording_name}.csv"
+    legacy = labels_root() / f"labels_intervals_{recording_name}.csv"
+    if versioned.exists() or not legacy.exists():
+        return versioned
+    return legacy
 
 
 def section_labels_csv(sec_dir: Path | str) -> Path:
@@ -449,6 +463,11 @@ def default_orientation_config_path() -> Path:
     return configs_root() / "orientation.default.json"
 
 
+def default_label_config_path() -> Path:
+    """Return the path to the default scenario-label mapping config file."""
+    return configs_root() / "labels.default.json"
+
+
 def _merge_nested_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
@@ -501,6 +520,15 @@ def load_sync_config_data(override_path: Path | str | None = None) -> dict:
 def load_orientation_config_data(override_path: Path | str | None = None) -> dict:
     """Load orientation config data with default-as-base merging."""
     default_payload = read_json_file(default_orientation_config_path())
+    if override_path is None:
+        return dict(default_payload)
+    override_payload = read_json_file(override_path)
+    return _merge_nested_dicts(default_payload, override_payload)
+
+
+def load_label_config_data(override_path: Path | str | None = None) -> dict:
+    """Load scenario-label config data with default-as-base merging."""
+    default_payload = read_json_file(default_label_config_path())
     if override_path is None:
         return dict(default_payload)
     override_payload = read_json_file(override_path)

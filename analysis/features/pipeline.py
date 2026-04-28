@@ -27,6 +27,7 @@ from common.paths import (
 from labels.parser import load_labels
 from labels.section_transfer import transfer_labels_to_sections
 from .extraction import extract_window_features
+from .label_config import default_label_config, load_label_config
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ def extract_features_for_section(
     hop_s: float = 0.5,
     min_samples: int = 10,
     sample_rate_hz: float = _SAMPLE_RATE_HZ_DEFAULT,
+    label_config_path: Path | str | None = None,
     force: bool = False,
 ) -> pd.DataFrame:
     """Extract sliding-window features for one section.
@@ -200,6 +202,11 @@ def extract_features_for_section(
         for col in ("start_ms", "end_ms"):
             if col in labels_df.columns:
                 labels_df[col] = pd.to_numeric(labels_df[col], errors="coerce")
+    label_config = (
+        load_label_config(label_config_path)
+        if label_config_path is not None
+        else default_label_config()
+    )
 
     # ------------------------------------------------------------------
     # Load calibration quality metadata.
@@ -315,6 +322,7 @@ def extract_features_for_section(
                 yaw_conf_sporsa=yaw_conf_sporsa,
                 yaw_conf_arduino=yaw_conf_arduino,
                 labels_df=labels_df if not labels_df.empty else None,
+                label_config=label_config,
             )
             rows.append(feat_dict)
         except Exception as exc:
@@ -398,6 +406,8 @@ def process_section_features(
 
 def process_recording_features(
     recording_name: str,
+    *,
+    label_set: str | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     """Extract features for all sections of a recording and return combined DataFrame.
@@ -419,7 +429,7 @@ def process_recording_features(
         log.warning("No sections found for recording '%s'.", recording_name)
         return pd.DataFrame()
 
-    transfer_labels_to_sections(recording_name)
+    transfer_labels_to_sections(recording_name, label_set=label_set)
 
     all_dfs: list[pd.DataFrame] = []
     for sec_dir in section_dirs:

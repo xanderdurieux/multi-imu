@@ -1,96 +1,11 @@
-"""Window label resolution and coarse/binary label taxonomy."""
+"""Window label resolution and configured label taxonomy."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-# Priority order for resolving simultaneous overlapping fine-grained labels.
-# Higher index = higher priority. Used *only* to break ties when two
-# annotations cover the same window equally; it does NOT define the class
-# hierarchy used in training (see COARSE_MAP for that).
-LABEL_PRIORITY: list[str] = [
-    "calibration_sequence",
-    "helmet_move",
-    "grounded",
-    "riding",
-    "riding_standing",
-    "forest",
-    "uneven_road",
-    "head_movement",
-    "shoulder_check",
-    "accelerating",
-    "cornering",
-    "braking",
-    "sprinting",
-    "sprint_standing",
-    "hard_braking",
-    "swerving",
-    "fall",
-]
-
-LABEL_PRIORITY_RANK: dict[str, int] = {lbl: i for i, lbl in enumerate(LABEL_PRIORITY)}
-
-# Coarse 4-class taxonomy for the main thesis experiment.
-#   non_riding    filtered before training
-#   steady_riding low-demand, steady-state riding
-#   active_riding moderate-demand maneuvers
-#   incident      safety-critical events
-COARSE_MAP: dict[str, str] = {
-    "calibration_sequence": "non_riding",
-    "helmet_move": "non_riding",
-    "grounded": "non_riding",
-    "riding": "steady_riding",
-    "riding_standing": "steady_riding",
-    "forest": "steady_riding",
-    "uneven_road": "steady_riding",
-    "head_movement": "active_riding",
-    "shoulder_check": "active_riding",
-    "accelerating": "active_riding",
-    "cornering": "active_riding",
-    "braking": "active_riding",
-    "sprinting": "active_riding",
-    "sprint_standing": "active_riding",
-    "hard_braking": "incident",
-    "swerving": "incident",
-    "fall": "incident",
-}
-
-# Activity 6-class taxonomy — grouped so each class has a distinct dual-IMU
-# signature (bike frame vs. helmet). Merges happen along two principles:
-#   1. Fine distinctions that single-sensor features already encode well
-#      (e.g. uneven_road is a spectral variant of riding) collapse to a
-#      single class.
-#   2. Classes that *require* cross-sensor information to separate from
-#      seated riding (standing posture, head yaw, swerve-vs-lean) are kept
-#      distinct so the evaluation actually rewards bimodal feature sets.
-ACTIVITY_MAP: dict[str, str] = {
-    "calibration_sequence": "non_riding",
-    "grounded": "non_riding",
-    # helmet_move = helmet handled while OFF the rider's head (e.g. picked up,
-    # placed on the bars).  Semantically this is not head motion at all — it's
-    # a non-riding/off-head state — so it belongs in non_riding, not
-    # head_motion.  Keeping it in head_motion poisons the class with windows
-    # that have completely decoupled helmet-vs-bike motion.
-    "helmet_move": "non_riding",
-    "riding": "steady_seated",
-    "forest": "steady_seated",
-    "uneven_road": "steady_seated",
-    "riding_standing": "standing",
-    "sprint_standing": "standing",
-    "accelerating": "longitudinal_effort",
-    "braking": "longitudinal_effort",
-    "sprinting": "longitudinal_effort",
-    "hard_braking": "longitudinal_effort",
-    "fall": "longitudinal_effort",
-    "cornering": "turning",
-    "swerving": "turning",
-    "head_movement": "head_motion",
-    "shoulder_check": "head_motion",
-}
-
-INCIDENT_LABELS: frozenset[str] = frozenset({"hard_braking", "swerving", "fall"})
-NON_RIDING_LABELS: frozenset[str] = frozenset({"calibration_sequence", "helmet_move", "grounded"})
+from .label_config import LabelConfig, default_label_config
 
 
 def _raw_labels_and_overlaps(
@@ -136,6 +51,7 @@ def label_feature(
     window_end_ms: float,
     *,
     containment_threshold: float = 0.5,
+    config: LabelConfig | None = None,
 ) -> str:
     """Return a single fine-grained label for the window.
 
@@ -145,8 +61,8 @@ def label_feature(
        containment >= *containment_threshold*, else fall back to all overlaps.
     3. Pipe-split compound strings (``"riding|cornering"``) into tokens;
        each token inherits its source row's overlap_ms.
-    4. Choose the token with largest overlap_ms; break ties with
-       LABEL_PRIORITY_RANK (higher index wins). Unknown tokens use rank -1.
+    4. Choose the token with largest overlap_ms; break ties with the configured
+       priority rank. Unknown tokens use rank -1.
     """
     if labels_df is None or labels_df.empty:
         return "unlabeled"
@@ -178,32 +94,28 @@ def label_feature(
     if not candidates:
         return "unlabeled"
 
+    priority_rank = (config or default_label_config()).priority_rank
     return max(
         candidates,
-        key=lambda t: (t[1], LABEL_PRIORITY_RANK.get(t[0], -1)),
+        key=lambda t: (t[1], priority_rank.get(t[0], -1)),
     )[0]
 
 
-def to_coarse_label(fine_label: str) -> str:
-    """Map a fine-grained label to one of four coarse thesis classes."""
-    if fine_label == "unlabeled":
-        return "unlabeled"
-    return COARSE_MAP.get(fine_label, "unknown")
+def to_coarse_label(fine_label: str, config: LabelConfig | None = None) -> str:
+    """Map a fine-grained label using the configured coarse taxonomy."""
+    return (config or default_label_config()).map_label("scenario_label_coarse", fine_label)
 
 
-def to_activity_label(fine_label: str) -> str:
-    """Map a fine-grained label to one of six dual-IMU activity classes."""
-    if fine_label == "unlabeled":
-        return "unlabeled"
-    return ACTIVITY_MAP.get(fine_label, "unknown")
+def to_activity_label(fine_label: str, config: LabelConfig | None = None) -> str:
+    """Map a fine-grained label using the configured activity taxonomy."""
+    return (config or default_label_config()).map_label("scenario_label_activity", fine_label)
 
 
-def to_binary_label(fine_label: str) -> str:
-    """Map a fine-grained label to incident / normal / non_riding / unlabeled."""
-    if fine_label == "unlabeled":
-        return "unlabeled"
-    if fine_label in NON_RIDING_LABELS:
-        return "non_riding"
-    if fine_label in INCIDENT_LABELS:
-        return "incident"
-    return "normal"
+def to_binary_label(fine_label: str, config: LabelConfig | None = None) -> str:
+    """Map a fine-grained label using the configured binary taxonomy."""
+    return (config or default_label_config()).map_label("scenario_label_binary", fine_label)
+
+
+def non_riding_labels(config: LabelConfig | None = None) -> frozenset[str]:
+    """Return the configured fine labels treated as non-riding."""
+    return (config or default_label_config()).binary_non_riding_labels

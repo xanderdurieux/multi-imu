@@ -11,12 +11,16 @@ def plot_recording_pipeline_stage(recording_name: str, stage: str) -> None:
     """Plot outputs for a recording-level stage directory (parsed / synced)."""
     if stage == "parsed":
         from visualization.plot_comparison import plot_stage_data
+        from visualization.plot_labels import plot_labels
 
         plot_stage_data(recording_stage_dir(recording_name, stage))
+        plot_labels(recording_stage_dir(recording_name, stage), stage="sensor")
     elif stage == "synced":
         from visualization.plot_sync import plot_sync_stage
+        from visualization.plot_labels import plot_labels
 
         plot_sync_stage(recording_name)
+        plot_labels(recording_stage_dir(recording_name, stage), stage="sensor")
     else:
         raise ValueError(f"Invalid stage: {stage}")
 

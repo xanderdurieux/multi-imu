@@ -41,6 +41,8 @@ class WorkflowConfig:
 
     # Feature options
     labels_path: str = ""
+    label_set: str = "v1"
+    label_config_path: str = ""
     window_s: float = 2.0
     hop_s: float = 1.0
 
@@ -95,6 +97,8 @@ class WorkflowConfig:
             errors.append("window_s must be > 0")
         if self.hop_s <= 0:
             errors.append("hop_s must be > 0")
+        if not isinstance(self.label_set, str) or not self.label_set.strip():
+            errors.append("label_set must be a non-empty string")
         valid_eval_label_cols = {
             "auto",
             "scenario_label",

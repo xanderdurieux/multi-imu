@@ -3,7 +3,8 @@
 Examples
 --------
     uv run python -m labels.analyze_labels
-    uv run python -m labels.analyze_labels --output-dir data/_labels/summary
+    uv run python -m labels.analyze_labels --label-set v2
+    uv run python -m labels.analyze_labels --workflow-config data/_configs/workflow.train.json
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import numpy as np
 import pandas as pd
 
 from common.paths import (
+    default_label_set,
+    label_set_dir,
     labels_root,
     project_relative_path,
     read_csv,
@@ -69,12 +72,12 @@ def _save_plot(fig: plt.Figure, path: Path) -> Path:
     return path
 
 
-def _iter_label_files() -> list[Path]:
-    return [
-        path
-        for path in sorted(labels_root().glob("labels_intervals_*.*"))
-        if path.suffix.lower() in {".csv", ".json"}
-    ]
+def _iter_label_files(label_set: str | None = None) -> list[Path]:
+    root = label_set_dir(label_set or default_label_set())
+    paths = sorted(root.glob("labels_intervals_*.*")) if root.exists() else []
+    if not paths:
+        paths = sorted(labels_root().glob("labels_intervals_*.*"))
+    return [path for path in paths if path.suffix.lower() in {".csv", ".json"}]
 
 
 def _infer_recording_id(label_file: Path) -> str:
@@ -82,10 +85,10 @@ def _infer_recording_id(label_file: Path) -> str:
     return match.group(1) if match else ""
 
 
-def _load_label_rows() -> pd.DataFrame:
+def _load_label_rows(label_set: str | None = None) -> pd.DataFrame:
     rows_out: list[dict[str, Any]] = []
 
-    for label_file in _iter_label_files():
+    for label_file in _iter_label_files(label_set):
         rows = load_labels(label_file)
         if not rows:
             continue
@@ -398,9 +401,13 @@ def _write_overview_json(
     by_label: pd.DataFrame,
     by_recording: pd.DataFrame,
     output_path: Path,
+    label_set: str,
+    labels_dir: Path,
 ) -> Path:
     payload = {
         "source": "recording",
+        "label_set": label_set,
+        "labels_dir": _display_path(labels_dir),
         "n_rows": int(len(df)),
         "n_recordings": int(df["recording_id"].replace("", pd.NA).dropna().nunique()) if not df.empty else 0,
         "n_sections": int(df["section_id"].replace("", pd.NA).dropna().nunique()) if not df.empty else 0,
@@ -418,14 +425,19 @@ def _write_overview_json(
 def analyze_labels(
     *,
     output_dir: Path | None = None,
+    label_set: str | None = None,
 ) -> Path:
+    resolved_label_set = label_set or default_label_set()
+    labels_dir = label_set_dir(resolved_label_set)
     if output_dir is None:
-        output_dir = labels_root() / "summary"
+        output_dir = labels_dir / "summary"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    df = _load_label_rows()
+    df = _load_label_rows(resolved_label_set)
     if df.empty:
-        raise FileNotFoundError(f"No recording-level label rows found in {labels_root()!s}")
+        raise FileNotFoundError(
+            f"No recording-level label rows found in {labels_dir!s}"
+        )
 
     by_label = build_label_summary(df)
     by_recording = build_recording_summary(df)
@@ -458,8 +470,18 @@ def analyze_labels(
         by_label=by_label,
         by_recording=by_recording,
         output_path=output_dir / "overview.json",
+        label_set=resolved_label_set,
+        labels_dir=labels_dir,
     )
     return output_dir
+
+
+def _label_set_from_workflow_config(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    from workflow.config import load_workflow_config
+
+    return load_workflow_config(path).label_set
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -474,7 +496,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory for CSV/JSON summaries and plots. Defaults to data/_labels/summary.",
+        help="Directory for CSV/JSON summaries and plots. Defaults to data/_labels/<label-set>/summary.",
+    )
+    parser.add_argument(
+        "--label-set",
+        default=None,
+        help=(
+            "Label set directory under data/_labels. Overrides --workflow-config; "
+            "default: MULTI_IMU_LABEL_SET or v1."
+        ),
+    )
+    parser.add_argument(
+        "--workflow-config",
+        "--config",
+        dest="workflow_config",
+        type=Path,
+        default=None,
+        help="Workflow config JSON whose label_set should be used.",
     )
     return parser
 
@@ -483,7 +521,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-    output_dir = analyze_labels(output_dir=args.output_dir)
+    label_set = args.label_set or _label_set_from_workflow_config(args.workflow_config)
+    output_dir = analyze_labels(output_dir=args.output_dir, label_set=label_set)
     print(output_dir.resolve())
 
 
