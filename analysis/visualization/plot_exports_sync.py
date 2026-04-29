@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import matplotlib
@@ -22,6 +23,11 @@ from visualization._exports_common import (
 from visualization._utils import save_figure
 
 log = logging.getLogger(__name__)
+
+
+def _safe_path_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    return safe or "unknown_session"
 
 
 def plot_sync_method_selection(df: pd.DataFrame, output_dir: Path) -> Path | None:
@@ -461,6 +467,22 @@ def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     _add(plot_sync_method_heatmap(df, figures_dir))
     _add(plot_sync_session_strip(df, figures_dir))
     _add(plot_sync_session_drift(df, figures_dir))
+
+    session_df = df.copy()
+    if "session" not in session_df.columns and "recording_name" in session_df.columns:
+        session_df["session"] = session_df["recording_name"].map(session_from_row)
+    if "session" in session_df.columns:
+        sessions_root = figures_dir / "sessions"
+        for session in sorted(session_df["session"].dropna().astype(str).unique()):
+            sub = session_df[session_df["session"].astype(str) == session].copy()
+            if sub.empty:
+                continue
+            session_dir = sessions_root / _safe_path_part(session)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            _add(plot_sync_correlation_overview(sub, session_dir))
+            _add(plot_sync_method_heatmap(sub, session_dir))
+            _add(plot_sync_drift_overview(sub, session_dir))
+            _add(plot_sync_offset_overview(sub, session_dir))
 
     log.info("Sync EDA complete: %d figures", len(generated))
     return generated

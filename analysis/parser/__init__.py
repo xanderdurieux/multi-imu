@@ -13,6 +13,7 @@ from typing import Any
 
 __all__ = [
     "parse_arduino_log",
+    "parse_phone_recording",
     "parse_sporsa_log",
     "load_gps",
     "process_session",
@@ -25,6 +26,7 @@ __all__ = [
 
 _ATTR_TO_MODULE = {
     "parse_arduino_log": (".arduino", "parse_arduino_log"),
+    "parse_phone_recording": (".phone", "parse_phone_recording"),
     "parse_sporsa_log": (".sporsa", "parse_sporsa_log"),
     "load_gps": (".gps", "load_gps"),
     "process_session": (".session", "process_session"),

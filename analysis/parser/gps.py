@@ -233,7 +233,7 @@ def parse_gps_csv(
 
     # Optional elevation / time / speed if present
     for _csv_name, variants, target in (
-        ("elevation", ("elevation", "ele", "alt", "altitude", "altitude_m", "alt_m"), "elevation_m"),
+        ("elevation", ("elevation_m", "elevation", "ele", "alt", "altitude", "altitude_m", "alt_m"), "elevation_m"),
         ("time", ("time_utc", "time", "timestamp", "datetime"), "time_utc"),
         ("speed", ("speed", "velocity", "ground_speed", "speed_m_s"), "speed_m_s"),
     ):
@@ -257,6 +257,21 @@ def parse_gps_csv(
                 out[target] = spd
 
     return out.dropna(subset=["latitude", "longitude"]).reset_index(drop=True)
+
+
+def write_gps_csv(df: pd.DataFrame, path: Path | str) -> None:
+    """Write a standard GPS DataFrame to *path* in a format readable by :func:`load_gps`.
+
+    ``time_utc`` is serialised as ISO 8601 strings so ``pd.to_datetime`` can
+    round-trip it without ambiguity.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = df.copy()
+    if "time_utc" in out.columns:
+        ts = pd.to_datetime(out["time_utc"], utc=True, errors="coerce")
+        out["time_utc"] = ts.dt.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+    out.to_csv(path, index=False)
 
 
 def load_gps(path: Path | str) -> pd.DataFrame:

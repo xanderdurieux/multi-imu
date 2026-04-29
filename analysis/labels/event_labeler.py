@@ -847,7 +847,12 @@ def build_event_labeler_figure(
     recording_id, _ = infer_recording_section_ids(data_dir)
     session = session_name_from_recording_id(recording_id)
     gps_path: Path | None = None
-    if session:
+
+    # Prefer a per-recording gps.csv written by the parser stage.
+    parsed_gps = recording_stage_dir(recording_id, "parsed") / "gps.csv"
+    if parsed_gps.is_file():
+        gps_path = parsed_gps
+    elif session:
         gps_path = find_best_gps_csv(session_input_dir(session), imu_t0_ms, imu_t1_ms)
         if gps_path is None:
             cand = session_input_dir(session)

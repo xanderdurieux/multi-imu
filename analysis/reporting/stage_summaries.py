@@ -21,6 +21,7 @@ generate_all_stage_summaries(exports_dir, sections_root_dir, output_dir)
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -130,6 +131,18 @@ def _violin_or_box(
     ax.grid(axis="y", alpha=0.25, lw=0.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+
+
+def _session_from_recording(recording_name: str) -> str:
+    parts = str(recording_name).rsplit("_", 1)
+    if len(parts) == 2 and parts[1].startswith("r") and parts[1][1:].isdigit():
+        return parts[0]
+    return str(recording_name)
+
+
+def _safe_path_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    return safe or "unknown_session"
 
 
 # ===========================================================================
@@ -499,6 +512,34 @@ def generate_sync_summary(
                 generated.append(p)
         except Exception as exc:
             log.warning("Sync summary plot '%s' failed: %s", name, exc)
+
+    if "recording_name" in sync_df.columns:
+        session_df = sync_df.copy()
+        if "session" not in session_df.columns:
+            session_df["session"] = session_df["recording_name"].map(_session_from_recording)
+
+        sessions_root = output_dir / "sessions"
+        for session in sorted(session_df["session"].dropna().astype(str).unique()):
+            sub = session_df[session_df["session"].astype(str) == session].copy()
+            if sub.empty:
+                continue
+            session_dir = sessions_root / _safe_path_part(session)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            for fn, name in (
+                (plot_sync_correlation_comparison, "sync_correlation_comparison.png"),
+                (plot_sync_drift, "sync_drift.png"),
+            ):
+                try:
+                    p = fn(sub, session_dir / name)
+                    if p is not None:
+                        generated.append(p)
+                except Exception as exc:
+                    log.warning(
+                        "Sync session summary plot '%s/%s' failed: %s",
+                        session,
+                        name,
+                        exc,
+                    )
 
     log.info(
         "Sync summary: %d figures written to %s",

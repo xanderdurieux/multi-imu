@@ -14,6 +14,7 @@ from common.paths import (
     data_root,
     project_relative_path,
     read_csv,
+    recording_sort_key,
     section_sort_key,
     sections_root,
     write_csv,
@@ -26,6 +27,8 @@ log = logging.getLogger(__name__)
 _QUALITY_ORDER = ["poor", "marginal", "good"]
 
 _METADATA_COLS = {
+    "recording_name",
+    "session",
     "section_id",
     "window_idx",
     "window_start_ms",
@@ -37,6 +40,93 @@ _METADATA_COLS = {
     "calibration_quality",
     "sync_confidence",
 }
+
+
+def _session_from_recording(recording_name: str) -> str:
+    parts = str(recording_name).rsplit("_", 1)
+    if len(parts) == 2 and parts[1].startswith("r") and parts[1][1:].isdigit():
+        return parts[0]
+    return str(recording_name)
+
+
+def _recording_from_section(section_id: str) -> str:
+    section_id = str(section_id)
+    parts = section_id.rsplit("s", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return section_id
+
+
+def _recording_mask(df: pd.DataFrame, recording_names: list[str]) -> pd.Series:
+    """Return rows in *df* belonging to any of *recording_names*."""
+    mask = pd.Series(False, index=df.index)
+    targets = {str(name) for name in recording_names}
+
+    if "recording_name" in df.columns:
+        mask |= df["recording_name"].astype(str).isin(targets)
+
+    if "section_id" in df.columns:
+        section_recordings = df["section_id"].astype(str).map(_recording_from_section)
+        mask |= section_recordings.isin(targets)
+
+    return mask
+
+
+def _sort_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    out = df.copy()
+    if "recording_name" not in out.columns and "section_id" in out.columns:
+        out["recording_name"] = out["section_id"].astype(str).map(_recording_from_section)
+
+    if "recording_name" in out.columns:
+        out["_recording_sort"] = out["recording_name"].astype(str).map(recording_sort_key)
+        sort_cols = ["_recording_sort"]
+        if "section_id" in out.columns:
+            sort_cols.append("section_id")
+        if "window_idx" in out.columns:
+            sort_cols.append("window_idx")
+        out = out.sort_values(sort_cols, kind="stable").drop(columns=["_recording_sort"])
+        out = out.reset_index(drop=True)
+
+    return out
+
+
+def _upsert_export_table(
+    new_df: pd.DataFrame,
+    path: Path,
+    *,
+    recording_names: list[str] | None,
+) -> pd.DataFrame:
+    """Merge new export rows into an existing CSV, replacing matching recordings."""
+    if new_df.empty:
+        return new_df
+
+    if recording_names is None or not path.exists():
+        merged = new_df.copy()
+    else:
+        try:
+            existing = read_csv(path)
+        except Exception as exc:
+            log.warning("Failed to read existing %s for merge: %s", project_relative_path(path), exc)
+            existing = pd.DataFrame()
+
+        if existing.empty:
+            merged = new_df.copy()
+        else:
+            keep = existing.loc[~_recording_mask(existing, recording_names)].copy()
+            merged = pd.concat([keep, new_df], ignore_index=True, sort=False)
+
+    return _sort_export_df(merged)
+
+
+def _recording_count(df: pd.DataFrame) -> int:
+    if "recording_name" in df.columns:
+        return int(df["recording_name"].nunique())
+    if "section_id" in df.columns:
+        return int(df["section_id"].astype(str).map(_recording_from_section).nunique())
+    return 0
 
 
 def aggregate_features(
@@ -91,6 +181,11 @@ def aggregate_features(
         # Inject section_id if not present
         if "section_id" not in df.columns:
             df.insert(0, "section_id", section_dir.name)
+        if "recording_name" not in df.columns:
+            df.insert(0, "recording_name", _recording_from_section(section_dir.name))
+        if "session" not in df.columns:
+            insert_at = 1 if "recording_name" in df.columns else 0
+            df.insert(insert_at, "session", _session_from_recording(_recording_from_section(section_dir.name)))
 
         frames.append(df)
         log.debug("Loaded %d rows from %s", len(df), project_relative_path(features_csv))
@@ -171,6 +266,7 @@ def export_feature_tables(
         ("features_fused", df_fused),
     ]:
         out_path = output_dir / f"{name}.csv"
+        frame = _upsert_export_table(frame, out_path, recording_names=recording_names)
         write_csv(frame, out_path)
         paths[name] = out_path
         log.info(
@@ -184,6 +280,7 @@ def export_feature_tables(
     cal_df = aggregate_calibration_params(recording_names)
     if not cal_df.empty:
         cal_path = output_dir / "calibration_params.csv"
+        cal_df = _upsert_export_table(cal_df, cal_path, recording_names=recording_names)
         cal_df.to_csv(cal_path, index=False)
         paths["calibration_params"] = cal_path
         log.info(
@@ -198,6 +295,7 @@ def export_feature_tables(
     sync_df = aggregate_sync_params(recording_names)
     if not sync_df.empty:
         sync_path = output_dir / "sync_params.csv"
+        sync_df = _upsert_export_table(sync_df, sync_path, recording_names=recording_names)
         sync_df.to_csv(sync_path, index=False)
         paths["sync_params"] = sync_path
         log.info(
@@ -208,19 +306,28 @@ def export_feature_tables(
     else:
         log.warning("No sync params found; sync_params.csv not written")
 
-    # Build manifest
-    label_dist: dict[str, int] = {}
-    if "scenario_label" in df.columns:
-        label_dist = df["scenario_label"].fillna("unlabeled").value_counts().to_dict()
+    # Build manifest from the merged fused table so incremental recording
+    # exports report the whole dataset, not just the current subset.
+    manifest_df = paths.get("features_fused")
+    if manifest_df is not None and manifest_df.exists():
+        try:
+            df_for_manifest = read_csv(manifest_df)
+        except Exception:
+            df_for_manifest = df
+    else:
+        df_for_manifest = df
 
-    n_sections = df["section_id"].nunique() if "section_id" in df.columns else 0
+    n_sections = df_for_manifest["section_id"].nunique() if "section_id" in df_for_manifest.columns else 0
+    label_dist = {}
+    if "scenario_label" in df_for_manifest.columns:
+        label_dist = df_for_manifest["scenario_label"].fillna("unlabeled").value_counts().to_dict()
 
     manifest = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "filtering_policy": "min_quality_label=marginal",
         "total_sections": int(n_sections),
-        "total_windows": int(len(df)),
-        "total_recordings": int(len(sync_df)) if not sync_df.empty else 0,
+        "total_windows": int(len(df_for_manifest)),
+        "total_recordings": _recording_count(df_for_manifest),
         "label_distribution": {k: int(v) for k, v in label_dist.items()},
         "tables": {
             name: str(path.relative_to(analysis_root()))
@@ -276,6 +383,7 @@ def run_exports(
     parsed_df = aggregate_parsed_params(recording_names)
     if not parsed_df.empty:
         parsed_path = output_dir / "parsed_recording_summary.csv"
+        parsed_df = _upsert_export_table(parsed_df, parsed_path, recording_names=recording_names)
         parsed_df.to_csv(parsed_path, index=False)
         paths["parsed_recording_summary"] = parsed_path
         log.info("Wrote parsed_recording_summary.csv (%d recordings)", len(parsed_df))
@@ -285,6 +393,7 @@ def run_exports(
     cal_df = aggregate_calibration_params(recording_names)
     if not cal_df.empty:
         cal_path = output_dir / "calibration_params.csv"
+        cal_df = _upsert_export_table(cal_df, cal_path, recording_names=recording_names)
         cal_df.to_csv(cal_path, index=False)
         paths["calibration_params"] = cal_path
         log.info("Wrote calibration_params.csv (%d sections)", len(cal_df))
@@ -294,6 +403,7 @@ def run_exports(
     sync_df = aggregate_sync_params(recording_names)
     if not sync_df.empty:
         sync_path = output_dir / "sync_params.csv"
+        sync_df = _upsert_export_table(sync_df, sync_path, recording_names=recording_names)
         sync_df.to_csv(sync_path, index=False)
         paths["sync_params"] = sync_path
         log.info("Wrote sync_params.csv (%d recordings)", len(sync_df))
@@ -303,6 +413,7 @@ def run_exports(
     orient_df = aggregate_orientation_stats(recording_names)
     if not orient_df.empty:
         orient_path = output_dir / "orientation_stats.csv"
+        orient_df = _upsert_export_table(orient_df, orient_path, recording_names=recording_names)
         orient_df.to_csv(orient_path, index=False)
         paths["orientation_stats"] = orient_path
         log.info("Wrote orientation_stats.csv (%d sections)", len(orient_df))
@@ -311,7 +422,7 @@ def run_exports(
 
     # Feature tables: honour the manifest cache.
     manifest_path = output_dir / "export_manifest.json"
-    if not force and manifest_path.exists():
+    if not force and recording_names is None and manifest_path.exists():
         log.info(
             "Feature export cache exists at %s (use force=True to re-run features)",
             project_relative_path(output_dir),
@@ -339,7 +450,9 @@ def run_exports(
     if not no_plots:
         try:
             from visualization.plot_exports import run_eda
-            run_eda(df, output_dir)
+            fused_path = paths.get("features_fused")
+            plot_df = read_csv(fused_path) if fused_path is not None and fused_path.exists() else df
+            run_eda(plot_df, output_dir)
         except Exception as exc:
             log.warning("Feature EDA figure generation failed: %s", exc)
 

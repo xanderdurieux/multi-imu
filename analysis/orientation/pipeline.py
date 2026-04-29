@@ -3,7 +3,7 @@
 For each section:
 1. Load calibrated/{sensor}.csv and calibration.json.
 2. Initialise Mahony from the calibration body→world rotation matrix.
-3. Apply magnetometer hard-iron correction (Arduino only).
+3. Apply magnetometer hard/soft-iron correction where available.
 4. Run Mahony filter and score gravity residual in the known-static windows.
 5. Write per-sensor quaternion CSVs, a stats JSON, and comparison plots.
 
@@ -146,8 +146,11 @@ def _resolve_mag_calibration(sensor: str, mag: np.ndarray | None) -> MagCalibrat
     on the actual cycling data > None (filter runs gyro+acc only).  The fit
     requires enough rotation diversity, which a full cycling section
     typically provides whereas the six-face static recordings did not.
+
+    Arduino benefits from a pre-recorded static ellipsoid; other sensors fall
+    through directly to the in-section fit.
     """
-    if sensor != "arduino" or mag is None:
+    if mag is None:
         return None
 
     static_cal = _load_static_mag_calibration(sensor)

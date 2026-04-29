@@ -27,6 +27,8 @@ from .calibration_segments import (
     load_cal_seg_params,
 )
 from .arduino import parse_arduino_log
+from .gps import load_gps, write_gps_csv
+from .phone import parse_phone_gps, parse_phone_recording
 from .sporsa import parse_sporsa_log
 from .stats import write_recording_stats
 
@@ -34,7 +36,7 @@ log = logging.getLogger(__name__)
 
 
 def _process_file(sensor_type: str, src: Path, dst: Path):
-    """Dispatch one raw log file to the matching parser and write CSV output.
+    """Dispatch one raw log file (or folder) to the matching parser and write CSV output.
 
     Returns the parsed DataFrame on success, or None if the file is skipped.
     """
@@ -42,11 +44,20 @@ def _process_file(sensor_type: str, src: Path, dst: Path):
         df = parse_arduino_log(src)
     elif sensor_type == "sporsa":
         df = parse_sporsa_log(src)
+    elif sensor_type == "phone":
+        df = parse_phone_recording(src)
     else:
         return None
 
     write_csv(df, dst)
     return df
+
+
+# Maps a source sensor type to the output CSV name it should be written as.
+# "phone" produces sporsa.csv because it occupies the same handlebar position.
+_SENSOR_OUTPUT_NAME: dict[str, str] = {
+    "phone": "sporsa",
+}
 
 
 def _extract_recording_number(filename: str) -> Optional[int]:
@@ -60,6 +71,14 @@ def _extract_recording_number(filename: str) -> Optional[int]:
     if nums:
         return int(nums[-1])
 
+    return None
+
+
+def _find_session_gps(session_dir: Path) -> Optional[Path]:
+    """Return the first GPS file found directly inside *session_dir*, or None."""
+    for p in sorted(session_dir.iterdir()):
+        if p.is_file() and "gps" in p.name.lower() and p.suffix.lower() in (".gpx", ".csv", ".nmea", ".txt"):
+            return p
     return None
 
 
@@ -93,6 +112,33 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
                 continue
             recordings[n][sensor] = src
 
+    # Phone recordings: each sub-folder r{n}/ under phone/ is one recording.
+    # Phone occupies the sporsa position on the handlebar; it is only registered
+    # when no hardware sporsa source exists for that recording number.
+    phone_dir = in_root / "phone"
+    if phone_dir.is_dir():
+        for sub in sorted(phone_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            m = re.match(r"^r(\d+)$", sub.name, re.IGNORECASE)
+            if m is None:
+                continue
+            n = int(m.group(1))
+            recordings.setdefault(n, {})
+            if "sporsa" in recordings[n]:
+                log.info(
+                    "parse %s: phone r%s skipped — sporsa source already present",
+                    session_name, n,
+                )
+                continue
+            if "phone" in recordings[n]:
+                log.warning(
+                    "parse %s: duplicate phone for recording %s, ignoring %s",
+                    session_name, n, sub.name,
+                )
+                continue
+            recordings[n]["phone"] = sub
+
     if not recordings:
         log.warning("parse %s: no recordings found under %s", session_name, project_relative_path(in_root))
         return
@@ -104,23 +150,32 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
 
         pair = recordings[n]
         parsed_nonempty: dict[str, bool] = {}
-        for sensor in ("sporsa", "arduino"):
+        for sensor in ("sporsa", "phone", "arduino"):
             src = pair.get(sensor)
             if src is None:
                 continue
-            dst = out_dir / f"{sensor}.csv"
+            output_name = _SENSOR_OUTPUT_NAME.get(sensor, sensor)
+            dst = out_dir / f"{output_name}.csv"
             log.info(
-                "parse %s/parsed: %s source=%s output=%s",
+                "parse %s/parsed: %s→%s source=%s output=%s",
                 recording_name,
                 sensor,
+                output_name,
                 src.name,
                 project_relative_path(dst),
             )
             df = _process_file(sensor, src, dst)
-            parsed_nonempty[sensor] = bool(df is not None and not df.empty)
+            parsed_nonempty[output_name] = bool(df is not None and not df.empty)
 
             if plot:
-                plot_sensor_data(dst, output_path=out_dir / f"{sensor}.png")
+                plot_sensor_data(dst, output_path=out_dir / f"{output_name}.png")
+
+        # GPS: phone recordings carry per-folder Location.csv.
+        if "phone" in pair:
+            gps_df = parse_phone_gps(pair["phone"])
+            if not gps_df.empty:
+                write_gps_csv(gps_df, out_dir / "gps.csv")
+                log.info("parse %s: wrote gps.csv from phone Location.csv", recording_name)
 
         # Calibration-segment detection and JSON export.
         cal_json_payload: dict = {"recording_name": recording_name, "sensors": {}}
@@ -181,6 +236,23 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
                 plot_interval_distribution(dfs, out_dir / "parsed_intervals.png")
             if "arduino" in dfs and "timestamp_received" in dfs["arduino"].columns:
                 plot_packet_loss_received(dfs["arduino"], out_dir / "parsed_packet_loss.png")
+
+    # GPS: sessions with a dedicated GPS file (e.g. sporsa sessions) write it to
+    # every recording that does not already have a gps.csv from a per-recording source.
+    session_gps_path = _find_session_gps(in_root)
+    if session_gps_path:
+        try:
+            gps_df = load_gps(session_gps_path)
+        except Exception as exc:
+            gps_df = None
+            log.warning("parse %s: could not load session GPS %s: %s", session_name, session_gps_path.name, exc)
+        if gps_df is not None and not gps_df.empty:
+            for n in sorted(recordings.keys()):
+                rec_name = f"{session_name}_r{n}"
+                gps_out = recording_stage_dir(rec_name, "parsed") / "gps.csv"
+                if not gps_out.exists():
+                    write_gps_csv(gps_df, gps_out)
+                    log.info("parse %s: wrote gps.csv from session GPS %s", rec_name, session_gps_path.name)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

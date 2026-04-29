@@ -38,6 +38,14 @@ def _sync_method_row(data: dict, method: str) -> dict:
     }
 
 
+def _session_and_suffix(name: str) -> tuple[str, str]:
+    """Split ``'2026-02-26_r4'`` into session ``'2026-02-26'`` and suffix ``'r4'``."""
+    parts = name.rsplit("_", 1)
+    if len(parts) == 2 and parts[1][:1] == "r" and parts[1][1:].isdigit():
+        return parts[0], parts[1]
+    return name, ""
+
+
 # ---------------------------------------------------------------------------
 # Calibration parameter aggregation
 # ---------------------------------------------------------------------------
@@ -98,6 +106,7 @@ def aggregate_calibration_params(
 
         # Derive recording name from section folder name (strip trailing sN).
         rec_name = section_dir.name.rsplit("s", 1)[0] if "s" in section_dir.name else section_dir.name
+        session, suffix = _session_and_suffix(rec_name)
 
         quality_block = data.get("quality", {})
         provenance = data.get("provenance", {})
@@ -105,6 +114,8 @@ def aggregate_calibration_params(
         row: dict = {
             "section_id": section_dir.name,
             "recording_name": rec_name,
+            "session": session,
+            "recording_suffix": suffix,
             "protocol_detected": bool(data.get("protocol_detected", False)),
             "calibration_quality": quality_block.get("overall", ""),
             "quality_tags": "|".join(quality_block.get("tags", [])),
@@ -199,9 +210,12 @@ def aggregate_orientation_stats(
             continue
 
         rec_name = section_dir.name.rsplit("s", 1)[0] if "s" in section_dir.name else section_dir.name
+        session, suffix = _session_and_suffix(rec_name)
         row: dict = {
             "section_id": section_dir.name,
             "recording_name": rec_name,
+            "session": session,
+            "recording_suffix": suffix,
         }
 
         sensors_block = data.get("sensors", {})
@@ -295,14 +309,6 @@ def aggregate_sync_params(
     df = pd.DataFrame(rows)
     log.info("Aggregated sync params: %d recordings", len(df))
     return df
-
-
-def _session_and_suffix(name: str) -> tuple[str, str]:
-    """Split ``'2026-02-26_r4'`` into session ``'2026-02-26'`` and suffix ``'r4'``."""
-    parts = name.rsplit("_", 1)
-    if len(parts) == 2 and parts[1][:1] == "r" and parts[1][1:].isdigit():
-        return parts[0], parts[1]
-    return name, ""
 
 
 def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
