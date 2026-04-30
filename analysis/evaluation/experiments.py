@@ -16,21 +16,33 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from common.paths import project_relative_path, read_csv, write_csv
-from features.labels import to_activity_label, to_binary_label, to_coarse_label
+from features.labels import (
+    to_activity_label,
+    to_binary_label,
+    to_coarse_label,
+    to_riding_label,
+    to_riding_label_from_set,
+)
 
 _DERIVED_LABEL_MAPPERS: dict[str, Any] = {
     "scenario_label_activity": to_activity_label,
     "scenario_label_coarse": to_coarse_label,
     "scenario_label_binary": to_binary_label,
+    "scenario_label_riding": to_riding_label,
 }
 
 log = logging.getLogger(__name__)
@@ -46,9 +58,11 @@ _META_COLS = {
     "window_duration_s",
     # Labels
     "scenario_label",
+    "scenario_labels",
     "scenario_label_activity",
     "scenario_label_coarse",
     "scenario_label_binary",
+    "scenario_label_riding",
     # Quality summary (section- and window-level)
     "overall_quality_label",
     "overall_quality_score",
@@ -121,6 +135,213 @@ def _auto_detect_feature_sets(df: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
+def _binary_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    proba_pos: np.ndarray | None,
+    classes: list[str],
+    *,
+    positive_class: str = "riding",
+) -> dict[str, Any]:
+    """Compute the full binary-classification metric block on OOF predictions.
+
+    Returns per-class precision/recall/F1/support, balanced accuracy, and (when
+    probabilities are available) average precision (PR-AUC) and ROC-AUC for the
+    positive class.  Confusion matrix is included for downstream plotting.
+    """
+    if len(classes) != 2:
+        raise ValueError(f"_binary_metrics expects exactly 2 classes, got {classes!r}")
+
+    if positive_class not in classes:
+        raise ValueError(
+            f"positive_class={positive_class!r} not in classes={classes!r}"
+        )
+
+    pos_idx = classes.index(positive_class)
+    neg_idx = 1 - pos_idx
+
+    cm = confusion_matrix(y_true, y_pred, labels=[neg_idx, pos_idx])
+    tn, fp, fn, tp = cm.ravel()
+
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=[neg_idx, pos_idx],
+        target_names=[classes[neg_idx], classes[pos_idx]],
+        output_dict=True,
+        zero_division=0,
+    )
+
+    out: dict[str, Any] = {
+        "positive_class": positive_class,
+        "negative_class": classes[neg_idx],
+        "support": {
+            classes[neg_idx]: int(tn + fp),
+            classes[pos_idx]: int(fn + tp),
+        },
+        "confusion_matrix": {
+            "labels": [classes[neg_idx], classes[pos_idx]],
+            "matrix": cm.tolist(),
+            "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
+        },
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "per_class": {
+            classes[neg_idx]: {
+                "precision": float(report[classes[neg_idx]]["precision"]),
+                "recall":    float(report[classes[neg_idx]]["recall"]),
+                "f1":        float(report[classes[neg_idx]]["f1-score"]),
+                "support":   int(report[classes[neg_idx]]["support"]),
+            },
+            classes[pos_idx]: {
+                "precision": float(report[classes[pos_idx]]["precision"]),
+                "recall":    float(report[classes[pos_idx]]["recall"]),
+                "f1":        float(report[classes[pos_idx]]["f1-score"]),
+                "support":   int(report[classes[pos_idx]]["support"]),
+            },
+        },
+        "macro_avg": {
+            "precision": float(report["macro avg"]["precision"]),
+            "recall":    float(report["macro avg"]["recall"]),
+            "f1":        float(report["macro avg"]["f1-score"]),
+        },
+        "weighted_avg": {
+            "precision": float(report["weighted avg"]["precision"]),
+            "recall":    float(report["weighted avg"]["recall"]),
+            "f1":        float(report["weighted avg"]["f1-score"]),
+        },
+    }
+
+    # PR-AUC and ROC-AUC require predicted probability for the positive class.
+    # Skipped when the model lacks predict_proba or when only one class is
+    # present in the OOF labels (sklearn raises in that case).
+    if proba_pos is not None and not np.all(np.isnan(proba_pos)):
+        finite = np.isfinite(proba_pos)
+        n_pos = int((y_true[finite] == pos_idx).sum())
+        n_neg = int((y_true[finite] == neg_idx).sum())
+        if n_pos > 0 and n_neg > 0:
+            out["average_precision"] = float(
+                average_precision_score((y_true[finite] == pos_idx).astype(int), proba_pos[finite])
+            )
+            out["roc_auc"] = float(
+                roc_auc_score((y_true[finite] == pos_idx).astype(int), proba_pos[finite])
+            )
+            # Curve points are useful for downstream PR/ROC plots.
+            prec, rec, pr_thr = precision_recall_curve(
+                (y_true[finite] == pos_idx).astype(int), proba_pos[finite]
+            )
+            fpr, tpr, roc_thr = roc_curve(
+                (y_true[finite] == pos_idx).astype(int), proba_pos[finite]
+            )
+            out["pr_curve"] = {
+                "precision": prec.tolist(),
+                "recall": rec.tolist(),
+                "thresholds": pr_thr.tolist(),
+            }
+            out["roc_curve"] = {
+                "fpr": fpr.tolist(),
+                "tpr": tpr.tolist(),
+                "thresholds": roc_thr.tolist(),
+            }
+        else:
+            log.warning(
+                "Skipping PR-AUC/ROC-AUC: only one class present in OOF labels "
+                "(n_pos=%d, n_neg=%d).", n_pos, n_neg,
+            )
+
+    return out
+
+
+def _export_misclassified(
+    df: pd.DataFrame,
+    *,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    proba_pos: np.ndarray | None,
+    classes: list[str],
+    label_col: str,
+    output_path: Path,
+    positive_class: str = "riding",
+) -> int:
+    """Write a per-window CSV of misclassified rows for label refinement.
+
+    Sorted by descending model confidence so the most-confidently-wrong rows —
+    the strongest candidates for relabelling — appear at the top.  Includes
+    section_id, time range, fine-grained label, true/predicted binary label,
+    and the predicted positive-class probability.
+    """
+    pos_idx = classes.index(positive_class)
+    neg_idx = 1 - pos_idx
+    inv_class = {neg_idx: classes[neg_idx], pos_idx: classes[pos_idx]}
+
+    wrong_mask = y_true != y_pred
+    if not wrong_mask.any():
+        log.info("No misclassified windows for %s — nothing to export.", output_path.name)
+        return 0
+
+    # Surface the most useful columns for human inspection. Anything optional
+    # is included only if present in the source frame.
+    candidate_cols = [
+        "section_id",
+        "recording_name",
+        "window_idx",
+        "window_start_ms",
+        "window_end_ms",
+        "window_duration_s",
+        # scenario_labels (multi-label set) is the most useful column for
+        # label refinement: it shows every annotation that overlapped the
+        # window, so the user can see whether the prediction disagrees with
+        # a clearly-correct label or with a missing/ambiguous one.
+        "scenario_labels",
+        "scenario_label",
+        "scenario_label_activity",
+        "scenario_label_coarse",
+        "scenario_label_binary",
+        label_col,
+        "overall_quality_label",
+        "overall_quality_score",
+    ]
+    present_cols = [c for c in candidate_cols if c in df.columns]
+
+    rows = df.loc[wrong_mask, present_cols].copy()
+    rows.insert(0, "true_binary", [inv_class[v] for v in y_true[wrong_mask]])
+    rows.insert(1, "pred_binary", [inv_class[v] for v in y_pred[wrong_mask]])
+    rows.insert(
+        2,
+        "error_type",
+        np.where(
+            y_true[wrong_mask] == pos_idx,
+            f"FN_({positive_class}_predicted_as_{classes[neg_idx]})",
+            f"FP_({classes[neg_idx]}_predicted_as_{positive_class})",
+        ),
+    )
+
+    # Confidence score = predicted probability for the *predicted* class. Higher
+    # values mark predictions the model was sure about — most likely candidates
+    # for label-error inspection rather than genuine model failure.
+    if proba_pos is not None and not np.all(np.isnan(proba_pos)):
+        proba_pred = np.where(
+            y_pred[wrong_mask] == pos_idx,
+            proba_pos[wrong_mask],
+            1.0 - proba_pos[wrong_mask],
+        )
+        rows.insert(3, "pred_proba", np.round(proba_pred, 4))
+        rows.insert(4, "proba_positive", np.round(proba_pos[wrong_mask], 4))
+        rows = rows.sort_values("pred_proba", ascending=False)
+    else:
+        rows = rows.sort_values(
+            ["section_id", "window_idx"] if "window_idx" in rows.columns else ["section_id"]
+        )
+
+    write_csv(rows, output_path)
+    log.info(
+        "Wrote %d misclassified windows → %s",
+        len(rows),
+        project_relative_path(output_path),
+    )
+    return int(len(rows))
+
+
 def _build_model(name: str, seed: int) -> Any:
     cls = _MODEL_REGISTRY[name]
     kwargs: dict[str, Any] = {"random_state": seed}
@@ -164,6 +385,8 @@ def _cv_evaluate(
 
     # Pre-allocate OOF arrays — every sample is a validation sample exactly once.
     oof_pred = np.empty(len(y), dtype=y.dtype)
+    n_classes = len(np.unique(y))
+    oof_proba: np.ndarray | None = np.full((len(y), n_classes), np.nan, dtype=float)
 
     fold_accuracies: list[float] = []
     fold_f1s: list[float] = []
@@ -190,10 +413,21 @@ def _cv_evaluate(
 
         oof_pred[val_idx] = y_hat
 
+        clf = pipe.named_steps["clf"]
+        if oof_proba is not None and hasattr(clf, "predict_proba"):
+            proba = pipe.predict_proba(X_val)
+            # Map per-fold class order onto the global class index so OOF
+            # probabilities are comparable across folds even when a fold is
+            # missing a class.
+            for col_idx, cls in enumerate(clf.classes_):
+                global_col = int(np.where(np.unique(y) == cls)[0][0])
+                oof_proba[val_idx, global_col] = proba[:, col_idx]
+        else:
+            oof_proba = None
+
         fold_accuracies.append(float(accuracy_score(y_val, y_hat)))
         fold_f1s.append(float(f1_score(y_val, y_hat, average="macro", zero_division=0)))
 
-        clf = pipe.named_steps["clf"]
         if hasattr(clf, "feature_importances_"):
             fold_importances.append(clf.feature_importances_.copy())
 
@@ -225,6 +459,9 @@ def _cv_evaluate(
         "per_class": report,
         "confusion_matrix": cm.tolist(),
         "feature_importances": importances,
+        "labels": labels.tolist(),
+        "oof_pred": oof_pred,
+        "oof_proba": oof_proba,
     }
 
 
@@ -297,13 +534,28 @@ def run_evaluation(
     # feature tables (written before a new taxonomy was added) stay usable
     # without a full re-extraction.
     if label_col not in df.columns and label_col in _DERIVED_LABEL_MAPPERS:
-        if "scenario_label" not in df.columns:
-            raise ValueError(
-                f"Cannot derive {label_col!r}: source column 'scenario_label' missing."
+        # scenario_label_riding is set-based: prefer the multi-label
+        # `scenario_labels` column over the priority-collapsed single
+        # `scenario_label`, since the riding objective specifically requires
+        # the literal annotation set (not the dominant token).
+        if label_col == "scenario_label_riding" and "scenario_labels" in df.columns:
+            df[label_col] = (
+                df["scenario_labels"]
+                .fillna("unlabeled")
+                .astype(str)
+                .map(lambda s: to_riding_label_from_set(
+                    [t for t in s.split("|") if t.strip()]
+                ))
             )
-        mapper = _DERIVED_LABEL_MAPPERS[label_col]
-        df[label_col] = df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
-        log.info("Derived %s from scenario_label", label_col)
+            log.info("Derived %s from scenario_labels (multi-label set)", label_col)
+        else:
+            if "scenario_label" not in df.columns:
+                raise ValueError(
+                    f"Cannot derive {label_col!r}: source column 'scenario_label' missing."
+                )
+            mapper = _DERIVED_LABEL_MAPPERS[label_col]
+            df[label_col] = df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
+            log.info("Derived %s from scenario_label", label_col)
 
     if exclude_non_riding:
         binary_col = "scenario_label_binary"
@@ -453,6 +705,79 @@ def run_evaluation(
             per_class_path.write_text(
                 json.dumps(result["per_class"], indent=2), encoding="utf-8"
             )
+
+            # Binary-only block: full metrics + misclassified-window export.
+            # Triggered whenever the target has exactly 2 classes (e.g.
+            # scenario_label_riding). Picks the non-non_riding class as the
+            # positive class so PR-AUC/recall reflect "detect riding".
+            if len(classes) == 2:
+                negative_class = next(
+                    (c for c in classes if str(c).lower() == "non_riding"),
+                    classes[0],
+                )
+                positive_class = next(c for c in classes if c != negative_class)
+
+                proba_pos: np.ndarray | None = None
+                proba_full = result.get("oof_proba")
+                if proba_full is not None:
+                    pos_global_idx = list(le.classes_).index(positive_class)
+                    proba_pos = proba_full[:, pos_global_idx]
+
+                try:
+                    binary = _binary_metrics(
+                        y_true=y_all,
+                        y_pred=result["oof_pred"],
+                        proba_pos=proba_pos,
+                        classes=list(le.classes_),
+                        positive_class=positive_class,
+                    )
+                except Exception as exc:
+                    log.warning("Binary metrics failed for %s: %s", key, exc)
+                    binary = None
+
+                if binary is not None:
+                    binary_path = output_dir / model_name / f"binary_metrics_{fs_name}.json"
+                    binary_path.write_text(json.dumps(binary, indent=2), encoding="utf-8")
+                    log.info(
+                        "Binary metrics %s: balanced_acc=%.3f  AP=%s  ROC-AUC=%s",
+                        key,
+                        binary["balanced_accuracy"],
+                        f"{binary['average_precision']:.3f}" if "average_precision" in binary else "n/a",
+                        f"{binary['roc_auc']:.3f}" if "roc_auc" in binary else "n/a",
+                    )
+
+                    miscls_path = output_dir / model_name / f"misclassified_{fs_name}.csv"
+                    n_miscls = _export_misclassified(
+                        df=df,
+                        y_true=y_all,
+                        y_pred=result["oof_pred"],
+                        proba_pos=proba_pos,
+                        classes=list(le.classes_),
+                        label_col=label_col,
+                        output_path=miscls_path,
+                        positive_class=positive_class,
+                    )
+
+                    # Per-section overlay PNGs: signal streams + annotation
+                    # strip + misclassified-window highlights. Skipped under
+                    # no_plots; safe to skip if section CSVs are missing
+                    # (the helper already warns and continues per section).
+                    if not no_plots and n_miscls > 0:
+                        try:
+                            from evaluation.plots import plot_misclassified_overlay
+                            overlay_dir = (
+                                output_dir / model_name / f"misclassified_overlays_{fs_name}"
+                            )
+                            plot_misclassified_overlay(
+                                miscls_path,
+                                overlay_dir,
+                                title_suffix=f"{model_name} / {fs_name}",
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "Misclassified overlay generation failed for %s: %s",
+                                key, exc,
+                            )
 
             # Write fold-wise scores so variance is inspectable
             fold_path = output_dir / model_name / f"fold_scores_{fs_name}.csv"

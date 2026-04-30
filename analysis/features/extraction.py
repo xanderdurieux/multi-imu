@@ -27,7 +27,14 @@ import pandas as pd
 
 from .cross_sensor import cross_sensor_features
 from .label_config import LabelConfig
-from .labels import label_feature, to_activity_label, to_binary_label, to_coarse_label
+from .labels import (
+    label_feature,
+    label_feature_set,
+    to_activity_label,
+    to_binary_label,
+    to_coarse_label,
+    to_riding_label_from_set,
+)
 from .orientation_features import orientation_cross_features, orientation_features
 from .quality import quality_features
 from .spectral import spectral_features
@@ -148,17 +155,27 @@ def extract_window_features(
     feats.update(cross_sensor_features(window_cross))
 
     # ------------------------------------------------------------------
-    # 7. Labels - four parallel representations of the same annotation.
+    # 7. Labels - five parallel representations of the same annotation.
     #
-    #   scenario_label          fine-grained (17 classes) - for inspection / audit
+    #   scenario_labels         pipe-delimited set of all overlapping labels
+    #                           on this window (multi-label source-of-truth;
+    #                           per-objective resolvers select from it)
+    #   scenario_label          priority-collapsed dominant fine label
+    #                           (legacy single-label inspection target)
     #   scenario_label_activity 6-class dual-IMU taxonomy - default training target
     #   scenario_label_coarse   4-class taxonomy          - legacy/reporting target
     #   scenario_label_binary   incident / normal         - binary safety target
+    #   scenario_label_riding   non_riding / riding       - resolved from the
+    #                           SET above, ignoring priority and ignoring fine
+    #                           sub-event labels (cornering, accelerating, …)
     # ------------------------------------------------------------------
+    label_set = label_feature_set(labels_df, window_start_ms, window_end_ms)
     fine = label_feature(labels_df, window_start_ms, window_end_ms, config=label_config)
+    feats["scenario_labels"] = "|".join(label_set) if label_set else "unlabeled"
     feats["scenario_label"] = fine
     feats["scenario_label_activity"] = to_activity_label(fine, config=label_config)
     feats["scenario_label_coarse"] = to_coarse_label(fine, config=label_config)
     feats["scenario_label_binary"] = to_binary_label(fine, config=label_config)
+    feats["scenario_label_riding"] = to_riding_label_from_set(label_set, config=label_config)
 
     return feats

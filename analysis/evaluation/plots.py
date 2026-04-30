@@ -9,11 +9,23 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common.paths import project_relative_path
+from common.paths import (
+    parse_section_folder_name,
+    project_relative_path,
+    read_csv,
+    recording_labels_csv,
+    section_dir,
+    section_labels_csv,
+)
+from common.signals import vector_norm
+from labels.parser import load_labels
+from visualization._utils import filter_valid_plot_xy
+from visualization.plot_labels import _label_colors, _label_patches
 
 log = logging.getLogger(__name__)
 
@@ -595,3 +607,311 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
         project_relative_path(output_dir),
     )
     return generated
+
+
+# ---------------------------------------------------------------------------
+# Misclassified-window overlay (binary objectives)
+# ---------------------------------------------------------------------------
+
+# False positive  = predicted positive class (riding) but actually negative.
+# False negative  = predicted negative class (non_riding) but actually positive.
+# Distinct hues so the two error modes pop against the (lighter) annotation
+# strip in the background.
+_FP_COLOR = "#d62728"  # red
+_FN_COLOR = "#ff7f0e"  # orange
+_MISCLS_ALPHA = 0.45
+_MISCLS_EDGE_LW = 1.2
+
+
+def _load_section_signal(sec_dir: Path, sensor: str) -> pd.DataFrame | None:
+    """Return the best-available time-series for *sensor* in *sec_dir*.
+
+    Prefers ``derived/<sensor>_signals.csv`` (already has acc_norm/gyro_norm
+    pre-computed); falls back to ``calibrated/<sensor>.csv`` (raw axes,
+    norm computed on the fly).  Returns ``None`` if neither is present.
+    """
+    derived = sec_dir / "derived" / f"{sensor}_signals.csv"
+    if derived.exists():
+        df = read_csv(derived)
+        if "timestamp" in df.columns:
+            return df
+
+    calibrated = sec_dir / "calibrated" / f"{sensor}.csv"
+    if calibrated.exists():
+        df = read_csv(calibrated)
+        if "timestamp" in df.columns:
+            for col, axes in (("acc_norm", ("ax", "ay", "az")),
+                              ("gyro_norm", ("gx", "gy", "gz"))):
+                if col not in df.columns and all(a in df.columns for a in axes):
+                    df[col] = vector_norm(df, list(axes))
+            return df
+
+    return None
+
+
+def _draw_misclassified_spans(
+    axes: list[plt.Axes],
+    annotation_ax: plt.Axes,
+    rows: pd.DataFrame,
+    t0_ms: float,
+) -> tuple[int, int]:
+    """Overlay each misclassified window as a colored axvspan.
+
+    Color encodes error type (FP vs FN). Each span is annotated above the
+    top signal axis with ``#<window_idx>`` and the model's predicted-class
+    probability so the most confidently-wrong (likely-mislabeled) windows
+    are visually obvious and easy to look up in the misclassified CSV.
+    """
+    n_fp = n_fn = 0
+    for _, r in rows.iterrows():
+        x0 = (float(r["window_start_ms"]) - t0_ms) / 1000.0
+        x1 = (float(r["window_end_ms"]) - t0_ms) / 1000.0
+        if x1 <= x0:
+            continue
+        is_fp = str(r.get("error_type", "")).startswith("FP")
+        color = _FP_COLOR if is_fp else _FN_COLOR
+        n_fp += int(is_fp)
+        n_fn += int(not is_fp)
+
+        for ax in axes:
+            ax.axvspan(
+                x0, x1,
+                facecolor=color,
+                edgecolor=color,
+                alpha=_MISCLS_ALPHA,
+                lw=_MISCLS_EDGE_LW,
+                zorder=4,
+            )
+
+        win_idx = r.get("window_idx")
+        proba = r.get("pred_proba")
+        parts: list[str] = []
+        if pd.notna(win_idx):
+            parts.append(f"#{int(win_idx)}")
+        if pd.notna(proba):
+            parts.append(f"{float(proba):.2f}")
+        if parts:
+            annotation_ax.text(
+                (x0 + x1) / 2.0,
+                0.5,
+                "\n".join(parts),
+                fontsize=6,
+                ha="center",
+                va="center",
+                color=color,
+                zorder=5,
+                fontweight="bold",
+            )
+    return n_fp, n_fn
+
+
+def _draw_label_strip(
+    ax: plt.Axes,
+    labels,
+    t0_ms: float,
+    colors: dict,
+) -> None:
+    """Draw all annotation intervals as a single colored strip on *ax*.
+
+    Replaces the previous full-height label backgrounds — those drowned the
+    signals when annotation density was high. The strip is a thin band
+    (one axis only) that conveys the same information without competing
+    visually with the IMU traces.
+    """
+    for lr in labels:
+        if not lr.label:
+            continue
+        x0 = (lr.start_ms - t0_ms) / 1000.0
+        x1 = (lr.end_ms - t0_ms) / 1000.0
+        if x1 <= x0:
+            continue
+        color = colors.get(lr.label, "#90A4AE")
+        ax.axvspan(x0, x1, facecolor=color, edgecolor="none",
+                   alpha=0.85, zorder=1)
+    ax.set_yticks([])
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("labels", fontsize=7, rotation=0, ha="right", va="center", labelpad=18)
+    for spine in ("top", "right", "left", "bottom"):
+        ax.spines[spine].set_visible(False)
+    ax.tick_params(left=False, bottom=False, labelbottom=False)
+
+
+def plot_misclassified_overlay_for_section(
+    section_id: str,
+    miscls_rows: pd.DataFrame,
+    output_path: Path,
+    *,
+    title_suffix: str = "",
+) -> Path | None:
+    """One PNG per section: signals + annotation strip + misclassified windows.
+
+    Three rows: bike (sporsa) acc-norm, rider (arduino) acc-norm, and the
+    union gyro-norm panel.  Annotation spans (from the section labels CSV)
+    are drawn faintly in the background so the user can see whether each
+    misclassified window straddles a label boundary.
+    """
+    sec_dir = section_dir(section_id)
+    if not sec_dir.is_dir():
+        log.warning("Section directory missing for %s — skipping overlay", section_id)
+        return None
+
+    sporsa = _load_section_signal(sec_dir, "sporsa")
+    arduino = _load_section_signal(sec_dir, "arduino")
+    if sporsa is None and arduino is None:
+        log.warning("No signal CSVs for %s — skipping overlay", section_id)
+        return None
+
+    t0_ms = min(
+        float(d["timestamp"].iloc[0])
+        for d in (sporsa, arduino)
+        if d is not None and not d.empty and "timestamp" in d.columns
+    )
+
+    # Layout: thin annotation row (window numbers + probabilities), thin
+    # label strip, then three signal panels. Stripping labels off the
+    # signal axes keeps the IMU traces readable when label density is high.
+    fig = plt.figure(figsize=(14, 8), constrained_layout=True)
+    gs = fig.add_gridspec(
+        5, 1,
+        height_ratios=[0.25, 0.20, 1.0, 1.0, 1.0],
+        hspace=0.18,
+    )
+    ax_anno = fig.add_subplot(gs[0])
+    ax_strip = fig.add_subplot(gs[1], sharex=ax_anno)
+    ax_acc_bike = fig.add_subplot(gs[2], sharex=ax_anno)
+    ax_acc_rider = fig.add_subplot(gs[3], sharex=ax_anno)
+    ax_gyro = fig.add_subplot(gs[4], sharex=ax_anno)
+    signal_axes = [ax_acc_bike, ax_acc_rider, ax_gyro]
+
+    # Annotation row holds the per-window text labels. No data, no spines.
+    ax_anno.set_yticks([])
+    ax_anno.set_ylim(0, 1)
+    for spine in ("top", "right", "left", "bottom"):
+        ax_anno.spines[spine].set_visible(False)
+    ax_anno.tick_params(left=False, bottom=False, labelbottom=False)
+
+    for sensor_name, df, ax in (
+        ("bike (sporsa)", sporsa, ax_acc_bike),
+        ("rider (arduino)", arduino, ax_acc_rider),
+    ):
+        if df is None or df.empty or "acc_norm" not in df.columns:
+            ax.text(0.5, 0.5, f"no acc_norm for {sensor_name}",
+                    transform=ax.transAxes, ha="center", va="center", fontsize=8)
+            continue
+        ts_s = (pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float) - t0_ms) / 1000.0
+        x, y = filter_valid_plot_xy(ts_s, df["acc_norm"].to_numpy(dtype=float))
+        ax.plot(x, y, lw=0.7, color="#1f77b4")
+        ax.set_ylabel(f"{sensor_name}\n|acc| (m/s²)", fontsize=8)
+        ax.grid(True, alpha=0.3, lw=0.4)
+
+    for sensor_name, df, color in (
+        ("bike", sporsa, "#1f77b4"),
+        ("rider", arduino, "#ff7f0e"),
+    ):
+        if df is None or df.empty or "gyro_norm" not in df.columns:
+            continue
+        ts_s = (pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float) - t0_ms) / 1000.0
+        x, y = filter_valid_plot_xy(ts_s, df["gyro_norm"].to_numpy(dtype=float))
+        ax_gyro.plot(x, y, lw=0.7, color=color, label=sensor_name)
+    ax_gyro.set_ylabel("|gyro|", fontsize=8)
+    ax_gyro.set_xlabel("Time since section start (s)")
+    ax_gyro.grid(True, alpha=0.3, lw=0.4)
+    ax_gyro.legend(loc="upper right", fontsize=7)
+
+    # Per-section labels live at <sec>/labels/labels.csv (preferred — already
+    # trimmed to the section); fallback is the recording-level intervals file
+    # for sections that haven't been event-labeled yet.
+    label_colors: dict = {}
+    section_labels: list = []
+    section_labels_path = section_labels_csv(sec_dir)
+    if section_labels_path.exists():
+        try:
+            section_labels = load_labels(section_labels_path)
+        except Exception as exc:
+            log.warning("Could not load section labels for %s: %s", section_id, exc)
+    else:
+        try:
+            recording_name, _sec_idx = parse_section_folder_name(section_id)
+            rec_labels_path = recording_labels_csv(recording_name)
+            if rec_labels_path.exists():
+                section_labels = load_labels(rec_labels_path)
+        except Exception as exc:
+            log.warning("Could not load recording labels for %s: %s", section_id, exc)
+    if section_labels:
+        label_colors = _label_colors(section_labels)
+        _draw_label_strip(ax_strip, section_labels, t0_ms, label_colors)
+    else:
+        _draw_label_strip(ax_strip, [], t0_ms, {})
+
+    # Misclassified windows on the signal panels; per-window text on the
+    # dedicated annotation row above.
+    n_fp, n_fn = _draw_misclassified_spans(signal_axes, ax_anno, miscls_rows, t0_ms)
+
+    legend_handles = [
+        mpatches.Patch(color=_FP_COLOR, alpha=_MISCLS_ALPHA,
+                       label=f"FP — predicted riding (n={n_fp})"),
+        mpatches.Patch(color=_FN_COLOR, alpha=_MISCLS_ALPHA,
+                       label=f"FN — predicted non_riding (n={n_fn})"),
+    ] + _label_patches(label_colors)
+    fig.legend(handles=legend_handles, loc="lower center",
+               ncol=min(6, len(legend_handles)),
+               fontsize=7, framealpha=0.85,
+               bbox_to_anchor=(0.5, -0.02))
+
+    title = f"{section_id} — misclassified windows"
+    if title_suffix:
+        title += f"  ({title_suffix})"
+    fig.suptitle(title, fontsize=10)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Wrote misclassified overlay → %s", project_relative_path(output_path))
+    return output_path
+
+
+def plot_misclassified_overlay(
+    miscls_csv: Path,
+    output_dir: Path,
+    *,
+    title_suffix: str = "",
+) -> list[Path]:
+    """Generate one overlay PNG per section that has misclassified windows.
+
+    Reads ``misclassified_<fs>.csv`` (must contain ``section_id``,
+    ``window_start_ms``, ``window_end_ms``, ``error_type``, ``pred_proba``)
+    and writes ``<output_dir>/<section_id>.png`` for each section.
+    """
+    miscls_csv = Path(miscls_csv)
+    if not miscls_csv.exists():
+        log.warning("Misclassified CSV missing: %s", project_relative_path(miscls_csv))
+        return []
+
+    df = pd.read_csv(miscls_csv)
+    required = {"section_id", "window_start_ms", "window_end_ms"}
+    missing = required - set(df.columns)
+    if missing:
+        log.warning("Misclassified CSV %s missing columns: %s", miscls_csv.name, missing)
+        return []
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for sec_id, rows in df.groupby("section_id"):
+        out = output_dir / f"{sec_id}.png"
+        try:
+            saved = plot_misclassified_overlay_for_section(
+                str(sec_id), rows, out, title_suffix=title_suffix,
+            )
+        except Exception as exc:
+            log.warning("Misclassified overlay failed for %s: %s", sec_id, exc)
+            continue
+        if saved is not None:
+            written.append(saved)
+    log.info(
+        "Misclassified overlays: %d sections → %s",
+        len(written),
+        project_relative_path(output_dir),
+    )
+    return written

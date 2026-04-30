@@ -300,16 +300,6 @@ def run_report(
     plot_recording_summary_table(df, dataset_dir / "recording_summary_table.png")
 
     # ------------------------------------------------------------------
-    # 4. Signal examples
-    # ------------------------------------------------------------------
-    log.info("Generating signal example figures …")
-    from reporting.signal_examples import generate_all_signal_examples
-    signal_paths = generate_all_signal_examples(
-        df, signals_dir, context_s=context_s, scenarios=scenarios
-    )
-    n_signal_plots = len(signal_paths)
-
-    # ------------------------------------------------------------------
     # 5. Stage summaries (calibration / sync / orientation)
     # ------------------------------------------------------------------
     log.info("Generating stage summary figures …")

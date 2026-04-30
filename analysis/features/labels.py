@@ -45,35 +45,32 @@ def _raw_labels_and_overlaps(
     return out
 
 
-def label_feature(
+def _well_contained_candidates(
     labels_df: pd.DataFrame | None,
     window_start_ms: float,
     window_end_ms: float,
     *,
-    containment_threshold: float = 0.5,
-    config: LabelConfig | None = None,
-) -> str:
-    """Return a single fine-grained label for the window.
+    containment_threshold: float,
+) -> list[tuple[str, float]]:
+    """Return ``(token, overlap_ms)`` pairs for labels overlapping the window.
 
-    Strategy:
-    1. Find all annotation rows overlapping [window_start_ms, window_end_ms].
-    2. Compute containment = overlap_ms / window_duration_ms; keep rows with
-       containment >= *containment_threshold*, else fall back to all overlaps.
-    3. Pipe-split compound strings (``"riding|cornering"``) into tokens;
-       each token inherits its source row's overlap_ms.
-    4. Choose the token with largest overlap_ms; break ties with the configured
-       priority rank. Unknown tokens use rank -1.
+    Containment-aware: prefers rows whose overlap covers ≥
+    *containment_threshold* of the window; falls back to all overlapping rows
+    if none meet the threshold so very short annotations aren't lost.
+    Compound ``"riding|cornering"`` strings are pipe-split; each token
+    inherits its source row's overlap so callers can rank by either overlap
+    or priority without distortion.
     """
     if labels_df is None or labels_df.empty:
-        return "unlabeled"
+        return []
     if not {"start_ms", "end_ms"}.issubset(labels_df.columns):
-        return "unlabeled"
+        return []
 
     starts = labels_df["start_ms"].to_numpy(dtype=float)
     ends = labels_df["end_ms"].to_numpy(dtype=float)
     mask = (starts < window_end_ms) & (ends > window_start_ms)
     if not mask.any():
-        return "unlabeled"
+        return []
 
     overlapping = labels_df.loc[mask]
     overlap_ms = (
@@ -90,7 +87,30 @@ def label_feature(
         well_contained = overlapping
         well_overlap = overlap_ms
 
-    candidates = _raw_labels_and_overlaps(well_contained, well_overlap)
+    return _raw_labels_and_overlaps(well_contained, well_overlap)
+
+
+def label_feature(
+    labels_df: pd.DataFrame | None,
+    window_start_ms: float,
+    window_end_ms: float,
+    *,
+    containment_threshold: float = 0.5,
+    config: LabelConfig | None = None,
+) -> str:
+    """Return the priority-collapsed dominant fine-grained label for the window.
+
+    Kept for inspection and for legacy single-label derived schemes
+    (``scenario_label_activity`` / ``_coarse`` / ``_binary``).  For objectives
+    that require *all* overlapping labels — currently
+    ``scenario_label_riding`` — use :func:`label_feature_set` instead.
+    """
+    candidates = _well_contained_candidates(
+        labels_df,
+        window_start_ms,
+        window_end_ms,
+        containment_threshold=containment_threshold,
+    )
     if not candidates:
         return "unlabeled"
 
@@ -99,6 +119,44 @@ def label_feature(
         candidates,
         key=lambda t: (t[1], priority_rank.get(t[0], -1)),
     )[0]
+
+
+def label_feature_set(
+    labels_df: pd.DataFrame | None,
+    window_start_ms: float,
+    window_end_ms: float,
+    *,
+    containment_threshold: float = 0.0,
+) -> list[str]:
+    """Return the de-duplicated set of fine labels overlapping the window.
+
+    Multi-label-friendly counterpart to :func:`label_feature` — no priority
+    collapse, no scheme mapping.  Callers select which labels are relevant
+    per objective (e.g. ``scenario_label_riding`` only inspects the literal
+    ``riding`` / ``non_riding`` annotations).
+
+    Default ``containment_threshold = 0.0`` includes *every* overlapping
+    annotation, not just well-contained ones.  Containment-based filtering is
+    a single-label artifact (needed when collapsing to one dominant token);
+    for set extraction we want all overlaps so a window straddling a
+    non_riding → riding boundary surfaces both labels.
+    """
+    candidates = _well_contained_candidates(
+        labels_df,
+        window_start_ms,
+        window_end_ms,
+        containment_threshold=containment_threshold,
+    )
+    if not candidates:
+        return []
+
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for tok, _ov in candidates:
+        if tok not in seen:
+            seen.add(tok)
+            tokens.append(tok)
+    return tokens
 
 
 def to_coarse_label(fine_label: str, config: LabelConfig | None = None) -> str:
@@ -114,6 +172,30 @@ def to_activity_label(fine_label: str, config: LabelConfig | None = None) -> str
 def to_binary_label(fine_label: str, config: LabelConfig | None = None) -> str:
     """Map a fine-grained label using the configured binary taxonomy."""
     return (config or default_label_config()).map_label("scenario_label_binary", fine_label)
+
+
+def to_riding_label(fine_label: str, config: LabelConfig | None = None) -> str:
+    """Map a single fine-grained label to a 2-class non_riding/riding scheme.
+
+    Strict: only labels in the configured ``scenario_label_riding`` literal
+    sets contribute. Use :func:`to_riding_label_from_set` when the full set
+    of overlapping labels is available — that's the preferred path because
+    it correctly handles a window that overlaps both an explicit ``riding``
+    and a sub-event token like ``cornering``.
+    """
+    return (config or default_label_config()).map_label("scenario_label_riding", fine_label)
+
+
+def to_riding_label_from_set(
+    fine_labels,
+    config: LabelConfig | None = None,
+) -> str:
+    """Resolve scenario_label_riding from the multi-label set of overlaps.
+
+    Accepts any iterable of label strings (e.g. the output of
+    :func:`label_feature_set` or a pipe-split ``scenario_labels`` cell).
+    """
+    return (config or default_label_config()).map_label_set("scenario_label_riding", fine_labels)
 
 
 def non_riding_labels(config: LabelConfig | None = None) -> frozenset[str]:

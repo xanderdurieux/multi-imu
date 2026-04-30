@@ -105,6 +105,7 @@ class WorkflowConfig:
             "scenario_label_activity",
             "scenario_label_coarse",
             "scenario_label_binary",
+            "scenario_label_riding",
         }
         if self.evaluation_label_col not in valid_eval_label_cols:
             errors.append(

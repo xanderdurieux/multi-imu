@@ -33,6 +33,7 @@ _EVALUATION_LABEL_COLS = [
     "scenario_label_activity",
     "scenario_label_coarse",
     "scenario_label_binary",
+    "scenario_label_riding",
 ]
 
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
