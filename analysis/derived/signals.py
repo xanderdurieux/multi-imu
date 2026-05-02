@@ -19,11 +19,43 @@ log = logging.getLogger(__name__)
 
 _GRAVITY = 9.81
 _QUAT_COLS = ("qw", "qx", "qy", "qz")
+_DOM_EPS = 1e-6
 
 
 def _rolling_rms(series: pd.Series, window: int) -> pd.Series:
     """Rolling root-mean-square with min_periods=1."""
     return series.pow(2).rolling(window=window, min_periods=1).mean().pow(0.5)
+
+
+def _rolling_lagged_xcorr(
+    x: np.ndarray, y: np.ndarray, *, window: int, max_lag_samples: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rolling lag-aware normalized cross-correlation max and lag (seconds not applied)."""
+    n = len(x)
+    out_max = np.full(n, np.nan, dtype=float)
+    out_lag = np.full(n, np.nan, dtype=float)
+    if n == 0 or window <= 1:
+        return out_max, out_lag
+
+    x_s = pd.Series(x, dtype=float)
+    y_s = pd.Series(y, dtype=float)
+    lags = np.arange(-max_lag_samples, max_lag_samples + 1, dtype=int)
+    corr_mat = np.full((len(lags), n), np.nan, dtype=float)
+
+    min_periods = max(4, min(window, 20))
+    for i, lag in enumerate(lags):
+        corr_mat[i, :] = x_s.rolling(window=window, min_periods=min_periods).corr(y_s.shift(lag)).to_numpy(dtype=float)
+
+    abs_corr = np.abs(corr_mat)
+    has_valid = np.any(np.isfinite(abs_corr), axis=0)
+    if not np.any(has_valid):
+        return out_max, out_lag
+
+    best_idx = np.nanargmax(abs_corr[:, has_valid], axis=0)
+    valid_cols = np.where(has_valid)[0]
+    out_max[valid_cols] = corr_mat[best_idx, valid_cols]
+    out_lag[valid_cols] = lags[best_idx]
+    return out_max, out_lag
 
 
 def _compute_linear_acc(
@@ -185,11 +217,19 @@ def compute_sensor_signals(
     out["gyro_lf"] = gyro_lf
     out["gyro_hf"] = gyro_norm - gyro_lf
 
+    # Angular acceleration and energy.
+    agx = np.gradient(gx) * sample_rate_hz
+    agy = np.gradient(gy) * sample_rate_hz
+    agz = np.gradient(gz) * sample_rate_hz
+    alpha_norm = norm_xyz(agx, agy, agz)
+    out["alpha_norm"] = alpha_norm
+
     # Rolling energy (RMS) over 1-second window.
     window = int(1.0 * sample_rate_hz)
     window = max(window, 1)
     out["energy_acc"] = _rolling_rms(pd.Series(acc_deviation), window).values
     out["energy_gyro"] = _rolling_rms(pd.Series(gyro_norm), window).values
+    out["alpha_energy"] = _rolling_rms(pd.Series(alpha_norm), window).values
 
     # Orientation-aware linear acceleration (gravity removed via quaternion).
     if df_orient is not None:
@@ -212,7 +252,7 @@ def compute_cross_sensor_signals(
     *,
     sample_rate_hz: float = 100.0,
 ) -> pd.DataFrame:
-    """Compute cross-sensor disagreement signals on a common time grid.
+    """Compute cross-sensor disagreement/coupling signals on a common time grid.
 
     Both DataFrames are interpolated onto a common uniform timestamp grid
     covering the overlap of their time ranges.
@@ -252,7 +292,9 @@ def compute_cross_sensor_signals(
             "acc_correlation",
             "acc_ratio",
             "vertical_diff",
-            "disagree_score",
+            "disagree_acc_norm",
+            "disagree_gyro_norm",
+            "disagree_combined_heuristic",
         ])
 
     dt_ms = 1000.0 / sample_rate_hz
@@ -265,6 +307,12 @@ def compute_cross_sensor_signals(
     arduino_acc = _interp_series(arduino_df, "acc_norm", common_ts)
     sporsa_gyro = _interp_series(sporsa_df, "gyro_norm", common_ts)
     arduino_gyro = _interp_series(arduino_df, "gyro_norm", common_ts)
+    s_acc_dev = _interp_series(sporsa_df, "acc_deviation", common_ts)
+    a_acc_dev = _interp_series(arduino_df, "acc_deviation", common_ts)
+    s_gyro_hf = _interp_series(sporsa_df, "gyro_hf", common_ts) if "gyro_hf" in sporsa_df.columns else sporsa_gyro
+    a_gyro_hf = _interp_series(arduino_df, "gyro_hf", common_ts) if "gyro_hf" in arduino_df.columns else arduino_gyro
+    s_gyro = sporsa_gyro
+    a_gyro = arduino_gyro
     sporsa_vert = _interp_series(sporsa_df, "acc_vertical", common_ts)
     arduino_vert = _interp_series(arduino_df, "acc_vertical", common_ts)
 
@@ -292,6 +340,27 @@ def compute_cross_sensor_signals(
     gyro_diff_max = np.nanmax(gyro_diff) if np.any(np.isfinite(gyro_diff)) else np.nan
     acc_diff_norm = acc_diff / (acc_diff_max + 1e-9)
     gyro_diff_norm_scaled = gyro_diff / (gyro_diff_max + 1e-9)
-    out["disagree_score"] = 0.6 * acc_diff_norm + 0.4 * gyro_diff_norm_scaled
+    out["disagree_acc_norm"] = acc_diff_norm
+    out["disagree_gyro_norm"] = gyro_diff_norm_scaled
+    out["disagree_combined_heuristic"] = 0.6 * acc_diff_norm + 0.4 * gyro_diff_norm_scaled
+
+    # Bounded dominance scores (+ rider/arduino dominant, - bike/sporsa dominant).
+    out["acc_dominance"] = (a_acc_dev - s_acc_dev) / (a_acc_dev + s_acc_dev + _DOM_EPS)
+    out["gyro_dominance"] = (a_gyro - s_gyro) / (a_gyro + s_gyro + _DOM_EPS)
+
+    # Rolling lag-aware xcorr on transient-centric channels.
+    xcorr_window = max(int(2.0 * sample_rate_hz), 4)
+    max_lag_samples = max(int(0.5 * sample_rate_hz), 1)
+    acc_xcorr, acc_lag = _rolling_lagged_xcorr(
+        s_acc_dev, a_acc_dev, window=xcorr_window, max_lag_samples=max_lag_samples,
+    )
+    out["xcorr_acc_max"] = acc_xcorr
+    out["xcorr_acc_lag_s"] = acc_lag / sample_rate_hz
+
+    gyro_xcorr, gyro_lag = _rolling_lagged_xcorr(
+        s_gyro_hf, a_gyro_hf, window=xcorr_window, max_lag_samples=max_lag_samples,
+    )
+    out["xcorr_gyro_max"] = gyro_xcorr
+    out["xcorr_gyro_lag_s"] = gyro_lag / sample_rate_hz
 
     return out

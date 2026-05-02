@@ -20,7 +20,9 @@ import pandas as pd
 
 from common.paths import (
     iter_sections_for_recording,
+    parse_section_folder_name,
     read_csv,
+    recording_stage_dir,
     section_labels_csv,
     write_csv,
 )
@@ -59,6 +61,24 @@ def _load_calibration_json(path: Path) -> dict[str, Any]:
     except Exception as exc:
         log.warning("Failed to load calibration.json at %s: %s", path, exc)
         return {}
+
+
+def _load_sync_metadata(section_id: str) -> dict[str, Any]:
+    try:
+        rec_name, _ = parse_section_folder_name(section_id)
+    except Exception:
+        return {}
+    return _load_calibration_json(recording_stage_dir(rec_name, "synced") / "sync_info.json")
+
+
+def _sensor_saturation(window_df: pd.DataFrame, kind: str, full_scale: float = 2000.0, frac: float = 0.95) -> tuple[float, int]:
+    axes = ("ax", "ay", "az") if kind == "acc" else ("gx", "gy", "gz")
+    if window_df is None or window_df.empty or any(c not in window_df.columns for c in axes):
+        return float("nan"), 0
+    arr = window_df[list(axes)].to_numpy(dtype=float)
+    sat = np.any(np.abs(arr) >= full_scale * frac, axis=1)
+    f = float(np.mean(sat)) if len(sat) > 0 else float("nan")
+    return f, int(f >= 0.01) if np.isfinite(f) else 0
 
 
 def _slice_by_time(
@@ -170,6 +190,8 @@ def extract_features_for_section(
     if sporsa_df.empty:
         log.warning("Sporsa calibrated data is empty for %s.", section_id)
         return pd.DataFrame()
+    t_min = float(sporsa_df["timestamp"].iloc[0])
+    t_max = float(sporsa_df["timestamp"].iloc[-1])
 
     # ------------------------------------------------------------------
     # Load derived signals (optional).
@@ -231,12 +253,26 @@ def extract_features_for_section(
     # It was previously read as sporsa yaw_confidence from a different path;
     # the explicit extraction above replaces the old fragile fallback chain.
     sync_confidence = yaw_conf_sporsa
+    sync_meta = _load_sync_metadata(section_id)
+    orient_stats = _load_calibration_json((section_dir / "orientation" / "orientation_stats.json"))
+    quality_meta_base = {
+        "synchronization_method": sync_meta.get("sync_method"),
+        "synchronization_correlation": (sync_meta.get("correlation") or {}).get("offset_and_drift"),
+        "synchronization_drift_ppm": sync_meta.get("drift_ppm"),
+        "orientation_quality_sporsa": ((orient_stats.get("sensors") or {}).get("sporsa") or {}).get("quality"),
+        "orientation_quality_arduino": ((orient_stats.get("sensors") or {}).get("arduino") or {}).get("quality"),
+        "gravity_residual_sporsa": ((orient_stats.get("sensors") or {}).get("sporsa") or {}).get("gravity_residual_ms2"),
+        "gravity_residual_arduino": ((orient_stats.get("sensors") or {}).get("arduino") or {}).get("gravity_residual_ms2"),
+        "magnetometer_available_sporsa": bool("mx" in sporsa_df.columns),
+        "magnetometer_available_arduino": bool("mx" in arduino_df.columns),
+        "dropout_rate_sporsa": float(max(0.0, 1.0 - len(sporsa_df) / max(1.0, (t_max - t_min) / 1000.0 * sample_rate_hz))),
+        "dropout_rate_arduino": float(max(0.0, 1.0 - len(arduino_df) / max(1.0, (t_max - t_min) / 1000.0 * sample_rate_hz))) if not arduino_df.empty else float("nan"),
+        "orientation_dependent_valid": bool(not orient_sporsa_df.empty and not orient_arduino_df.empty),
+    }
 
     # ------------------------------------------------------------------
     # Build sliding windows.
     # ------------------------------------------------------------------
-    t_min = float(sporsa_df["timestamp"].iloc[0])
-    t_max = float(sporsa_df["timestamp"].iloc[-1])
 
     window_ms = window_s * 1000.0
     hop_ms = hop_s * 1000.0
@@ -304,6 +340,15 @@ def extract_features_for_section(
                     continue
 
         try:
+            acc_sat_frac, acc_sat_flag = _sensor_saturation(w_arduino if not w_arduino.empty else w_sporsa, "acc", full_scale=16 * 9.81)
+            gyro_sat_frac, gyro_sat_flag = _sensor_saturation(w_arduino if not w_arduino.empty else w_sporsa, "gyro", full_scale=2000.0)
+            quality_meta = dict(quality_meta_base)
+            quality_meta.update({
+                "acc_saturation_fraction": acc_sat_frac,
+                "gyro_saturation_fraction": gyro_sat_frac,
+                "acc_saturation_flag": acc_sat_flag,
+                "gyro_saturation_flag": gyro_sat_flag,
+            })
             feat_dict = extract_window_features(
                 window_sporsa=w_sporsa,
                 window_arduino=w_arduino,
@@ -323,6 +368,7 @@ def extract_features_for_section(
                 yaw_conf_arduino=yaw_conf_arduino,
                 labels_df=labels_df if not labels_df.empty else None,
                 label_config=label_config,
+                quality_metadata=quality_meta,
             )
             rows.append(feat_dict)
         except Exception as exc:
