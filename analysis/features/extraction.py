@@ -25,7 +25,7 @@ import logging
 
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks, welch
+from scipy.signal import find_peaks, peak_widths, welch
 
 from .cross_sensor import cross_sensor_features
 from .label_config import LabelConfig, default_label_config
@@ -62,7 +62,13 @@ except AttributeError:
 
 
 def _peak_features(prefix: str, arr: np.ndarray) -> dict[str, float]:
-    out = {f"{prefix}_peak_count": 0.0, f"{prefix}_peak_max": float("nan"), f"{prefix}_peak_prominence_mean": float("nan"), f"{prefix}_peak_prominence_max": float("nan"), f"{prefix}_peak_width_mean": float("nan")}
+    out = {
+        f"{prefix}_peak_count": 0.0,
+        f"{prefix}_peak_max": float("nan"),
+        f"{prefix}_peak_prominence_mean": float("nan"),
+        f"{prefix}_peak_prominence_max": float("nan"),
+        f"{prefix}_peak_width_mean": float("nan"),
+    }
     x = arr[np.isfinite(arr)]
     if len(x) < 4:
         return out
@@ -71,7 +77,7 @@ def _peak_features(prefix: str, arr: np.ndarray) -> dict[str, float]:
     if len(pidx) > 0:
         out[f"{prefix}_peak_max"] = float(np.max(x[pidx]))
         prom = props.get("prominences", np.array([], dtype=float))
-        widths = props.get("widths", np.array([], dtype=float))
+        widths = peak_widths(x, pidx, rel_height=0.5)[0]
         out[f"{prefix}_peak_prominence_mean"] = float(np.mean(prom)) if prom.size else float("nan")
         out[f"{prefix}_peak_prominence_max"] = float(np.max(prom)) if prom.size else float("nan")
         out[f"{prefix}_peak_width_mean"] = float(np.mean(widths)) if widths.size else float("nan")
