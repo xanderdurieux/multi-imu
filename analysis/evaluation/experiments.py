@@ -36,6 +36,7 @@ from features.labels import (
     to_activity_label,
     to_binary_label,
     to_coarse_label,
+    to_riding_label,
     to_set_based_label,
 )
 
@@ -43,7 +44,35 @@ _DERIVED_LABEL_MAPPERS: dict[str, Any] = {
     "scenario_label_activity": to_activity_label,
     "scenario_label_coarse": to_coarse_label,
     "scenario_label_binary": to_binary_label,
+    "scenario_label_riding": to_riding_label,
+    "scenario_label_cornering": None,
+    "scenario_label_head_motion": None,
 }
+
+
+def _label_tokens(raw: str) -> set[str]:
+    """Return normalized label tokens from a pipe-delimited overlap string."""
+    return {token.strip() for token in str(raw or "").split("|") if token.strip()}
+
+
+def _derive_cornering_label(raw: str) -> str:
+    """Return a cornering vs non-cornering label from an overlap set."""
+    tokens = _label_tokens(raw)
+    if not tokens:
+        return "unlabeled"
+    if "cornering" in tokens:
+        return "cornering"
+    return "non_cornering"
+
+
+def _derive_head_motion_label(raw: str) -> str:
+    """Return a head-motion vs non-head-motion label from an overlap set."""
+    tokens = _label_tokens(raw)
+    if not tokens:
+        return "unlabeled"
+    if tokens & {"head_movement", "shoulder_check"}:
+        return "head_motion"
+    return "non_head_motion"
 
 log = logging.getLogger(__name__)
 
@@ -519,6 +548,17 @@ def run_evaluation(
                         config=cfg_labels,
                     )
                 )
+            elif label_col == "scenario_label_riding":
+                df[label_col] = token_series.map(
+                    lambda s: to_riding_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            elif label_col == "scenario_label_cornering":
+                df[label_col] = token_series.map(_derive_cornering_label)
+            elif label_col == "scenario_label_head_motion":
+                df[label_col] = token_series.map(_derive_head_motion_label)
             log.info("Derived %s from scenario_labels (multi-label set)", label_col)
         else:
             # If the requested label_col is not a known derived scheme and it
