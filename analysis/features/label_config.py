@@ -51,6 +51,7 @@ class LabelConfig:
     """Resolved scenario-label priority and derived-label mappings."""
 
     label_priority: tuple[str, ...]
+    ignored_labels: frozenset[str]
     derived_maps: dict[str, dict[str, str]]
     unlabeled_values: dict[str, str]
     unknown_values: dict[str, str]
@@ -66,6 +67,16 @@ class LabelConfig:
         """Return priority rank."""
         return {label: idx for idx, label in enumerate(self.label_priority)}
 
+    def filter_tokens(self, tokens: set[str]) -> set[str]:
+        """Return tokens excluding ignored labels and empty markers."""
+        return {
+            token
+            for token in tokens
+            if token
+            and token.lower() not in {"nan", "none", "unlabeled"}
+            and token not in self.ignored_labels
+        }
+
     def set_based_scheme(self, name: str) -> SetBasedBinaryScheme | None:
         """Return set based scheme."""
         return next((s for s in self.set_based_schemes if s.name == name), None)
@@ -79,7 +90,12 @@ class LabelConfig:
         """Map a fine scenario label to *scheme* using the configured rules."""
         label = str(fine_label or "").strip()
         unlabeled = self.unlabeled_values.get(scheme, "unlabeled")
-        if not label or label.lower() in {"nan", "none"} or label == "unlabeled":
+        if (
+            not label
+            or label.lower() in {"nan", "none"}
+            or label == "unlabeled"
+            or label in self.ignored_labels
+        ):
             return unlabeled
 
         if scheme == "scenario_label_binary":
@@ -103,11 +119,13 @@ class LabelConfig:
 
     def map_label_set(self, scheme: str, fine_labels) -> str:
         """Map label set."""
-        tokens = {
-            str(t).strip()
-            for t in (fine_labels or ())
-            if str(t).strip() and str(t).strip().lower() not in {"nan", "none", "unlabeled"}
-        }
+        tokens = self.filter_tokens(
+            {
+                str(t).strip()
+                for t in (fine_labels or ())
+                if str(t).strip()
+            }
+        )
 
         sb = self.set_based_scheme(scheme)
         if sb is not None:
@@ -192,6 +210,14 @@ def _build(payload: dict[str, Any]) -> LabelConfig:
     """Build."""
     priority = _string_list(payload.get("label_priority"), field_name="label_priority")
 
+    ignored_raw = payload.get("ignored_labels")
+    if ignored_raw is None:
+        ignored_labels = frozenset()
+    else:
+        ignored_labels = frozenset(
+            _string_list(ignored_raw, field_name="ignored_labels") if ignored_raw else ()
+        )
+
     derived = payload.get("derived_labels")
     if not isinstance(derived, dict):
         raise ValueError("label config: missing 'derived_labels' object.")
@@ -240,6 +266,7 @@ def _build(payload: dict[str, Any]) -> LabelConfig:
 
     return LabelConfig(
         label_priority=priority,
+        ignored_labels=ignored_labels,
         derived_maps=derived_maps,
         unlabeled_values=unlabeled_values,
         unknown_values=unknown_values,

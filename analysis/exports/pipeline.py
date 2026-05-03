@@ -136,12 +136,17 @@ def _recording_count(df: pd.DataFrame) -> int:
 def aggregate_features(
     recording_names: list[str] | None = None,
     *,
-    min_quality_label: str = "marginal",
+    min_quality_label: str | None = None,
 ) -> pd.DataFrame:
-    """Aggregate features."""
-    if min_quality_label not in _QUALITY_ORDER:
+    """Aggregate features.
+
+    If `min_quality_label` is None then no quality filter is applied and all
+    extracted windows are retained. Otherwise only windows with
+    `overall_quality_label` >= `min_quality_label` are kept.
+    """
+    if min_quality_label is not None and min_quality_label not in _QUALITY_ORDER:
         raise ValueError(
-            f"min_quality_label must be one of {_QUALITY_ORDER}, got {min_quality_label!r}"
+            f"min_quality_label must be one of {_QUALITY_ORDER} or None, got {min_quality_label!r}"
         )
 
     root = sections_root()
@@ -191,22 +196,23 @@ def aggregate_features(
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # Apply quality filter
-    if "overall_quality_label" in combined.columns:
-        min_idx = _QUALITY_ORDER.index(min_quality_label)
-        valid_labels = set(_QUALITY_ORDER[min_idx:])
-        before = len(combined)
-        combined = combined[combined["overall_quality_label"].isin(valid_labels)].copy()
-        log.info(
-            "Quality filter (>= %s): %d → %d rows",
-            min_quality_label,
-            before,
-            len(combined),
-        )
-    else:
-        log.warning(
-            "Column 'overall_quality_label' not found; skipping quality filter"
-        )
+    # Apply quality filter (optional)
+    if min_quality_label is not None:
+        if "overall_quality_label" in combined.columns:
+            min_idx = _QUALITY_ORDER.index(min_quality_label)
+            valid_labels = set(_QUALITY_ORDER[min_idx:])
+            before = len(combined)
+            combined = combined[combined["overall_quality_label"].isin(valid_labels)].copy()
+            log.info(
+                "Quality filter (>= %s): %d → %d rows",
+                min_quality_label,
+                before,
+                len(combined),
+            )
+        else:
+            log.warning(
+                "Column 'overall_quality_label' not found; skipping quality filter"
+            )
 
     combined.reset_index(drop=True, inplace=True)
     log.info("Aggregated %d rows from %d section(s)", len(combined), len(frames))
@@ -218,6 +224,7 @@ def export_feature_tables(
     output_dir: Path,
     *,
     recording_names: list[str] | None = None,
+    min_quality_label: str | None = None,
 ) -> tuple[dict[str, Path], pd.DataFrame, pd.DataFrame]:
     """Export feature tables."""
     output_dir = Path(output_dir)
@@ -304,7 +311,7 @@ def export_feature_tables(
 
     manifest = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "filtering_policy": "min_quality_label=marginal",
+        "filtering_policy": f"min_quality_label={min_quality_label}",
         "total_sections": int(n_sections),
         "total_windows": int(len(df_for_manifest)),
         "total_recordings": _recording_count(df_for_manifest),
@@ -327,7 +334,7 @@ def run_exports(
     recording_names: list[str] | None = None,
     *,
     output_dir: Path | None = None,
-    min_quality_label: str = "marginal",
+    min_quality_label: str | None = None,
     force: bool = False,
     no_plots: bool = False,
 ) -> dict[str, Path]:
@@ -410,7 +417,9 @@ def run_exports(
         log.warning("No features after aggregation; skipping feature tables and EDA plots.")
         return paths
 
-    feature_paths, _, _ = export_feature_tables(df, output_dir, recording_names=recording_names)
+    feature_paths, _, _ = export_feature_tables(
+        df, output_dir, recording_names=recording_names, min_quality_label=min_quality_label
+    )
     paths.update(feature_paths)
 
     if not no_plots:

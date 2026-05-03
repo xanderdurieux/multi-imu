@@ -45,6 +45,8 @@ class WorkflowConfig:
     label_config_path: str = ""
     window_s: float = 2.0
     hop_s: float = 1.0
+    event_aligned: bool = True       # add event-centred windows for labelled events
+    lag_features_n_lags: int = 0     # 0 = disabled; 2 = add lag-1 and lag-2 context columns
 
     # Orchestration toggles
     no_plots: bool = False
@@ -57,14 +59,16 @@ class WorkflowConfig:
     # Sweep over the cross-product of {evaluation_label_col} × {quality_levels}.
     # Empty list = use the run's primary quality only (no sweep on that axis).
     evaluation_quality_levels: list[str] = field(
-        default_factory=lambda: ["poor", "marginal", "good"]
+        default_factory= lambda: ["good"]
     )
+
     # Models to compute permutation importance for (per-feature-set).  Limit
     # to one tree-ensemble model by default — running it for every model
     # roughly triples evaluation runtime.
     evaluation_permutation_models: list[str] = field(
-        default_factory=lambda: ["random_forest"]
-    )
+        default_factory=lambda: ["hist_gradient_boosting"]
+    ) # "random_forest"|"hist_gradient_boosting"|"logistic_regression"
+
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
 

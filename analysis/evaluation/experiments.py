@@ -32,16 +32,13 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from common.paths import project_relative_path, read_csv, write_csv
 from features.label_config import default_label_config
 from features.labels import (
+    resolve_label_from_tokens,
     to_activity_label,
     to_binary_label,
     to_coarse_label,
     to_set_based_label,
 )
 
-# Single-label fallback mappers when *label_col* is missing and the scheme is
-# resolved from the priority-collapsed ``scenario_label`` only.  Set-based
-# schemes (registered in labels.default.json) are derived from the pipe-split
-# ``scenario_labels`` column instead — see :func:`run_evaluation`.
 _DERIVED_LABEL_MAPPERS: dict[str, Any] = {
     "scenario_label_activity": to_activity_label,
     "scenario_label_coarse": to_coarse_label,
@@ -478,16 +475,14 @@ def run_evaluation(
         df = df[df["overall_quality_label"].isin(valid)].copy()
         log.info("Quality filter: %d → %d rows", before, len(df))
 
-    # Derive missing label columns on the fly so older feature tables stay
-    # usable without a full re-extraction.
-    if label_col not in df.columns:
-        cfg_labels = default_label_config()
+    # Derive label columns on the fly from the full overlap set (`scenario_labels`)
+    # when available. This ensures the evaluation stage can adapt target
+    # selection (including ignored fine labels and set-based schemes) without
+    # requiring the features stage to be re-run.
+    cfg_labels = default_label_config()
+    if "scenario_labels" in df.columns:
+        # Prefer deriving from the multi-label overlap set whenever possible.
         if label_col in cfg_labels.set_based_scheme_names:
-            if "scenario_labels" not in df.columns:
-                raise ValueError(
-                    f"Cannot derive {label_col!r}: column 'scenario_labels' missing "
-                    "(set-based schemes require the pipe-delimited overlap set)."
-                )
             df[label_col] = (
                 df["scenario_labels"]
                 .fillna("unlabeled")
@@ -502,28 +497,76 @@ def run_evaluation(
             )
             log.info("Derived %s from scenario_labels (multi-label set)", label_col)
         elif label_col in _DERIVED_LABEL_MAPPERS:
-            if "scenario_label" not in df.columns:
-                raise ValueError(
-                    f"Cannot derive {label_col!r}: source column 'scenario_label' missing."
+            token_series = df["scenario_labels"].fillna("unlabeled").astype(str)
+            if label_col == "scenario_label_activity":
+                df[label_col] = token_series.map(
+                    lambda s: to_activity_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
                 )
-            mapper = _DERIVED_LABEL_MAPPERS[label_col]
-            df[label_col] = (
-                df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
-            )
-            log.info("Derived %s from scenario_label", label_col)
+            elif label_col == "scenario_label_coarse":
+                df[label_col] = token_series.map(
+                    lambda s: to_coarse_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            elif label_col == "scenario_label_binary":
+                df[label_col] = token_series.map(
+                    lambda s: to_binary_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            log.info("Derived %s from scenario_labels (multi-label set)", label_col)
+        else:
+            # If the requested label_col is not a known derived scheme and it
+            # already exists in the frame, keep it; otherwise it will be
+            # handled by the existing presence check below.
+            pass
+    else:
+        # Fallback: derive from a pre-collapsed `scenario_label` when the
+        # multi-label set is not present (legacy feature tables).
+        if label_col not in df.columns:
+            if label_col in cfg_labels.set_based_scheme_names:
+                raise ValueError(
+                    f"Cannot derive {label_col!r}: column 'scenario_labels' missing "
+                    "(set-based schemes require the pipe-delimited overlap set)."
+                )
+            elif label_col in _DERIVED_LABEL_MAPPERS:
+                if "scenario_label" in df.columns:
+                    mapper = _DERIVED_LABEL_MAPPERS[label_col]
+                    df[label_col] = (
+                        df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
+                    )
+                    log.info("Derived %s from scenario_label", label_col)
+                else:
+                    # Will be caught by the presence check below.
+                    pass
 
     if exclude_non_riding:
         binary_col = "scenario_label_binary"
         if binary_col not in df.columns:
-            if "scenario_label" not in df.columns:
+            if "scenario_labels" in df.columns:
+                cfg_labels = default_label_config()
+                df[binary_col] = df["scenario_labels"].fillna("unlabeled").astype(str).map(
+                    lambda s: to_binary_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+                log.info("Derived %s from scenario_labels", binary_col)
+            elif "scenario_label" in df.columns:
+                df[binary_col] = (
+                    df["scenario_label"].fillna("unlabeled").astype(str).map(to_binary_label)
+                )
+                log.info("Derived %s from scenario_label", binary_col)
+            else:
                 raise ValueError(
                     "Cannot exclude non-riding windows: source column "
                     "'scenario_label' missing."
                 )
-            df[binary_col] = (
-                df["scenario_label"].fillna("unlabeled").astype(str).map(to_binary_label)
-            )
-            log.info("Derived %s from scenario_label", binary_col)
         before = len(df)
         df = df[df[binary_col] != "non_riding"].copy()
         log.info("Excluded non-riding rows: %d → %d", before, len(df))

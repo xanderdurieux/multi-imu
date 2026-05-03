@@ -13,6 +13,7 @@ from .label_config import LabelConfig, default_label_config
 from .labels import (
     label_feature,
     label_feature_set,
+    resolve_label_from_tokens,
     to_activity_label,
     to_binary_label,
     to_coarse_label,
@@ -21,6 +22,7 @@ from .labels import (
 from .orientation_features import orientation_cross_features, orientation_features
 from .quality import quality_features
 from .spectral import spectral_features
+from .temporal import temporal_features
 from .stats_helpers import (
     cross_window_valid_ratio,
     get_col,
@@ -34,6 +36,7 @@ _SENSOR_SIGNALS = ("acc_norm", "gyro_norm", "acc_vertical", "acc_hf", "jerk_norm
 _SPECTRAL_SIGNALS = ("acc_norm", "gyro_norm", "acc_hf", "gyro_hf")
 _SENSOR_PREFIX = {"sporsa": "bike", "arduino": "rider"}
 _PEAK_SIGNALS = ("acc_deviation", "acc_hf", "jerk_norm", "gyro_norm", "alpha_norm", "energy_acc")
+_TEMPORAL_SIGNALS = ("acc_norm", "jerk_norm", "gyro_norm")
 _BANDS = ((0.5, 2.0), (2.0, 8.0), (8.0, 20.0))
 
 try:
@@ -161,6 +164,29 @@ def extract_window_features(
             feats.update(signal_stats(f"{prefix_root}_{signal}", arr))
 
     # ------------------------------------------------------------------
+    # 3b. Temporal shape features - per sensor, per signal
+    # ------------------------------------------------------------------
+    for sensor, sig_df in signal_dfs.items():
+        prefix_root = _SENSOR_PREFIX[sensor]
+        for signal in _TEMPORAL_SIGNALS:
+            feats.update(temporal_features(f"{prefix_root}_{signal}", get_col(sig_df, signal)))
+
+    # Yaw-rate temporal features from orientation (signed signal → sign_consistency is informative).
+    for orient_df, sensor_prefix in (
+        (window_orientation_sporsa, "bike"),
+        (window_orientation_arduino, "rider"),
+    ):
+        if orient_df is not None and not orient_df.empty:
+            if "gyro_world_z_dps" in orient_df.columns:
+                yaw_arr = orient_df["gyro_world_z_dps"].to_numpy(dtype=float)
+            elif "yaw_deg" in orient_df.columns:
+                yaw_deg = orient_df["yaw_deg"].to_numpy(dtype=float)
+                yaw_arr = np.gradient(yaw_deg) * sample_rate_hz
+            else:
+                yaw_arr = np.array([], dtype=float)
+            feats.update(temporal_features(f"{sensor_prefix}_yaw_rate", yaw_arr))
+
+    # ------------------------------------------------------------------
     # 4. Spectral features
     # ------------------------------------------------------------------
     for sensor, sig_df in signal_dfs.items():
@@ -209,6 +235,8 @@ def extract_window_features(
     label_set = label_feature_set(labels_df, window_start_ms, window_end_ms)
     fine = label_feature(labels_df, window_start_ms, window_end_ms, config=cfg)
     feats["scenario_labels"] = "|".join(label_set) if label_set else "unlabeled"
+    if fine == "unlabeled" and label_set:
+        fine = resolve_label_from_tokens(label_set, config=cfg)
     feats["scenario_label"] = fine
     feats["scenario_label_activity"] = to_activity_label(fine, config=cfg)
     feats["scenario_label_coarse"] = to_coarse_label(fine, config=cfg)

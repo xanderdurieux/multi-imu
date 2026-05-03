@@ -200,6 +200,8 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     hop_s=cfg.hop_s,
                     label_set=cfg.label_set,
                     label_config_path=cfg.label_config_path or None,
+                    event_aligned=cfg.event_aligned,
+                    n_lags=cfg.lag_features_n_lags,
                     force=cfg.force,
                 )
                 result["ok"] += 1
@@ -216,9 +218,11 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
     elif stage == "exports" and not cfg.skip_exports:
         from exports.pipeline import run_exports
         try:
+            # Exports should write the full feature set (no quality filtering)
+            # so evaluation strategies can be changed without re-running features.
             run_exports(
                 recordings,
-                min_quality_label=cfg.min_quality_label,
+                min_quality_label=None,
                 force=cfg.force,
                 no_plots=cfg.no_plots,
             )

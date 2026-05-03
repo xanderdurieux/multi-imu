@@ -23,6 +23,7 @@ from labels.parser import load_labels
 from labels.section_transfer import transfer_labels_to_sections
 from .extraction import extract_window_features
 from .label_config import default_label_config, load_label_config
+from .lag_features import add_lag_features
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +106,9 @@ def _load_labels_for_section(section_dir: Path) -> pd.DataFrame:
 # Main section-level function
 # ---------------------------------------------------------------------------
 
+_BACKGROUND_LABELS: frozenset[str] = frozenset({"non_riding", "calibration", "riding", "unlabeled", ""})
+
+
 def extract_features_for_section(
     section_dir: Path,
     *,
@@ -113,6 +117,8 @@ def extract_features_for_section(
     min_samples: int = 10,
     sample_rate_hz: float = _SAMPLE_RATE_HZ_DEFAULT,
     label_config_path: Path | str | None = None,
+    event_aligned: bool = True,
+    n_lags: int = 0,
     force: bool = False,
 ) -> pd.DataFrame:
     """Return extract features for section."""
@@ -342,6 +348,7 @@ def extract_features_for_section(
                 label_config=label_config,
                 quality_metadata=quality_meta,
             )
+            feat_dict["window_type"] = "sliding"
             rows.append(feat_dict)
         except Exception as exc:
             log.error(
@@ -351,6 +358,134 @@ def extract_features_for_section(
                 t_start,
                 t_end,
                 exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Event-aligned windows.
+    #
+    # For each annotated event span that is not background riding, create
+    # an additional window centred on the event midpoint.  This gives the
+    # classifier a view where the event is always in a consistent position
+    # within the window — something sliding windows cannot guarantee when
+    # the hop size is larger than the event duration.
+    #
+    # Event-aligned windows are marked window_type="event_aligned" so they
+    # can be kept separate for training (where labels are known) or dropped
+    # for inference (where only sliding windows are used).
+    # ------------------------------------------------------------------
+    n_event_aligned = 0
+    if event_aligned and not labels_df.empty:
+        window_ms = window_s * 1000.0
+        ea_idx_start = len(rows)
+        label_col = (
+            "scenario_label"
+            if "scenario_label" in labels_df.columns
+            else "label"
+            if "label" in labels_df.columns
+            else None
+        )
+
+        if label_col is not None:
+            for ea_offset, (_, lrow) in enumerate(labels_df.iterrows()):
+                raw_label = str(lrow.get(label_col, "")).strip()
+                for token in raw_label.split("|"):
+                    token = token.strip()
+                    if token and token not in _BACKGROUND_LABELS:
+                        break
+                else:
+                    continue  # all tokens are background – skip
+
+                ev_start = float(lrow.get("start_ms", float("nan")))
+                ev_end = float(lrow.get("end_ms", float("nan")))
+                if not (np.isfinite(ev_start) and np.isfinite(ev_end) and ev_end > ev_start):
+                    continue
+
+                mid_ms = (ev_start + ev_end) / 2.0
+                t_start = mid_ms - window_ms / 2.0
+                t_end = t_start + window_ms
+
+                # Clamp to recording bounds.
+                if t_start < t_min:
+                    t_start = t_min
+                    t_end = t_start + window_ms
+                if t_end > t_max:
+                    t_end = t_max
+                    t_start = t_end - window_ms
+
+                if t_end - t_start < window_ms * 0.75:
+                    continue
+
+                w_sporsa = _slice_by_time(sporsa_df, t_start, t_end)
+                if len(w_sporsa) < min_samples:
+                    continue
+
+                w_arduino = _slice_by_time(arduino_df, t_start, t_end)
+                w_sporsa_sig = _slice_by_time(sporsa_signals_df, t_start, t_end)
+                w_arduino_sig = _slice_by_time(arduino_signals_df, t_start, t_end)
+                w_cross = _slice_by_time(cross_df, t_start, t_end)
+                w_orient_sporsa = (
+                    _slice_by_time(orient_sporsa_df, t_start, t_end)
+                    if not orient_sporsa_df.empty
+                    else None
+                )
+                w_orient_arduino = (
+                    _slice_by_time(orient_arduino_df, t_start, t_end)
+                    if not orient_arduino_df.empty
+                    else None
+                )
+
+                try:
+                    acc_sat_frac, acc_sat_flag = _sensor_saturation(
+                        w_arduino if not w_arduino.empty else w_sporsa, "acc", full_scale=16 * 9.81
+                    )
+                    gyro_sat_frac, gyro_sat_flag = _sensor_saturation(
+                        w_arduino if not w_arduino.empty else w_sporsa, "gyro", full_scale=2000.0
+                    )
+                    quality_meta = dict(quality_meta_base)
+                    quality_meta.update({
+                        "acc_saturation_fraction": acc_sat_frac,
+                        "gyro_saturation_fraction": gyro_sat_frac,
+                        "acc_saturation_flag": acc_sat_flag,
+                        "gyro_saturation_flag": gyro_sat_flag,
+                    })
+                    feat_dict = extract_window_features(
+                        window_sporsa=w_sporsa,
+                        window_arduino=w_arduino,
+                        window_sporsa_signals=w_sporsa_sig,
+                        window_arduino_signals=w_arduino_sig,
+                        window_cross=w_cross,
+                        window_orientation_sporsa=w_orient_sporsa,
+                        window_orientation_arduino=w_orient_arduino,
+                        section_id=section_id,
+                        window_start_ms=float(t_start),
+                        window_end_ms=float(t_end),
+                        window_idx=ea_idx_start + ea_offset,
+                        sample_rate_hz=sample_rate_hz,
+                        calibration_quality=calibration_quality,
+                        sync_confidence=sync_confidence,
+                        yaw_conf_sporsa=yaw_conf_sporsa,
+                        yaw_conf_arduino=yaw_conf_arduino,
+                        labels_df=labels_df if not labels_df.empty else None,
+                        label_config=label_config,
+                        quality_metadata=quality_meta,
+                    )
+                    feat_dict["window_type"] = "event_aligned"
+                    rows.append(feat_dict)
+                    n_event_aligned += 1
+                except Exception as exc:
+                    log.error(
+                        "Event-aligned extraction failed for %s [%.1f–%.1f ms]: %s",
+                        section_id,
+                        t_start,
+                        t_end,
+                        exc,
+                    )
+
+        if n_event_aligned > 0:
+            log.info(
+                "%s: added %d event-aligned windows.",
+                section_id,
+                n_event_aligned,
             )
 
     if skipped_min_samples > 0:
@@ -374,6 +509,10 @@ def extract_features_for_section(
     features_dir.mkdir(parents=True, exist_ok=True)
     features_df = pd.DataFrame(rows)
 
+    if n_lags > 0:
+        features_df = add_lag_features(features_df, n_lags=n_lags)
+        log.info("%s: added lag features (n_lags=%d).", section_id, n_lags)
+
     write_csv(features_df, features_csv)
     log.info("Wrote %d windows to %s", len(features_df), features_csv)
 
@@ -383,10 +522,14 @@ def extract_features_for_section(
     stats: dict[str, Any] = {
         "section_id": section_id,
         "n_windows": len(features_df),
+        "n_windows_sliding": int((features_df["window_type"] == "sliding").sum()) if "window_type" in features_df.columns else len(features_df),
+        "n_windows_event_aligned": n_event_aligned,
         "n_windows_skipped_min_samples": skipped_min_samples,
         "n_windows_skipped_all_nan": skipped_all_nan,
         "window_s": window_s,
         "hop_s": hop_s,
+        "event_aligned": event_aligned,
+        "lag_features_n_lags": n_lags,
         "min_samples": min_samples,
         "sample_rate_hz": sample_rate_hz,
         "recording_duration_s": round((t_max - t_min) / 1000.0, 3),

@@ -40,12 +40,29 @@ def _raw_labels_and_overlaps(
     return out
 
 
+def _filter_tokens(tokens: list[str], config: LabelConfig | None = None) -> list[str]:
+    """Return tokens after removing ignored labels and unlabeled markers."""
+    cfg = config or default_label_config()
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        token = str(token).strip()
+        if not token or token.lower() in {"nan", "none", "unlabeled"}:
+            continue
+        if token in cfg.ignored_labels or token in seen:
+            continue
+        seen.add(token)
+        filtered.append(token)
+    return filtered
+
+
 def _well_contained_candidates(
     labels_df: pd.DataFrame | None,
     window_start_ms: float,
     window_end_ms: float,
     *,
     containment_threshold: float,
+    config: LabelConfig | None = None,
 ) -> list[tuple[str, float]]:
     """Return well contained candidates."""
     if labels_df is None or labels_df.empty:
@@ -74,7 +91,9 @@ def _well_contained_candidates(
         well_contained = overlapping
         well_overlap = overlap_ms
 
-    return _raw_labels_and_overlaps(well_contained, well_overlap)
+    candidates = _raw_labels_and_overlaps(well_contained, well_overlap)
+    cfg = config or default_label_config()
+    return [candidate for candidate in candidates if candidate[0] not in cfg.ignored_labels]
 
 
 def label_feature(
@@ -91,11 +110,13 @@ def label_feature(
         window_start_ms,
         window_end_ms,
         containment_threshold=containment_threshold,
+        config=config,
     )
     if not candidates:
         return "unlabeled"
 
-    priority_rank = (config or default_label_config()).priority_rank
+    cfg = config or default_label_config()
+    priority_rank = cfg.priority_rank
     return max(
         candidates,
         key=lambda t: (t[1], priority_rank.get(t[0], -1)),
@@ -126,6 +147,20 @@ def label_feature_set(
             seen.add(tok)
             tokens.append(tok)
     return tokens
+
+
+def resolve_label_from_tokens(
+    fine_labels,
+    *,
+    config: LabelConfig | None = None,
+) -> str:
+    """Resolve a dominant fine label from an overlap set."""
+    cfg = config or default_label_config()
+    tokens = _filter_tokens(list(fine_labels or ()), cfg)
+    if not tokens:
+        return "unlabeled"
+    ranked = sorted(tokens, key=lambda t: cfg.priority_rank.get(t, -1), reverse=True)
+    return ranked[0]
 
 
 def to_coarse_label(fine_label: str, config: LabelConfig | None = None) -> str:
