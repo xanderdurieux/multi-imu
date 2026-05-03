@@ -12,6 +12,7 @@ from .stats_helpers import get_col
 
 # Boundary used by cross_disagree_fraction; values above this count as "disagreeing".
 _DISAGREE_THRESH = 4.0
+_DISAGREE_SCORE_COLS = ("disagree_score", "disagree_combined_heuristic")
 
 
 def _linear_slope(arr: np.ndarray) -> float:
@@ -61,8 +62,9 @@ def cross_sensor_features(window_cross: pd.DataFrame | None) -> dict[str, Any]:
         feats["cross_acc_diff_mean"] = safe_mean(ad)
         feats["cross_acc_diff_std"] = safe_std(ad)
 
-    if "disagree_score" in window_cross.columns:
-        ds = get_col(window_cross, "disagree_score")
+    disagree_col = next((c for c in _DISAGREE_SCORE_COLS if c in window_cross.columns), None)
+    if disagree_col is not None:
+        ds = get_col(window_cross, disagree_col)
         feats["cross_disagree_score_mean"] = safe_mean(ds)
         feats["cross_disagree_score_max"] = safe_max(ds)
         feats["cross_disagree_score_std"] = safe_std(ds)

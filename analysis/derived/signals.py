@@ -205,6 +205,7 @@ def compute_cross_sensor_signals(
             "acc_correlation",
             "acc_ratio",
             "vertical_diff",
+            "disagree_score",
             "disagree_acc_norm",
             "disagree_gyro_norm",
             "disagree_combined_heuristic",
@@ -256,7 +257,9 @@ def compute_cross_sensor_signals(
     gyro_diff_norm_scaled = gyro_diff / (gyro_diff_max + 1e-9)
     out["disagree_acc_norm"] = acc_diff_norm
     out["disagree_gyro_norm"] = gyro_diff_norm_scaled
-    out["disagree_combined_heuristic"] = 0.6 * acc_diff_norm + 0.4 * gyro_diff_norm_scaled
+    disagree_score = 0.6 * acc_diff_norm + 0.4 * gyro_diff_norm_scaled
+    out["disagree_score"] = disagree_score
+    out["disagree_combined_heuristic"] = disagree_score
 
     # Bounded dominance scores (+ rider/arduino dominant, - bike/sporsa dominant).
     out["acc_dominance"] = (a_acc_dev - s_acc_dev) / (a_acc_dev + s_acc_dev + _DOM_EPS)

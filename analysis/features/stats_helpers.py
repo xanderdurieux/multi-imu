@@ -65,17 +65,12 @@ def cross_window_valid_ratio(window_cross: pd.DataFrame | None) -> float:
     """Return cross window valid ratio."""
     if window_cross is None or window_cross.empty:
         return 0.0
-    cols = [
-        c
-        for c in (
-            "acc_correlation",
-            "gyro_diff_norm",
-            "acc_diff_norm",
-            "disagree_score",
-            "acc_ratio",
-        )
-        if c in window_cross.columns
-    ]
+    candidates = ["acc_correlation", "gyro_diff_norm", "acc_diff_norm", "acc_ratio"]
+    if "disagree_score" in window_cross.columns:
+        candidates.append("disagree_score")
+    elif "disagree_combined_heuristic" in window_cross.columns:
+        candidates.append("disagree_combined_heuristic")
+    cols = [c for c in candidates if c in window_cross.columns]
     if not cols:
         return 1.0
     arr = window_cross[cols].to_numpy(dtype=float)
