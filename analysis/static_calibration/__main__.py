@@ -1,4 +1,4 @@
-"""``python -m static_calibration`` — run the default calibration pipeline."""
+"""Command-line entry point for static calibration."""
 
 from .run import main
 

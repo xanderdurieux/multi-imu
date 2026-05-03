@@ -36,31 +36,37 @@ META_COLS = frozenset({
 
 
 def label_colors(labels: list[str]) -> dict[str, tuple]:
+    """Return label colors."""
     cmap = plt.get_cmap(LABEL_CMAP)
     return {lbl: cmap(i % 10) for i, lbl in enumerate(sorted(labels))}
 
 
 def available(cols: list[str], df: pd.DataFrame) -> list[str]:
+    """Return available."""
     return [c for c in cols if c in df.columns]
 
 
 def short_section(name: str) -> str:
+    """Return short section."""
     parts = name.split("_")
     return "_".join(parts[-2:]) if len(parts) >= 2 else name
 
 
 def short_recording(name: str) -> str:
+    """Return short recording."""
     parts = name.split("_")
     return parts[-1] if parts else name
 
 
 def labeled_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Return labeled only."""
     if "scenario_label" not in df.columns:
         return pd.DataFrame()
     return df[df["scenario_label"].notna() & (df["scenario_label"] != "unlabeled")].copy()
 
 
 def session_from_row(name: str) -> str:
+    """Return session from row."""
     parts = name.rsplit("_", 1)
     if len(parts) == 2 and parts[1][:1] == "r" and parts[1][1:].isdigit():
         return parts[0]

@@ -1,9 +1,4 @@
-"""CLI entry point for the exports package.
-
-Usage::
-
-    python -m exports [--recording <name>] [--quality marginal] [--force]
-"""
+"""Command-line entry point for exports."""
 
 from __future__ import annotations
 
@@ -17,6 +12,7 @@ from exports.pipeline import run_exports
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     parser = argparse.ArgumentParser(
         prog="python -m exports",
         description="Aggregate section features and write split export tables.",
@@ -61,6 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command-line interface."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 

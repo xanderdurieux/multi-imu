@@ -1,23 +1,4 @@
-"""Orientation estimation pipeline for calibrated IMU sections.
-
-For each section:
-1. Load calibrated/{sensor}.csv and calibration.json.
-2. Initialise Mahony from the calibration body→world rotation matrix.
-3. Apply magnetometer hard/soft-iron correction where available.
-4. Run Mahony filter and score gravity residual in the known-static windows.
-5. Write per-sensor quaternion CSVs, a stats JSON, and comparison plots.
-
-Output layout
--------------
-::
-
-    orientation/
-        sporsa.csv               # quaternions + Euler angles
-        arduino.csv
-        orientation_stats.json   # residual, quality, parameters
-        sporsa_orientation.png
-        arduino_orientation.png
-"""
+"""Pipeline helpers for estimate sensor orientation for calibrated section data."""
 
 from __future__ import annotations
 
@@ -66,11 +47,13 @@ _RAD = np.pi / 180.0
 
 
 def _load_section_calibration(section_dir: Path) -> dict[str, Any]:
+    """Load section calibration."""
     cal_path = section_stage_dir(section_dir.name, "calibrated") / "calibration.json"
     return read_json_file(cal_path)
 
 
 def _initial_quaternion(cal: dict[str, Any], sensor: str) -> np.ndarray | None:
+    """Return initial quaternion."""
     try:
         R = np.array(cal["alignment"][sensor]["rotation_matrix"], dtype=float)
         return quat_from_rotation_matrix(R)
@@ -79,6 +62,7 @@ def _initial_quaternion(cal: dict[str, Any], sensor: str) -> np.ndarray | None:
 
 
 def _static_windows(cal: dict[str, Any], sensor: str) -> list[tuple[float, float]]:
+    """Return the static windows."""
     windows: list[tuple[float, float]] = []
     for seq_key in ("opening_sequence", "closing_sequence"):
         try:
@@ -97,15 +81,7 @@ def _static_windows(cal: dict[str, Any], sensor: str) -> list[tuple[float, float
 
 
 def _load_static_mag_calibration(sensor: str) -> MagCalibration | None:
-    """Load a stored ellipsoid (or hard-iron-only) mag calibration.
-
-    Layered design:
-    * If the static-calibration JSON has a full ellipsoid (``offset`` +
-      ``transform``), use it directly.
-    * If it has only a legacy ``hard_iron_bias`` block, lift it to a
-      hard-iron-only :class:`MagCalibration` (identity transform).
-    * Otherwise return None — caller will fit an ellipsoid in-section.
-    """
+    """Load static mag calibration."""
     if sensor != "arduino":
         return None
     cal_path = static_calibration_json()
@@ -140,16 +116,7 @@ def _load_static_mag_calibration(sensor: str) -> MagCalibration | None:
 
 
 def _resolve_mag_calibration(sensor: str, mag: np.ndarray | None) -> MagCalibration | None:
-    """Pick the best mag calibration available for this section.
-
-    Priority: stored static cal (loaded from disk) > in-section ellipsoid fit
-    on the actual cycling data > None (filter runs gyro+acc only).  The fit
-    requires enough rotation diversity, which a full cycling section
-    typically provides whereas the six-face static recordings did not.
-
-    Arduino benefits from a pre-recorded static ellipsoid; other sensors fall
-    through directly to the in-section fit.
-    """
+    """Resolve mag calibration."""
     if mag is None:
         return None
 
@@ -176,7 +143,7 @@ def _gravity_residual(
     Q: np.ndarray,
     static_windows: list[tuple[float, float]],
 ) -> float:
-    """Mean gravity error in static windows (m/s²); inf if no static windows."""
+    """Return mean gravity error in static windows."""
     indices: list[int] = []
     for t0, t1 in static_windows:
         indices.extend(np.where((timestamps >= t0) & (timestamps <= t1))[0].tolist())
@@ -195,6 +162,7 @@ def _gravity_residual(
 
 
 def _quality_label(residual: float) -> str:
+    """Return quality label."""
     if residual < 0.5:
         return "good"
     if residual < 1.5:
@@ -212,15 +180,7 @@ def _build_output_df(
     Q: np.ndarray,
     gyro_dps: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """Build the per-sample orientation CSV frame.
-
-    When ``gyro_dps`` is provided, the calibrated body-frame gyroscope is
-    rotated into the world frame using the time-varying quaternion to give
-    instantaneous angular rate around each world axis.  ``gyro_world_z_dps``
-    is the directly-measured yaw rate — preferred over differencing
-    ``yaw_deg`` because it has no Mahony lag, no ±180° wraparound, and uses
-    the full sensor bandwidth (head turns of <0.5 s are visible).
-    """
+    """Build output df."""
     eulers = np.array([euler_from_quat(q) for q in Q], dtype=float)  # (N, 3) yaw, pitch, roll
     out = pd.DataFrame({
         "timestamp": timestamps.astype(float),
@@ -255,23 +215,7 @@ def process_section_orientation(
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
 ) -> dict[str, Any]:
-    """Run Mahony orientation estimation for one section.
-
-    Parameters
-    ----------
-    section_dir:
-        Path to the section directory.
-    sample_rate_hz:
-        Nominal IMU sampling rate in Hz.
-    force:
-        Overwrite existing outputs.
-    Kp, Ki:
-        Mahony filter gains.
-
-    Returns
-    -------
-    Stats dict written to ``orientation_stats.json``.
-    """
+    """Process section orientation."""
     orient_dir = section_stage_dir(section_dir.name, "orientation")
     stats_json = orient_dir / "orientation_stats.json"
 

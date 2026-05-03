@@ -1,11 +1,4 @@
-"""Summarize recording-level label files and generate label-distribution plots.
-
-Examples
---------
-    uv run python -m labels.analyze_labels
-    uv run python -m labels.analyze_labels --label-set v2
-    uv run python -m labels.analyze_labels --workflow-config data/_configs/workflow.train.json
-"""
+"""Analyze labels helpers for parse, inspect, and transfer manual interval labels."""
 
 from __future__ import annotations
 
@@ -58,6 +51,7 @@ _EMPTY_COLUMNS = [
 
 
 def _display_path(path: Path) -> str:
+    """Return display path."""
     try:
         return project_relative_path(path)
     except ValueError:
@@ -65,6 +59,7 @@ def _display_path(path: Path) -> str:
 
 
 def _save_plot(fig: plt.Figure, path: Path) -> Path:
+    """Save plot."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
@@ -73,6 +68,7 @@ def _save_plot(fig: plt.Figure, path: Path) -> Path:
 
 
 def _iter_label_files(label_set: str | None = None) -> list[Path]:
+    """Iterate over label files."""
     root = label_set_dir(label_set or default_label_set())
     paths = sorted(root.glob("labels_intervals_*.*")) if root.exists() else []
     if not paths:
@@ -81,11 +77,13 @@ def _iter_label_files(label_set: str | None = None) -> list[Path]:
 
 
 def _infer_recording_id(label_file: Path) -> str:
+    """Infer recording id."""
     match = re.match(r"^labels_intervals_(.+)\.(csv|json)$", label_file.name)
     return match.group(1) if match else ""
 
 
 def _load_label_rows(label_set: str | None = None) -> pd.DataFrame:
+    """Load label rows."""
     rows_out: list[dict[str, Any]] = []
 
     for label_file in _iter_label_files(label_set):
@@ -131,6 +129,7 @@ def _load_label_rows(label_set: str | None = None) -> pd.DataFrame:
 
 
 def _duration_label(seconds: float) -> str:
+    """Return duration label."""
     if seconds >= 3600.0:
         return f"{seconds / 3600.0:.2f} h"
     if seconds >= 60.0:
@@ -139,6 +138,7 @@ def _duration_label(seconds: float) -> str:
 
 
 def _label_colors(labels: list[str]) -> dict[str, str]:
+    """Return label colors."""
     return {
         label: QUALITATIVE_PALETTE[idx % len(QUALITATIVE_PALETTE)]
         for idx, label in enumerate(labels)
@@ -146,6 +146,7 @@ def _label_colors(labels: list[str]) -> dict[str, str]:
 
 
 def _recording_duration_s(recording_id: str, cache: dict[str, float | None]) -> float | None:
+    """Return recording duration s."""
     if recording_id in cache:
         return cache[recording_id]
 
@@ -176,6 +177,7 @@ def _recording_duration_s(recording_id: str, cache: dict[str, float | None]) -> 
 
 
 def build_label_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Build label summary."""
     if df.empty:
         return pd.DataFrame(
             columns=[
@@ -211,6 +213,7 @@ def build_label_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_recording_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Build recording summary."""
     if df.empty:
         return pd.DataFrame(
             columns=[
@@ -249,6 +252,7 @@ def build_recording_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_recording_label_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Build recording label summary."""
     if df.empty:
         return pd.DataFrame(
             columns=["recording_id", "label_name", "n_intervals", "total_duration_s"]
@@ -268,6 +272,7 @@ def build_recording_label_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _plot_label_total_duration(summary: pd.DataFrame, output_path: Path) -> Path:
+    """Plot label total duration."""
     fig, ax = plt.subplots(figsize=(8.5, max(4.5, 0.48 * len(summary) + 1.5)))
     plot_df = summary.sort_values("total_duration_s", ascending=True)
     color_map = _label_colors(plot_df["label_name"].tolist())
@@ -296,6 +301,7 @@ def _plot_label_total_duration(summary: pd.DataFrame, output_path: Path) -> Path
 
 
 def _plot_label_interval_count(summary: pd.DataFrame, output_path: Path) -> Path:
+    """Plot label interval count."""
     fig, ax = plt.subplots(figsize=(8.5, max(4.5, 0.48 * len(summary) + 1.5)))
     plot_df = summary.sort_values("n_intervals", ascending=True)
     color_map = _label_colors(plot_df["label_name"].tolist())
@@ -324,6 +330,7 @@ def _plot_label_interval_count(summary: pd.DataFrame, output_path: Path) -> Path
 
 
 def _plot_recording_total_duration(summary: pd.DataFrame, output_path: Path) -> Path:
+    """Plot recording total duration."""
     fig, ax = plt.subplots(figsize=(9.0, max(4.5, 0.45 * len(summary) + 1.5)))
     plot_df = summary.sort_values("total_labeled_duration_s", ascending=True)
     bars = ax.barh(
@@ -364,6 +371,7 @@ def _plot_recording_total_duration(summary: pd.DataFrame, output_path: Path) -> 
 
 
 def _plot_recording_label_heatmap(summary: pd.DataFrame, output_path: Path) -> Path | None:
+    """Plot recording label heatmap."""
     if summary.empty:
         return None
 
@@ -404,6 +412,7 @@ def _write_overview_json(
     label_set: str,
     labels_dir: Path,
 ) -> Path:
+    """Write overview json."""
     payload = {
         "source": "recording",
         "label_set": label_set,
@@ -427,6 +436,7 @@ def analyze_labels(
     output_dir: Path | None = None,
     label_set: str | None = None,
 ) -> Path:
+    """Return analyze labels."""
     resolved_label_set = label_set or default_label_set()
     labels_dir = label_set_dir(resolved_label_set)
     if output_dir is None:
@@ -477,6 +487,7 @@ def analyze_labels(
 
 
 def _label_set_from_workflow_config(path: Path | None) -> str | None:
+    """Return label set from workflow config."""
     if path is None:
         return None
     from workflow.config import load_workflow_config
@@ -485,6 +496,7 @@ def _label_set_from_workflow_config(path: Path | None) -> str | None:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         prog="python -m labels.analyze_labels",
         description=(
@@ -518,6 +530,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = _build_arg_parser()
     args = parser.parse_args(argv)

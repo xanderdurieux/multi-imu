@@ -42,14 +42,7 @@ _IMU_VALUE_COLUMNS = [col for col in CSV_COLUMNS if col != "timestamp"]
 
 
 def _looks_like_imu_dataframe(df: pd.DataFrame) -> bool:
-    """Heuristic for raw IMU streams that should be schema-normalized.
-
-    Important: Derived-signal tables (e.g. `*_signals.csv`) often contain
-    `timestamp` plus *derived* columns like `acc_norm`, but **do not** contain
-    the raw axis triplets (`ax/ay/az`, `gx/gy/gz`, `mx/my/mz`).  Normalizing
-    those as if they were raw IMU streams would add missing axis columns as
-    NA and then recompute `*_norm`, overwriting valid derived values with NaNs.
-    """
+    """Return whether a table looks like raw IMU data."""
     columns = set(df.columns)
     if "timestamp" not in columns:
         return False
@@ -59,6 +52,7 @@ def _looks_like_imu_dataframe(df: pd.DataFrame) -> bool:
 
 
 def _normalize_imu_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize imu dataframe."""
     out = df.copy()
 
     for col in CSV_COLUMNS:
@@ -105,7 +99,7 @@ def list_csv_files(directory: Path | str) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 def read_json_file(path: Path | str) -> Any:
-    """Load a JSON file (UTF-8). Returns the decoded object (dict, list, etc.)."""
+    """Read json file."""
     p = Path(path)
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -226,34 +220,22 @@ def session_input_dir(session_name: str) -> Path:
 
 
 def recording_dir(recording_name: str) -> Path:
-    """Return path to the root directory of a recording.
-
-    Recording folder naming is ``<session_name>_r<recording_idx>``.
-    """
+    """Return the recording directory."""
     return recordings_root() / recording_name
 
 
 def section_dir(section_name: str) -> Path:
-    """Return path to the root directory of a section.
-
-    Section folder naming is ``<recording_name>s<section_idx>``.
-    """
+    """Return the section directory."""
     return sections_root() / section_name
 
 
 def recording_stage_dir(recording_name: str, stage: str) -> Path:
-    """Return path to a stage directory within a recording.
-
-    Example stages: ``parsed``, ``synced``.
-    """
+    """Return a recording stage directory."""
     return recording_dir(recording_name) / stage
 
 
 def section_stage_dir(section_name: str, stage: str) -> Path:
-    """Return path to a stage directory within a section.
-
-    Example stages: ``calibrated``, ``orientation``, ``derived``, ``features``, ``events``.
-    """
+    """Return a section stage directory."""
     return section_dir(section_name) / stage
 
 
@@ -307,17 +289,7 @@ def section_sort_key(name_or_path: Path | str) -> tuple[str, int, int]:
 # ---------------------------------------------------------------------------
 
 def resolve_data_dir(target: str | Path) -> Path:
-    """Resolve a recording or section name (with optional stage) to an absolute directory path.
-
-    Accepted string forms:
-    - ``<recording_name>``               → recording root directory
-    - ``<recording_name>/<stage>``       → recording stage directory
-    - ``<section_name>``                 → section root directory
-    - ``<section_name>/<stage>``         → section stage directory
-
-    A ``Path`` object may be passed for programmatic callers that already hold
-    a concrete directory — it is validated and returned as-is.
-    """
+    """Resolve data dir."""
     if isinstance(target, Path):
         if target.is_dir():
             return target.resolve()
@@ -343,10 +315,7 @@ def resolve_data_dir(target: str | Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def sensor_csv(ref: str, sensor_name: str) -> Path:
-    """Return ``<sensor_name>.csv`` inside the resolved directory.
-
-    *ref* is any string accepted by ``resolve_data_dir``.
-    """
+    """Return the path for a sensor CSV."""
     directory = resolve_data_dir(ref)
     csv_path = directory / f"{sensor_name}.csv"
     if not csv_path.is_file():
@@ -369,14 +338,7 @@ def section_labels_csv(sec_dir: Path | str) -> Path:
 
 
 def static_calibration_json() -> Path:
-    """Return the path to the static (device-level) IMU calibration JSON.
-
-    The static_calibration stage writes ``arduino_imu_calibration.json``
-    (per :mod:`static_calibration.run`).  An older ``calibration.json``
-    sibling existed historically and downstream loaders kept silently
-    falling back to a non-existent path; this returns the canonical
-    filename so things like the Mahony hard-iron load actually find it.
-    """
+    """Return the static calibration json."""
     return calibrations_root() / "arduino_imu_calibration.json"
 
 
@@ -469,6 +431,7 @@ def default_label_config_path() -> Path:
 
 
 def _merge_nested_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge nested dictionaries."""
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -479,11 +442,7 @@ def _merge_nested_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[
 
 
 def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
-    """Load workflow config data with default-as-base merging.
-
-    When ``override_path`` is provided, its keys overwrite keys from the
-    default workflow config.
-    """
+    """Load workflow config data."""
     default_payload = read_json_file(default_workflow_config_path())
     if override_path is None:
         return dict(default_payload)
@@ -494,11 +453,7 @@ def load_workflow_config_data(override_path: Path | str | None = None) -> dict:
 
 
 def load_calibration_segments_config_data(override_path: Path | str | None = None) -> dict:
-    """Load calibration-segments config data with default-as-base merging.
-
-    When ``override_path`` is provided, its keys overwrite keys from the
-    default calibration-segments config.
-    """
+    """Load calibration segments config data."""
     default_payload = read_json_file(default_calibration_segments_config_path())
     if override_path is None:
         return dict(default_payload)

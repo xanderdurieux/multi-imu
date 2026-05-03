@@ -1,10 +1,4 @@
-"""CLI entry point for the reporting stage.
-
-Usage:
-    python -m reporting
-    python -m reporting --output data/report --features data/exports/features_fused.csv
-    python -m reporting --scenarios riding braking cornering --context 8
-"""
+"""Command-line entry point for reporting."""
 
 from __future__ import annotations
 
@@ -15,6 +9,7 @@ from pathlib import Path
 
 
 def _setup_logging(verbose: bool) -> None:
+    """Return setup logging."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -24,6 +19,7 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command-line interface."""
     parser = argparse.ArgumentParser(
         prog="python -m reporting",
         description="Generate thesis reporting figures, tables, and summary.",

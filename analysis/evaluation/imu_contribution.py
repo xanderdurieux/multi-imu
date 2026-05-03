@@ -1,16 +1,4 @@
-"""Quantify the marginal value of the second IMU.
-
-For a fixed (label_col, min_quality, model), compares the four feature sets
-``{bike, rider, fused_no_cross, fused}`` on paired CV folds and reports:
-
-  * fold-paired Δ accuracy / Δ macro-F1 (mean ± std)
-  * one-sided Wilcoxon signed-rank p-value that ``Δ > 0``
-  * per-class F1 deltas computed from the OOF per-class reports
-
-The paired test is valid because :func:`evaluation.experiments._cv_evaluate`
-re-uses the same :class:`sklearn.model_selection.GroupKFold` split index for
-every feature set within a single :func:`run_evaluation` call.
-"""
+"""Imu contribution helpers for train models and build evaluation outputs from exported features."""
 
 from __future__ import annotations
 
@@ -35,11 +23,7 @@ _FS_PAIRS: list[tuple[str, str]] = [
 
 
 def _wilcoxon_pvalue(deltas: np.ndarray) -> float | None:
-    """One-sided Wilcoxon test that ``median(delta) > 0``.
-
-    Returns ``None`` if all deltas are zero or no finite samples remain — the
-    test is undefined in those degenerate cases.
-    """
+    """Return wilcoxon pvalue."""
     finite = deltas[np.isfinite(deltas)]
     if finite.size == 0 or np.all(finite == 0):
         return None
@@ -55,18 +39,7 @@ def compute_imu_contribution(
     *,
     feature_set_pairs: list[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
-    """Build a long-form table of paired feature-set comparisons.
-
-    Parameters
-    ----------
-    all_results:
-        Mapping ``{<fs>__<model>: result_dict}`` produced by
-        :func:`evaluation.experiments._cv_evaluate`.  Each value must contain
-        ``fold_accuracies`` and ``fold_f1s`` lists of equal length per model.
-    feature_set_pairs:
-        Pairs ``(better, baseline)`` to evaluate ``Δ = better − baseline``.
-        Defaults to the canonical four pairs.
-    """
+    """Compute imu contribution."""
     pairs = feature_set_pairs or _FS_PAIRS
     models = sorted({k.split("__", 1)[1] for k in all_results if "__" in k})
 
@@ -119,12 +92,7 @@ def per_class_f1_deltas(
     baseline: str,
     model: str,
 ) -> pd.DataFrame:
-    """Return per-class F1 differences between two feature sets for one model.
-
-    Empty DataFrame when either side is missing.  ``support`` is taken from
-    the *better* side, since both sides see the same OOF rows under
-    GroupKFold and supports therefore match.
-    """
+    """Return per class F1 deltas."""
     key_b = f"{better}__{model}"
     key_a = f"{baseline}__{model}"
     if key_b not in all_results or key_a not in all_results:
@@ -159,11 +127,7 @@ def write_imu_contribution(
     classes: list[str],
     output_dir: Path,
 ) -> tuple[Path | None, list[Path]]:
-    """Run all comparisons and write CSVs.
-
-    Returns ``(summary_path, per_class_delta_paths)``.  Summary path is
-    ``None`` when no comparable feature-set pairs were available.
-    """
+    """Write imu contribution."""
     contribution_df = compute_imu_contribution(all_results)
     if contribution_df.empty:
         log.info("IMU contribution: no comparable feature-set pairs available")

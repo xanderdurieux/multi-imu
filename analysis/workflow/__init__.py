@@ -1,11 +1,4 @@
-"""Main workflow orchestration for the dual-IMU cycling pipeline.
-
-Run all pipeline stages end-to-end from a single config file::
-
-    python -m workflow configs/workflow.thesis.json
-    python -m workflow configs/workflow.thesis.json --force
-    python -m workflow configs/workflow.thesis.json --stage calibration
-"""
+"""Load workflow configs and run pipeline stages."""
 
 from .config import WorkflowConfig, load_workflow_config
 from .runner import run_pipeline

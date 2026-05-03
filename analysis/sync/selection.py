@@ -1,9 +1,4 @@
-"""Compare per-method sync outputs and pick the best one for a recording.
-
-Loads each method's ``sync_info.json`` from its stage directory, extracts a
-quality summary (``SyncMethodQuality``), applies tier-priority + gate logic,
-and returns a ``SyncSelectionResult`` used by ``pipeline._apply_selection``.
-"""
+"""Selection helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -44,6 +39,7 @@ SyncMethodName = Literal[
 
 
 def method_stage(method: str) -> str:
+    """Return method stage."""
     try:
         return METHOD_STAGES[method]
     except KeyError as exc:
@@ -53,6 +49,7 @@ def method_stage(method: str) -> str:
 
 
 def method_label(method: str) -> str:
+    """Return method label."""
     return METHOD_LABELS.get(method, method)
 
 
@@ -92,6 +89,7 @@ class SyncSelectionResult:
 
     @property
     def metrics(self) -> dict[str, Any]:
+        """Return metrics."""
         selected_info = self._selected_info()
         shared = build_shared_sync_context(self.comparison or {})
         if shared["target_time_origin_seconds"] is None:
@@ -129,11 +127,13 @@ class SyncSelectionResult:
         return payload
 
     def _selected_info(self) -> dict[str, Any]:
+        """Return selected info."""
         info = (self.comparison or {}).get(self.method)
         return info if isinstance(info, dict) else {}
 
 
 def _load_sync_info(recording_name: str, stage: str) -> Optional[dict]:
+    """Load sync info."""
     path = recording_stage_dir(recording_name, stage) / "sync_info.json"
     if not path.exists():
         return None
@@ -184,6 +184,7 @@ def build_shared_sync_context(comparison: dict[str, Any]) -> dict[str, Any]:
 def _shared_fallback_from_qualities(
     qualities: dict[str, SyncMethodQuality],
 ) -> dict[str, Any]:
+    """Return shared fallback from qualities."""
     empty_calibration: dict[str, Any] = {
         "n_anchors": 0,
         "anchor_span_s": 0.0,
@@ -256,6 +257,7 @@ _MAX_DRIFT_PPM = 2_000.0
 
 
 def _boundary_anchor_scores(anchors: Optional[list[dict[str, Any]]]) -> tuple[float | None, float | None]:
+    """Return boundary anchor scores."""
     if not anchors:
         return None, None
 
@@ -275,6 +277,7 @@ def _multi_anchor_passes(
     min_corr: float = 0.2,
     max_drift_ppm: float = _MAX_DRIFT_PPM,
 ) -> bool:
+    """Return multi anchor passes."""
     if not q.available:
         return False
     if q.calibration_span_s is None or q.calibration_span_s < min_cal_span_s:
@@ -318,6 +321,7 @@ def select_best_sync_method(recording_name: str) -> SyncSelectionResult:
         # Fall through tier order.  Prefer tier priority, but penalise
         # methods with implausible drift or negative correlation.
         def _score(q: SyncMethodQuality) -> float:
+            """Return score."""
             if not q.available:
                 return -999.0
             corr = q.corr_offset_and_drift or -1.0

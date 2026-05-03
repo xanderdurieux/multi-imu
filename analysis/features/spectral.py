@@ -14,11 +14,7 @@ def spectral_features(
     arr: np.ndarray,
     sample_rate_hz: float,
 ) -> dict[str, Any]:
-    """Compute spectral features via rFFT with Hanning window.
-
-    Returns centroid, low/mid/high band energies, and dominant frequency —
-    all NaN when the window has fewer than 4 finite samples or zero power.
-    """
+    """Return spectral features."""
     feats: dict[str, Any] = {
         f"{prefix}_spectral_centroid": float("nan"),
         f"{prefix}_spectral_energy_low": float("nan"),

@@ -48,15 +48,7 @@ def window_valid_ratio_imu(
     *,
     signal_col: str = "acc_norm",
 ) -> float:
-    """Fraction of samples with finite acceleration norm in the window.
-
-    Uses derived ``signal_col`` when present; if that slice is empty or
-    entirely non-finite, falls back to ``acc_norm`` from the calibrated stream.
-
-    Without this fallback, timestamps misaligned between calibrated and derived
-    CSVs (or a missing derived slice) incorrectly yield *zero* validity even
-    when the calibrated stream has hundreds of good samples.
-    """
+    """Return window valid ratio imu."""
     arr = get_col(window_signals, signal_col)
     if len(arr) > 0:
         r = float(np.sum(np.isfinite(arr)) / len(arr))
@@ -70,12 +62,7 @@ def window_valid_ratio_imu(
 
 
 def cross_window_valid_ratio(window_cross: pd.DataFrame | None) -> float:
-    """Mean finite-data rate across core cross-sensor columns (0-1).
-
-    When both IMUs contribute to fusion, cross features should have usable
-    samples in the same window; pervasive NaNs indicate failed alignment or
-    missing overlap for that interval.
-    """
+    """Return cross window valid ratio."""
     if window_cross is None or window_cross.empty:
         return 0.0
     cols = [

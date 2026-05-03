@@ -1,15 +1,4 @@
-"""Permutation feature importance with GroupKFold to avoid leakage.
-
-Model-agnostic alternative to tree-impurity importances.  Used as the
-defensible per-feature ranking for the thesis because it measures the actual
-predictive contribution of each feature on held-out folds — not a model-
-specific heuristic.
-
-The aggregate-by-sensor view (see :func:`aggregate_by_sensor_group`) directly
-quantifies how much each sensor (bike / rider / cross) contributes to total
-predictive power, which is the head-line statistic for the second-IMU
-contribution argument.
-"""
+"""Permutation importance helpers for train models and build evaluation outputs from exported features."""
 
 from __future__ import annotations
 
@@ -43,6 +32,7 @@ _SENSOR_GROUP_NAME: dict[str, str] = {
 
 
 def _sensor_group(feature: str) -> str:
+    """Return sensor group."""
     for prefix, name in _SENSOR_GROUP_NAME.items():
         if feature.startswith(prefix):
             return name
@@ -61,20 +51,7 @@ def compute_permutation_importance_grouped(
     scoring: str = "f1_macro",
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Permutation importance averaged across GroupKFold validation folds.
-
-    Each fold trains a fresh ``imputer → scaler → model`` pipeline on the
-    training groups; permutation importance is then computed on the held-out
-    validation fold using ``scoring`` (default macro-F1, matching the model
-    selection metric).  Per-fold means are averaged so the ranking reflects
-    out-of-group generalization, not in-sample fit.
-
-    Returns a DataFrame with columns:
-        feature, sensor_group,
-        perm_importance_mean, perm_importance_std,
-        perm_importance_min, perm_importance_max
-    sorted descending by ``perm_importance_mean``.
-    """
+    """Compute permutation importance grouped."""
     n_unique_groups = int(len(np.unique(groups)))
     n_splits = min(n_splits, n_unique_groups)
     if n_splits < 2:
@@ -148,13 +125,7 @@ def compute_permutation_importance_grouped(
 
 
 def aggregate_by_sensor_group(perm_df: pd.DataFrame) -> pd.DataFrame:
-    """Sum permutation importances within each sensor group.
-
-    Negative per-feature values can occur (permutation accidentally improved
-    the score on that fold) and are kept in the sum — clipping would bias
-    toward features that happen to never hurt.  ``mean_per_feature`` lets
-    callers normalize for unequal group sizes.
-    """
+    """Aggregate by sensor group."""
     if perm_df.empty:
         return pd.DataFrame(
             columns=["sensor_group", "total_importance", "n_features", "mean_per_feature"]

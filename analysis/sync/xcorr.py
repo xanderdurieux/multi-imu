@@ -1,11 +1,4 @@
-"""Cross-correlation primitives plus offset/drift refinement.
-
-Public API categories:
-- correlation primitives: `estimate_lag`, `masked_ncc`
-- offset refinement: `refine_offsets_from_coarse_offset`
-- drift refinement observations: `collect_drift_observations_from_anchor`
-- drift refinement: `refine_drift_unconstrained`, `refine_drift_through_anchor`
-"""
+"""Xcorr helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -101,7 +94,7 @@ def fit_offset_drift(
     target_origin_seconds: float,
     weights: np.ndarray | None = None,
 ) -> tuple[float, float, float]:
-    """Weighted linear fit ``offset = intercept + slope*(t - t0)``. Returns (intercept, slope, R²)."""
+    """Fit offset drift."""
     if target_times_sec.size == 0:
         return 0.0, 0.0, 0.0
     if target_times_sec.size == 1:
@@ -134,12 +127,7 @@ def fit_drift_through_point(
     anchor_offset_seconds: float,
     weights: np.ndarray | None = None,
 ) -> tuple[float, float]:
-    """Weighted LS slope with the line pinned through ``(anchor_time, anchor_offset)``.
-
-    Model: ``offset_i = anchor_offset + slope * (t_i - anchor_time)``. Closed-form
-    weighted slope through the (shifted) origin plus an R² against the weighted
-    mean of the observations — same semantic as `fit_offset_drift`'s R².
-    """
+    """Fit drift through point."""
     if target_times_sec.size == 0:
         return 0.0, 0.0
 
@@ -306,6 +294,7 @@ def refine_offsets_from_coarse_offset(
     """Collect offsets from non-causal refinement around coarse time offset."""
 
     def _predict_target_time_seconds(_center: int, t_ref_center: float) -> float:
+        """Return predict target time seconds."""
         return float(t_ref_center) - float(coarse_offset_seconds)
 
     return _collect_window_offsets(
@@ -350,6 +339,7 @@ def collect_drift_observations_from_anchor(
     )
 
     def _predict_target_time_seconds(_center: int, t_ref_center: float) -> float:
+        """Return predict target time seconds."""
         return float(
             reference_to_target_seconds(
                 float(t_ref_center),
@@ -364,6 +354,7 @@ def collect_drift_observations_from_anchor(
         offsets: list[float],
         scores: list[float],
     ) -> None:
+        """Return on accept."""
         nonlocal cur_drift, cur_offset
         if len(target_times) < int(min_points_for_drift):
             return

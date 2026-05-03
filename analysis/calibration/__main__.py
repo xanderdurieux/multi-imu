@@ -1,11 +1,4 @@
-"""CLI entry point for the calibration stage.
-
-Usage::
-
-    python -m calibration <section_name>
-    python -m calibration --recording 2026-02-26_r1
-    python -m calibration --recording 2026-02-26_r1 --force
-"""
+"""Command-line entry point for calibration."""
 
 from __future__ import annotations
 
@@ -18,6 +11,7 @@ from .pipeline import calibrate_section, calibrate_recording_sections
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     argv = list(argv if argv is not None else sys.argv[1:])
 

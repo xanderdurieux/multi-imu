@@ -1,13 +1,4 @@
-"""Transfer recording-level interval labels to section-level label files.
-
-When a recording is split into sections, any time-interval labels that overlap
-with a section are clipped to that section's time range and written to
-``<section_dir>/labels/labels.csv``.
-
-The expected label file in the recording stage directory is named
-``labels.csv`` or ``labels.json`` and uses the standard :class:`LabelRow`
-schema (columns: start_ms, end_ms, label, scenario_label, …).
-"""
+"""Section transfer helpers for parse, inspect, and transfer manual interval labels."""
 
 from __future__ import annotations
 
@@ -38,12 +29,7 @@ def load_recording_interval_rows_for_transfer(
     recording_origin_ms: float | None = None,
     label_set: str | None = None,
 ) -> list[LabelRow]:
-    """Load recording-level label rows for section transfer.
-
-    Reads from the canonical path
-    ``data/_labels/<label_set>/labels_intervals_<recording>.csv``.
-    Returns an empty list if the file does not exist or contains no rows.
-    """
+    """Load recording interval rows for transfer."""
     path = recording_labels_csv(recording_name, label_set=label_set)
     if not path.exists():
         return []
@@ -64,28 +50,7 @@ def write_section_labels_from_recording_intervals(
     sporsa_section_df: pd.DataFrame,
     intervals: list[LabelRow],
 ) -> None:
-    """Clip and write recording-level interval labels to a section directory.
-
-    Parameters
-    ----------
-    recording_name:
-        Name of the recording (for logging).
-    section_idx:
-        Section index (for logging).
-    section_dir:
-        Directory where ``labels.csv`` will be written.
-    recording_origin_ms:
-        Absolute timestamp (ms) of the recording's first sample.
-    section_abs_start_ms:
-        Absolute start of this section in ms.
-    section_abs_end_ms:
-        Absolute end of this section in ms.
-    sporsa_section_df:
-        The reference sensor's DataFrame for this section (used to get the
-        exact actual time range if needed).
-    intervals:
-        Recording-level :class:`LabelRow` objects to transfer.
-    """
+    """Write section labels from recording intervals."""
     if not intervals:
         return
 
@@ -131,24 +96,7 @@ def write_section_labels_from_recording_intervals(
 
 
 def transfer_labels_to_sections(recording_name: str, *, label_set: str | None = None) -> None:
-    """Transfer recording-level labels from ``data/_labels/`` to all existing sections.
-
-    This is a convenience function for the common workflow where the event
-    labeler is used at **recording** level (section_id left empty) and the
-    labels need to be propagated to each section directory afterwards.
-
-    For each section found under ``data/sections/<recording_name>s*/``:
-
-    1. The section's time range is read from ``calibrated/sporsa.csv`` (or
-       ``sporsa.csv`` as a fallback).
-    2. Recording-level label rows are clipped to that range.
-    3. Clipped rows are written to ``<section_dir>/labels/labels.csv``.
-
-    Parameters
-    ----------
-    recording_name:
-        Recording name (e.g. ``"2026-02-26_r2"``).
-    """
+    """Transfer labels to sections."""
     section_dirs = iter_sections_for_recording(recording_name)
     if not section_dirs:
         log.warning("No sections found for recording '%s'.", recording_name)
@@ -230,12 +178,7 @@ def transfer_labels_to_sections(recording_name: str, *, label_set: str | None = 
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point for standalone label transfer.
-
-    Usage::
-
-        python -m labels.section_transfer 2026-02-26_r2
-    """
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
         prog="python -m labels.section_transfer",

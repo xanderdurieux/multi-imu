@@ -73,6 +73,7 @@ _GROUP_COLORS: dict[str, str] = {
 
 
 def _group_color(feature: str) -> str:
+    """Return group color."""
     for prefix, color in _GROUP_COLORS.items():
         if feature.startswith(prefix):
             return color
@@ -90,17 +91,7 @@ def plot_confusion_matrix(
     title: str = "Confusion Matrix",
     normalize: bool = True,
 ) -> Path:
-    """Annotated heatmap of a square confusion matrix DataFrame.
-
-    Parameters
-    ----------
-    cm_df:
-        Square DataFrame where index = true labels, columns = predicted labels.
-    output_path:
-        Where to save the PNG.
-    normalize:
-        Row-normalize so cells show recall per class.
-    """
+    """Plot confusion matrix."""
     classes = cm_df.index.tolist()
     cm = cm_df.values.astype(float)
 
@@ -154,15 +145,7 @@ def plot_feature_importance(
     top_n: int = 20,
     title: str = "Feature importance",
 ) -> Path:
-    """Horizontal bar chart of top-N features by importance, color-coded by group.
-
-    Parameters
-    ----------
-    fi_df:
-        DataFrame with columns ``feature`` and ``importance``.
-    top_n:
-        Maximum number of features to display.
-    """
+    """Plot feature importance."""
     fi_df = fi_df.copy().sort_values("importance", ascending=False).head(top_n)
     if fi_df.empty:
         log.warning("No feature importance data to plot; skipping")
@@ -209,19 +192,7 @@ def plot_model_comparison(
     *,
     title: str = "Model comparison",
 ) -> Path:
-    """Grouped bar chart comparing accuracy and macro-F1 across feature sets and models.
-
-    Feature sets are shown in canonical ablation order (bike → rider →
-    fused_no_cross → fused) so the figure reads left-to-right as increasing
-    complexity.  Error bars show the across-fold standard deviation when
-    ``accuracy_std`` / ``macro_f1_std`` columns are present.
-
-    Parameters
-    ----------
-    metrics_df:
-        DataFrame with columns ``feature_set``, ``model``, ``accuracy``,
-        ``macro_f1``, and optionally ``accuracy_std``, ``macro_f1_std``.
-    """
+    """Plot model comparison."""
     if metrics_df.empty:
         log.warning("Empty metrics DataFrame; skipping model comparison plot")
         return output_path
@@ -323,20 +294,7 @@ def plot_per_class_f1(
     feature_set: str = "fused",
     title: str = "",
 ) -> Path | None:
-    """Grouped bar chart of per-class F1-score for a given feature set.
-
-    Parameters
-    ----------
-    metrics_df:
-        Summary metrics table (not used directly, only for model filtering).
-    all_results:
-        Raw result dict from :func:`evaluation.experiments.run_evaluation`.
-        Keys are ``<feature_set>__<model>``, values contain ``per_class`` dict.
-    classes:
-        Ordered class labels.
-    feature_set:
-        Which feature set to visualize.
-    """
+    """Plot per class f1."""
     models = [m for m in _MODEL_DISPLAY if f"{feature_set}__{m}" in all_results]
     if not models:
         log.debug("No results for feature set '%s'; skipping per-class F1 plot", feature_set)
@@ -480,23 +438,7 @@ def plot_per_class_f1_feature_set_comparison(
 # ---------------------------------------------------------------------------
 
 def generate_evaluation_figures(output_dir: Path) -> list[Path]:
-    """Read evaluation artefacts from the per-model subfolder structure and generate thesis figures.
-
-    Expected on-disk layout::
-
-        output_dir/
-          metrics_table.csv
-          figures/                       ← cross-model figures written here
-          <model_name>/
-            confusion_matrix_<fs>.csv
-            feature_importance_<fs>.csv
-            per_class_report_<fs>.json
-            figures/                     ← per-model figures written here
-
-    Cross-model figures (model_comparison, per_class_f1) go to ``output_dir/figures/``.
-    Per-model figures (confusion matrices, feature importances) go to
-    ``output_dir/<model_name>/figures/``.
-    """
+    """Generate evaluation figures."""
     output_dir = Path(output_dir)
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -629,12 +571,7 @@ def plot_permutation_importance(
     top_n: int = 25,
     title: str = "Permutation importance",
 ) -> Path | None:
-    """Top-N permutation importance bar chart with std-across-folds error bars.
-
-    Bars are colored by sensor group so the bike/rider/cross balance is
-    visible at a glance; the std (across CV folds) shows how stable each
-    feature's contribution is.
-    """
+    """Plot permutation importance."""
     if perm_df.empty:
         log.warning("Empty permutation importance DataFrame; skipping plot")
         return None
@@ -686,10 +623,7 @@ def plot_sensor_group_contribution(
     *,
     title: str = "Sensor-group contribution",
 ) -> Path | None:
-    """Bar chart of summed permutation importance per sensor group.
-
-    Mirrors :func:`evaluation.permutation_importance.aggregate_by_sensor_group`.
-    """
+    """Plot sensor group contribution."""
     if grouped_df.empty:
         return None
 
@@ -741,12 +675,7 @@ def plot_imu_contribution(
     metric: str = "macro_f1",
     title: str | None = None,
 ) -> Path | None:
-    """Grouped bar chart of paired Δ for the chosen metric.
-
-    For each ``(better, baseline)`` pair, one bar per model.  Bars marked with
-    ``*`` (p < 0.05) or ``**`` (p < 0.01) when the one-sided Wilcoxon test is
-    significant.  Error bars = ± fold std.
-    """
+    """Plot imu contribution."""
     if contribution_df.empty:
         return None
 
@@ -822,11 +751,7 @@ def plot_sweep_heatmap(
     feature_set: str = "fused",
     model: str | None = None,
 ) -> Path | None:
-    """Heatmap of *metric* across (label_col × min_quality) for one (fs, model).
-
-    If ``model`` is ``None``, the best-mean model per (label, quality) cell is
-    selected automatically.
-    """
+    """Plot sweep heatmap."""
     if sweep_df.empty:
         return None
 
@@ -892,11 +817,7 @@ def plot_sweep_label_quality_grid(
     *,
     metric: str = "macro_f1",
 ) -> Path | None:
-    """One sub-heatmap per feature set, side by side.
-
-    Lets the reader compare how each feature set responds to relaxing or
-    tightening the quality filter on every label scheme in a single figure.
-    """
+    """Plot sweep label quality grid."""
     if sweep_df.empty:
         return None
 
@@ -969,12 +890,7 @@ _MISCLS_EDGE_LW = 1.2
 
 
 def _load_section_signal(sec_dir: Path, sensor: str) -> pd.DataFrame | None:
-    """Return the best-available time-series for *sensor* in *sec_dir*.
-
-    Prefers ``derived/<sensor>_signals.csv`` (already has acc_norm/gyro_norm
-    pre-computed); falls back to ``calibrated/<sensor>.csv`` (raw axes,
-    norm computed on the fly).  Returns ``None`` if neither is present.
-    """
+    """Load section signal."""
     derived = sec_dir / "derived" / f"{sensor}_signals.csv"
     if derived.exists():
         df = read_csv(derived)
@@ -1000,13 +916,7 @@ def _draw_misclassified_spans(
     rows: pd.DataFrame,
     t0_ms: float,
 ) -> tuple[int, int]:
-    """Overlay each misclassified window as a colored axvspan.
-
-    Color encodes error type (FP vs FN). Each span is annotated above the
-    top signal axis with ``#<window_idx>`` and the model's predicted-class
-    probability so the most confidently-wrong (likely-mislabeled) windows
-    are visually obvious and easy to look up in the misclassified CSV.
-    """
+    """Draw misclassified spans."""
     n_fp = n_fn = 0
     for _, r in rows.iterrows():
         x0 = (float(r["window_start_ms"]) - t0_ms) / 1000.0
@@ -1056,13 +966,7 @@ def _draw_label_strip(
     t0_ms: float,
     colors: dict,
 ) -> None:
-    """Draw all annotation intervals as a single colored strip on *ax*.
-
-    Replaces the previous full-height label backgrounds — those drowned the
-    signals when annotation density was high. The strip is a thin band
-    (one axis only) that conveys the same information without competing
-    visually with the IMU traces.
-    """
+    """Draw label strip."""
     for lr in labels:
         if not lr.label:
             continue
@@ -1088,13 +992,7 @@ def plot_misclassified_overlay_for_section(
     *,
     title_suffix: str = "",
 ) -> Path | None:
-    """One PNG per section: signals + annotation strip + misclassified windows.
-
-    Three rows: bike (sporsa) acc-norm, rider (arduino) acc-norm, and the
-    union gyro-norm panel.  Annotation spans (from the section labels CSV)
-    are drawn faintly in the background so the user can see whether each
-    misclassified window straddles a label boundary.
-    """
+    """Plot misclassified overlay for section."""
     sec_dir = section_dir(section_id)
     if not sec_dir.is_dir():
         log.warning("Section directory missing for %s — skipping overlay", section_id)
@@ -1221,12 +1119,7 @@ def plot_misclassified_overlay(
     *,
     title_suffix: str = "",
 ) -> list[Path]:
-    """Generate one overlay PNG per section that has misclassified windows.
-
-    Reads ``misclassified_<fs>.csv`` (must contain ``section_id``,
-    ``window_start_ms``, ``window_end_ms``, ``error_type``, ``pred_proba``)
-    and writes ``<output_dir>/<section_id>.png`` for each section.
-    """
+    """Plot misclassified overlay."""
     miscls_csv = Path(miscls_csv)
     if not miscls_csv.exists():
         log.warning("Misclassified CSV missing: %s", project_relative_path(miscls_csv))

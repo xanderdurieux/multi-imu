@@ -73,11 +73,13 @@ class WorkflowConfig:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "WorkflowConfig":
+        """Create an instance from a dictionary."""
         allowed = cls.__dataclass_fields__.keys()
         filtered = {k: v for k, v in d.items() if k in allowed}
         return cls(**filtered)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready dictionary."""
         return {f: getattr(self, f) for f in self.__dataclass_fields__}
 
     def validate(self) -> list[str]:
@@ -156,11 +158,7 @@ def known_stages() -> list[str]:
 
 
 def load_workflow_config(path: Path | str) -> WorkflowConfig:
-    """Load and validate a workflow config JSON file.
-
-    The default workflow config is always used as a base. Values from the
-    provided config overwrite matching keys, allowing partial override files.
-    """
+    """Load workflow config."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Workflow config not found: {p}")

@@ -351,10 +351,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
 
 def run_pipeline(cfg: WorkflowConfig) -> dict[str, Any]:
-    """Execute the full pipeline from a WorkflowConfig.
-
-    Returns a summary dict with per-stage results.
-    """
+    """Run all configured workflow stages."""
     stages = list(cfg.stages)
     recordings = _collect_recordings(cfg)
     log.info("Pipeline: %d recording(s), stages=%s", len(recordings), stages)

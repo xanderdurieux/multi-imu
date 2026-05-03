@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 
 def plot_calibration_quality_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot calibration quality overview."""
     out_path = output_dir / "cal_quality_overview.png"
     if df.empty or "section_id" not in df.columns:
         return None
@@ -46,6 +47,7 @@ def plot_calibration_quality_overview(df: pd.DataFrame, output_dir: Path) -> Pat
 
 
 def plot_gravity_residuals(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot gravity residuals."""
     out_path = output_dir / "cal_gravity_residuals.png"
     if df.empty or "section_id" not in df.columns:
         return None
@@ -75,6 +77,7 @@ def plot_gravity_residuals(df: pd.DataFrame, output_dir: Path) -> Path | None:
 
 
 def plot_sensor_biases(df: pd.DataFrame, output_dir: Path) -> list[Path]:
+    """Plot sensor biases."""
     paths: list[Path] = []
     if df.empty or "section_id" not in df.columns:
         return paths
@@ -134,6 +137,7 @@ def plot_sensor_biases(df: pd.DataFrame, output_dir: Path) -> list[Path]:
 
 
 def plot_forward_confidence(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot forward confidence."""
     out_path = output_dir / "cal_forward_confidence.png"
     if df.empty or "section_id" not in df.columns:
         return None
@@ -221,6 +225,7 @@ def plot_static_calibration_reference(df: pd.DataFrame, output_dir: Path) -> Pat
 
 
 def run_calibration_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
+    """Run calibration eda."""
     if df.empty:
         log.warning("Calibration params DataFrame is empty; skipping calibration EDA")
         return []

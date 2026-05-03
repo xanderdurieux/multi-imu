@@ -43,6 +43,7 @@ _METADATA_COLS = {
 
 
 def _session_from_recording(recording_name: str) -> str:
+    """Return session from recording."""
     parts = str(recording_name).rsplit("_", 1)
     if len(parts) == 2 and parts[1].startswith("r") and parts[1][1:].isdigit():
         return parts[0]
@@ -50,6 +51,7 @@ def _session_from_recording(recording_name: str) -> str:
 
 
 def _recording_from_section(section_id: str) -> str:
+    """Return recording from section."""
     section_id = str(section_id)
     parts = section_id.rsplit("s", 1)
     if len(parts) == 2 and parts[1].isdigit():
@@ -73,6 +75,7 @@ def _recording_mask(df: pd.DataFrame, recording_names: list[str]) -> pd.Series:
 
 
 def _sort_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Return sort export df."""
     if df.empty:
         return df
 
@@ -122,6 +125,7 @@ def _upsert_export_table(
 
 
 def _recording_count(df: pd.DataFrame) -> int:
+    """Return recording count."""
     if "recording_name" in df.columns:
         return int(df["recording_name"].nunique())
     if "section_id" in df.columns:
@@ -134,16 +138,7 @@ def aggregate_features(
     *,
     min_quality_label: str = "marginal",
 ) -> pd.DataFrame:
-    """Collect all features/features.csv from all sections, return combined DataFrame.
-
-    Parameters
-    ----------
-    recording_names:
-        If given, restrict to sections belonging to these recordings.
-    min_quality_label:
-        Minimum quality threshold. One of "good", "marginal", "poor".
-        Rows with overall_quality_label below this threshold are dropped.
-    """
+    """Aggregate features."""
     if min_quality_label not in _QUALITY_ORDER:
         raise ValueError(
             f"min_quality_label must be one of {_QUALITY_ORDER}, got {min_quality_label!r}"
@@ -224,22 +219,7 @@ def export_feature_tables(
     *,
     recording_names: list[str] | None = None,
 ) -> tuple[dict[str, Path], pd.DataFrame, pd.DataFrame]:
-    """Split and write bike-only, rider-only, fused, calibration, and sync tables.
-
-    Parameters
-    ----------
-    df:
-        Combined feature DataFrame from :func:`aggregate_features`.
-    output_dir:
-        Directory where CSV files and manifest are written.
-    recording_names:
-        Optional list of recording names; passed to the calibration and sync
-        aggregators to restrict which recordings are collected.
-
-    Returns
-    -------
-    Tuple of (paths dict, calibration params DataFrame, sync params DataFrame).
-    """
+    """Export feature tables."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -351,21 +331,7 @@ def run_exports(
     force: bool = False,
     no_plots: bool = False,
 ) -> dict[str, Path]:
-    """Full export pipeline: aggregate → split → write → EDA figures.
-
-    Parameters
-    ----------
-    recording_names:
-        Optional list of recording names to include. ``None`` means all.
-    output_dir:
-        Destination directory. Defaults to ``data/exports/``.
-    min_quality_label:
-        Minimum quality threshold passed to :func:`aggregate_features`.
-    force:
-        If ``False`` and outputs already exist, skip and return existing paths.
-    no_plots:
-        If ``True``, skip EDA figure generation.
-    """
+    """Run exports."""
     if output_dir is None:
         output_dir = data_root() / "exports"
     output_dir = Path(output_dir)

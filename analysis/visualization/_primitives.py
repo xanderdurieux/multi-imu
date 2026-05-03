@@ -1,28 +1,4 @@
-"""Elementary subplot-level drawing primitives for IMU time-series.
-
-All ``draw_*`` functions accept an existing ``ax: plt.Axes``, draw onto it,
-and return the same ``ax``.  They are intentionally side-effect free with
-respect to the figure — no ``tight_layout``, no ``savefig``.  Higher-level
-plot modules import these and compose them into complete figures.
-
-Typical usage::
-
-    fig, axes = imu_figure(2)          # 2 shared-x rows
-    draw_signal_components(axes[0], t, df, ACC_COLS, ylabel="Acc (m/s²)")
-    draw_signal_norm(axes[1], t, df, GYRO_COLS, ylabel="|gyro|")
-    axes[-1].set_xlabel("Time (s)")
-    fig.tight_layout()
-
-Two-stream comparison::
-
-    fig, ax = plt.subplots(figsize=(12, 3))
-    draw_two_streams(
-        ax,
-        t_sporsa, y_sporsa, t_arduino, y_arduino,
-        label_a="sporsa", label_b="arduino",
-        ylabel="|acc| (m/s²)",
-    )
-"""
+"""primitives helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -74,10 +50,7 @@ def imu_figure(
     width: float = 12.0,
     sharex: bool = True,
 ) -> tuple[plt.Figure, list[plt.Axes]]:
-    """Create a figure with *n_rows* shared-x axes suitable for IMU panels.
-
-    Returns ``(fig, axes)`` where ``axes`` is a plain Python list.
-    """
+    """Return imu figure."""
     fig, axes = plt.subplots(
         n_rows, 1,
         figsize=(width, row_height * n_rows),
@@ -132,10 +105,7 @@ def draw_signal_components(
     lw: float = 0.7,
     alpha: float = 1.0,
 ) -> plt.Axes:
-    """Draw each column in `cols` as a separate line sharing the same axes.
-
-    Columns that are absent from `df` are silently skipped.
-    """
+    """Draw signal components."""
     t_arr = np.asarray(t, dtype=float)
     drawn: list[str] = []
     for col in cols:
@@ -167,12 +137,7 @@ def draw_signal_norm(
     ylabel: str | None = None,
     title: str | None = None,
 ) -> plt.Axes:
-    """Draw the vector norm of *cols* as a single line on *ax*.
-
-    Uses a pre-computed norm column (``acc_norm`` / ``gyro_norm`` / ``mag_norm``)
-    when *cols* matches a standard group and the column is present in *df*.
-    Falls back to computing the norm from the raw xyz columns otherwise.
-    """
+    """Draw signal norm."""
     precomputed = _PRECOMPUTED_NORM.get(frozenset(cols))
     if precomputed and precomputed in df.columns:
         norm = pd.to_numeric(df[precomputed], errors="coerce").to_numpy(dtype=float)
@@ -210,11 +175,7 @@ def draw_two_streams(
     ylabel: str | None = None,
     title: str | None = None,
 ) -> plt.Axes:
-    """Overlay two independent time-series on the same `ax`.
-
-    Both streams may have different timestamps and sampling rates — they are
-    plotted on the same time axis without resampling.
-    """
+    """Draw two streams."""
     color_a = color_a or SENSOR_COLORS.get(label_a.lower(), "#1f77b4")
     color_b = color_b or SENSOR_COLORS.get(label_b.lower(), "#ff7f0e")
     draw_signal(ax, t_a, y_a, label=label_a, color=color_a, lw=lw, alpha=alpha)
@@ -448,20 +409,14 @@ def draw_imu_rows(
     color: str | None = None,
     title: str | None = None,
 ) -> list[plt.Axes]:
-    """Fill pre-allocated axes rows with acc / gyro / mag for a single sensor.
-
-    `axes` must contain exactly as many elements as the number of ``show_*``
-    flags that are ``True``.  Rows are filled in the order acc → gyro → mag.
-
-    `axes` must contain exactly as many elements as the number of ``show_*``
-    flags that are ``True``.  Rows are filled in the order acc → gyro → mag.
-    """
+    """Draw imu rows."""
     row = 0
     row_kwargs: dict = {}
     if color is not None:
         row_kwargs["color"] = color
 
     def _label(base: str) -> str:
+        """Return label."""
         return f"{label_prefix}{base}" if label_prefix else base
 
     if show_acc:

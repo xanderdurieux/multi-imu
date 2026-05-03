@@ -1,24 +1,4 @@
-"""Reporting pipeline orchestrator.
-
-Entry point: run_report()
-
-Reads artefacts produced by earlier pipeline stages and generates
-thesis-quality figures, tables, and a markdown summary.
-
-Output layout:
-    data/report/
-    ├── figures/
-    │   ├── dataset/          class_distribution, quality_breakdown,
-    │   │                     session_timeline, recording_summary_table
-    │   ├── signals/          signal_example_<scenario>.png,
-    │   │                     cross_sensor_<scenario>.png
-    │   ├── calibration/      gyro bias, gravity residuals, quality overview
-    │   ├── sync/             method selection, correlation comparison, drift
-    │   ├── orientation/      method selection, gravity alignment, angle stability
-    │   └── evaluation/       copies from data/evaluation/figures/
-    ├── tables/               CSV tables for appendix
-    └── REPORT.md
-"""
+"""Pipeline helpers for build report tables, figures, and thesis bundles."""
 
 from __future__ import annotations
 
@@ -197,22 +177,7 @@ def run_report(
     scenarios: Optional[list[str]] = None,
     no_plots: bool = False,
 ) -> dict:
-    """Generate all thesis reporting artefacts.
-
-    Parameters
-    ----------
-    output_dir:
-        Root directory for report output. Defaults to ``data/report/``.
-    features_path:
-        Path to the fused feature CSV. Defaults to ``data/exports/features_fused.csv``.
-    evaluation_dir:
-        Path to the evaluation output directory. Defaults to ``data/evaluation/``.
-    context_s:
-        Seconds of context shown on each side of the feature window in signal
-        example plots.
-    scenarios:
-        Subset of scenario labels to process for signal examples. None = all.
-    """
+    """Run report."""
     if output_dir is None:
         output_dir = data_root() / "report"
     if features_path is None:

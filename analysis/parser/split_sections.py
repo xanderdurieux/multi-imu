@@ -1,26 +1,4 @@
-"""Split synced IMU recordings into per-section directories.
-
-Sections are defined by pre-detected calibration sequences on the reference
-sensor.  This stage only reads saved outputs from the upstream pipeline:
-
-- Sensor streams from ``<recording>/<stage>/`` (default: ``synced``, where
-  both sensors already share the reference timeline).
-- Calibration segments from ``<recording>/parsed/calibration_segments.json``.
-
-No signals are re-processed and no sync is re-run here.  Each section spans
-from the start of one calibration to the end of the next, so both the
-opening and closing calibrations are included.
-
-Outputs land under::
-
-    data/sections/<recording_name>s<section_idx>/
-        sporsa.csv
-        arduino.csv
-
-CLI usage::
-
-    python -m parser.split_sections 2026-02-26_r5
-"""
+"""Split sections helpers for parse raw sensor logs and split recordings into sections."""
 
 from __future__ import annotations
 
@@ -52,7 +30,7 @@ log = logging.getLogger(__name__)
 
 
 def _load_sync_params(recording_name: str) -> dict[str, float] | None:
-    """Load Arduino→synced linear transform params from sync_info.json."""
+    """Load Arduino-to-synced transform parameters."""
     path = recording_stage_dir(recording_name, "synced") / "sync_info.json"
     if not path.exists():
         return None
@@ -108,13 +86,7 @@ def _build_section_calibration_segments(
     t_min: float,
     t_max: float,
 ) -> dict[str, list[CalibrationSegment]]:
-    """Build per-section calibration segments for all sensors.
-
-    The reference sensor segments are the two bounding calibrations (already
-    on the synced timeline). Non-reference sensors have their recording-level
-    segments loaded, sync-transformed where needed, and clipped to [t_min, t_max].
-    Pass None for either reference segment when no calibration protocol exists.
-    """
+    """Build section calibration segments."""
     result: dict[str, list[CalibrationSegment]] = {}
 
     for sensor in sensors:
@@ -179,11 +151,7 @@ def _load_sensor_streams(
     stage: str,
     sensors: list[str],
 ) -> dict[str, pd.DataFrame]:
-    """Read each sensor's CSV from ``<recording>/<stage>/``.
-
-    Missing sensors are logged and skipped.  Rows with NaN timestamps are
-    dropped and the result is sorted chronologically.
-    """
+    """Load sensor streams."""
     streams: dict[str, pd.DataFrame] = {}
     for sensor in sensors:
         try:
@@ -206,28 +174,7 @@ def split_recording(
     label_set: str | None = None,
     plot: bool = True,
 ) -> list[Path]:
-    """Split a recording into sections using saved sync and parse outputs.
-
-    Parameters
-    ----------
-    recording_name:
-        Recording folder name (e.g. ``"2026-02-26_r5"``).
-    stage:
-        Input stage to read sensor CSVs from.  Default ``"synced"``; both
-        sensors there share the reference timeline.
-    sensors:
-        Sensors to split.  Defaults to ``["sporsa", "arduino"]``.  The
-        reference sensor is prepended automatically if missing.
-    reference_sensor:
-        Sensor whose saved calibration segments define section boundaries.
-    label_set:
-        Label-set directory under ``data/_labels``. Defaults to the active
-        label set from ``MULTI_IMU_LABEL_SET`` or ``v1``.
-    plot:
-        If ``True``, generate sensor and comparison plots for every section.
-
-    Returns the list of written CSV paths in chronological order.
-    """
+    """Split recording."""
     if sensors is None:
         sensors = ["sporsa", "arduino"]
     if reference_sensor not in sensors:
@@ -266,6 +213,7 @@ def split_recording(
         c_open: CalibrationSegment,
         c_close: CalibrationSegment,
     ) -> list[Path]:
+        """Write section."""
         section_path = section_dir(f"{recording_name}s{section_idx}")
         section_path.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []
@@ -333,6 +281,7 @@ def split_recording(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         prog="python -m parser.split_sections",
         description=(
@@ -377,6 +326,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _build_arg_parser().parse_args(argv)
 

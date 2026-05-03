@@ -1,23 +1,4 @@
-"""Calibration-stage visualizations (schema v2 — protocol-aware).
-
-Only norm-based and parameter-space figures are exported.  Per-axis body- or
-world-frame time series are intentionally omitted because the calibration
-stage applies a single static body-to-world rotation and does not track
-orientation over time; axis-resolved values after the alignment window are
-not physically interpretable without the orientation stage.  See the
-docstring of :mod:`calibration.core` for details.
-
-Functions
----------
-plot_calibration_raw_vs_calibrated
-    Norm comparison (|acc|, |gyro|) raw → calibrated per sensor.
-plot_calibration_parameters
-    Gyro bias bars, alignment rotation matrix, gravity vector per sensor.
-plot_calibration_protocol
-    Protocol-detection overview: opening sequence, mount transition, alignment window.
-plot_calibration_stage
-    Master entry point — calls all of the above for a section directory.
-"""
+"""Plot calibration helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -55,6 +36,7 @@ _G = 9.81
 # ---------------------------------------------------------------------------
 
 def _resolve_section_dir(target: str | Path) -> Path:
+    """Resolve section dir."""
     base = resolve_data_dir(target)
     if (base / "calibrated").is_dir():
         return base
@@ -74,15 +56,7 @@ def plot_calibration_raw_vs_calibrated(
     *,
     sensors: list[str] | None = None,
 ) -> list[Path]:
-    """Per-sensor norm comparison (|acc|, |gyro|) before vs after calibration.
-
-    Per-axis body-frame signals are intentionally omitted — see the module
-    docstring.
-
-    Output
-    ------
-    ``calibrated/<sensor>_calibration_comparison.png``
-    """
+    """Plot calibration raw vs calibrated."""
     selected = sensors or list(SENSORS)
     out_paths: list[Path] = []
     cal_dir = section_dir / "calibrated"
@@ -141,12 +115,7 @@ def plot_calibration_parameters(
     *,
     sensors: list[str] | None = None,
 ) -> Path | None:
-    """Gyro bias bars, alignment rotation matrix and gravity estimate per sensor.
-
-    Output
-    ------
-    ``calibrated/calibration_parameters.png``
-    """
+    """Plot calibration parameters."""
     cal_data = load_json(section_dir / "calibrated" / "calibration.json") or {}
     if not cal_data:
         log.warning("No calibration.json found in %s", section_dir.name)
@@ -239,19 +208,7 @@ def plot_calibration_protocol(
     *,
     sensors: list[str] | None = None,
 ) -> list[Path]:
-    """Protocol-detection overview per sensor.
-
-    For each sensor shows the acc norm with annotated regions:
-    - Opening pre-tap static (bias estimation window)
-    - Tap cluster
-    - Opening post-tap static
-    - Mount transition gap (Arduino only)
-    - Alignment window (post-mount for Arduino, opening for Sporsa)
-
-    Output
-    ------
-    ``calibrated/<sensor>_protocol.png``
-    """
+    """Plot calibration protocol."""
     cal_data = load_json(section_dir / "calibrated" / "calibration.json") or {}
     if not cal_data:
         log.warning("No calibration.json found in %s — skipping protocol plot", section_dir.name)
@@ -291,6 +248,7 @@ def plot_calibration_protocol(
         ax.axhline(_G, color="gray", lw=0.8, ls="--", label=f"g = {_G} m/s²")
 
         def _shade(start_ms: float, end_ms: float, facecolor: str, label: str, alpha: float = 0.18) -> None:
+            """Return shade."""
             x0 = (start_ms - t0) / 1000.0
             x1 = (end_ms - t0) / 1000.0
             if x0 < x1:
@@ -361,13 +319,7 @@ def plot_calibration_stage(
     *,
     sensors: list[str] | None = None,
 ) -> list[Path]:
-    """Run all calibration plots for a section directory.
-
-    Produces:
-    - ``<sensor>_calibration_comparison.png``  — norm before/after
-    - ``calibration_parameters.png``            — biases + rotation matrix
-    - ``<sensor>_protocol.png``                 — protocol detection overview
-    """
+    """Plot calibration stage."""
     section_dir = _resolve_section_dir(target)
     out_paths: list[Path] = []
 
@@ -396,6 +348,7 @@ def plot_calibration_stage(
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(

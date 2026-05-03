@@ -1,8 +1,4 @@
-"""Scenario-label taxonomy configuration.
-
-The mappings in ``data/_configs/labels.default.json`` are treated as a working
-interpretation of the current annotations, not as a permanent ontology.
-"""
+"""Label config helpers for extract labelled sliding-window features from section signals."""
 
 from __future__ import annotations
 
@@ -16,19 +12,7 @@ from common.paths import load_label_config_data
 
 @dataclass(frozen=True)
 class SetBasedBinaryScheme:
-    """A 2-class objective resolved from the multi-label overlap set.
-
-    Two patterns are supported through the same dataclass:
-
-    * **literal** — both classes are explicit token lists
-      (``positive_labels`` and ``negative_labels``); other tokens are
-      ignored.  ``on_overlap`` decides which class wins when both lists
-      hit (``"negative"`` is the safety default used by the riding scheme).
-    * **qualified-positive** — only ``positive_labels`` is explicit; the
-      negative class is "any window that satisfies ``qualifier_labels`` but
-      doesn't hit a positive token".  Used for cornering / head-motion
-      objectives where the negative class is "riding without the event".
-    """
+    """Data container for set based binary scheme."""
 
     name: str
     positive_value: str
@@ -40,6 +24,7 @@ class SetBasedBinaryScheme:
     on_overlap: str = "positive"  # "positive" | "negative"
 
     def resolve(self, tokens: set[str]) -> str:
+        """Resolve."""
         pos_hit = bool(tokens & self.positive_labels)
         neg_hit = bool(tokens & self.negative_labels)
 
@@ -78,13 +63,16 @@ class LabelConfig:
 
     @property
     def priority_rank(self) -> dict[str, int]:
+        """Return priority rank."""
         return {label: idx for idx, label in enumerate(self.label_priority)}
 
     def set_based_scheme(self, name: str) -> SetBasedBinaryScheme | None:
+        """Return set based scheme."""
         return next((s for s in self.set_based_schemes if s.name == name), None)
 
     @property
     def set_based_scheme_names(self) -> tuple[str, ...]:
+        """Return set based scheme names."""
         return tuple(s.name for s in self.set_based_schemes)
 
     def map_label(self, scheme: str, fine_label: str) -> str:
@@ -114,16 +102,7 @@ class LabelConfig:
         )
 
     def map_label_set(self, scheme: str, fine_labels) -> str:
-        """Resolve *scheme* from the full set of labels overlapping a window.
-
-        Multi-label-friendly entry point — the window's annotation is treated
-        as a *set* of independent overlapping labels, not collapsed to a
-        single "dominant" token.  The per-objective rules in
-        :class:`SetBasedBinaryScheme` decide which members count.
-
-        Schemes not registered as set-based fall back to single-label
-        semantics on the priority-max token via :meth:`map_label`.
-        """
+        """Map label set."""
         tokens = {
             str(t).strip()
             for t in (fine_labels or ())
@@ -144,6 +123,7 @@ class LabelConfig:
 
 
 def _string_list(value: Any, *, field_name: str) -> tuple[str, ...]:
+    """Return string list."""
     if not isinstance(value, list):
         raise ValueError(f"label config: {field_name!r} must be a list.")
     out = tuple(str(item).strip() for item in value if str(item).strip())
@@ -153,6 +133,7 @@ def _string_list(value: Any, *, field_name: str) -> tuple[str, ...]:
 
 
 def _string_map(value: Any, *, field_name: str) -> dict[str, str]:
+    """Return string map."""
     if not isinstance(value, dict):
         raise ValueError(f"label config: {field_name!r} must be an object.")
     return {
@@ -163,6 +144,7 @@ def _string_map(value: Any, *, field_name: str) -> dict[str, str]:
 
 
 def _build_set_based_scheme(name: str, block: dict[str, Any]) -> SetBasedBinaryScheme:
+    """Build set based scheme."""
     if not isinstance(block, dict):
         raise ValueError(f"label config: set_based_binary_schemes.{name!r} must be an object.")
 
@@ -207,6 +189,7 @@ def _build_set_based_scheme(name: str, block: dict[str, Any]) -> SetBasedBinaryS
 
 
 def _build(payload: dict[str, Any]) -> LabelConfig:
+    """Build."""
     priority = _string_list(payload.get("label_priority"), field_name="label_priority")
 
     derived = payload.get("derived_labels")

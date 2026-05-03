@@ -1,10 +1,4 @@
-"""Per-run confusion analysis: hardest classes + top-N confused class pairs.
-
-Operates on a square confusion-matrix DataFrame (true × predicted) — typically
-the OOF matrix written by :func:`evaluation.experiments._cv_evaluate`. Output
-is two CSVs that surface *what* is being confused with *what*, which feeds
-the substantive interpretation called for in the thesis evaluation goals.
-"""
+"""Confusion analysis helpers for train models and build evaluation outputs from exported features."""
 
 from __future__ import annotations
 
@@ -24,26 +18,7 @@ def analyze_confusion_matrix(
     *,
     top_pairs: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return ``(per_class_df, top_pairs_df)`` derived from the confusion matrix.
-
-    Parameters
-    ----------
-    cm_df:
-        Square DataFrame with rows = true labels, columns = predicted labels,
-        values = counts.
-    top_pairs:
-        Number of off-diagonal ``(true, predicted)`` pairs to surface.
-
-    Outputs
-    -------
-    per_class_df:
-        One row per class — support, recall, precision, F1, dominant
-        confusion target, and the share of the row spent on that target.
-        Sorted ascending by recall so the hardest classes appear first.
-    top_pairs_df:
-        Off-diagonal cells with non-zero count, ranked by absolute count
-        (and ``share_of_true`` as tie-breaker).
-    """
+    """Return analyze confusion matrix."""
     classes = list(cm_df.index)
     cm = cm_df.values.astype(float)
     n = len(classes)
@@ -119,12 +94,7 @@ def write_confusion_analysis(
     config_name: str,
     top_pairs: int = 10,
 ) -> tuple[Path, Path]:
-    """Run analysis on *cm_df* and write per-class + top-pairs CSVs.
-
-    Files written:
-        ``confusion_per_class_<config_name>.csv``
-        ``confusion_top_pairs_<config_name>.csv``
-    """
+    """Write confusion analysis."""
     per_class_df, pairs_df = analyze_confusion_matrix(cm_df, top_pairs=top_pairs)
 
     pc_path = output_dir / f"confusion_per_class_{config_name}.csv"

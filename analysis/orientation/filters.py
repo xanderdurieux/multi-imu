@@ -1,16 +1,4 @@
-"""Mahony orientation filter interface.
-
-Uses the ahrs batch implementation when available, falls back to the
-per-sample numpy implementation in mahony.py.
-
-Conventions
------------
-- Quaternion: [w, x, y, z], body→world rotation
-- Accelerometer: m/s², at rest measures [0, 0, ~9.81] (Z-up)
-- Gyroscope: rad/s
-- Magnetometer: any consistent unit (normalised internally)
-- Magnetometer and IMU NaN values are forward-filled before processing.
-"""
+"""Filters helpers for estimate sensor orientation for calibrated section data."""
 
 from __future__ import annotations
 
@@ -44,23 +32,7 @@ def run_mahony(
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
 ) -> np.ndarray:
-    """Run Mahony filter over a calibrated IMU section; return (N, 4) quaternions.
-
-    Parameters
-    ----------
-    acc:
-        Accelerometer array (N, 3) in m/s².
-    gyro_rad:
-        Gyroscope array (N, 3) in rad/s.
-    dt_arr:
-        Per-sample time steps (N,) in seconds.
-    q0:
-        Initial quaternion [w, x, y, z]. Estimated from first acc sample when None.
-    mag:
-        Magnetometer array (N, 3) or None. NaN rows are forward-filled.
-    Kp, Ki:
-        Mahony proportional and integral gains.
-    """
+    """Run mahony."""
     N = len(acc)
     if N == 0:
         return np.zeros((0, 4))
@@ -95,6 +67,7 @@ def _run_ahrs(
     Kp: float,
     Ki: float,
 ) -> np.ndarray:
+    """Run ahrs."""
     freq = 1.0 / float(np.median(dt_arr))
     kwargs: dict = dict(gyr=gyro_rad, acc=acc, frequency=freq, q0=q0, k_P=Kp, k_I=Ki)
     if mag is not None:
@@ -114,6 +87,7 @@ def _run_numpy(
     Kp: float,
     Ki: float,
 ) -> np.ndarray:
+    """Run numpy."""
     from .mahony import MahonyFilter
     sr_hz = 1.0 / float(np.median(dt_arr))
     filt = MahonyFilter(Kp=Kp, Ki=Ki, sample_rate_hz=sr_hz)
@@ -140,6 +114,7 @@ def _run_numpy(
 
 
 def _ffill_mag(mag: np.ndarray) -> np.ndarray:
+    """Return ffill mag."""
     out = mag.copy()
     first_valid: np.ndarray | None = None
     last: np.ndarray | None = None

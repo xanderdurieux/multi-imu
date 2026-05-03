@@ -1,17 +1,4 @@
-"""Zoomed per-scenario signal example plots for the thesis reporting stage.
-
-For each scenario class, a representative 2-second feature window is chosen
-(highest overall quality score) and rendered as a multi-panel figure showing
-a ±context_s view around that window.
-
-Panel layout (shared X-axis, time in seconds):
-  1. Bike accelerometer — X/Y/Z axes + norm (black)
-  2. Rider accelerometer — X/Y/Z axes + norm (black)
-  3. Vertical acceleration — bike (blue) vs rider (orange)
-  4. Jerk norm — bike (blue) vs rider (orange)
-  5. Orientation — bike pitch (red) and roll (green)
-  6. Label strip — coloured bar for each label interval in view
-"""
+"""Signal examples helpers for build report tables, figures, and thesis bundles."""
 
 from __future__ import annotations
 
@@ -50,11 +37,7 @@ def find_representative_windows(
     scenario: str,
     n: int = 1,
 ) -> pd.DataFrame:
-    """Return top-n quality windows for a given scenario label.
-
-    Prefers windows with the highest ``overall_quality_score``, then largest
-    ``window_n_samples_sporsa`` as a tiebreaker.
-    """
+    """Return find representative windows."""
     mask = df["scenario_label"] == scenario
     sub = df[mask].copy()
     if sub.empty:
@@ -77,17 +60,12 @@ def find_representative_windows(
 # ---------------------------------------------------------------------------
 
 def load_section_signals(section_id: str) -> dict[str, pd.DataFrame]:
-    """Load all relevant signal DataFrames for a section.
-
-    Returns a dict with keys:
-        bike_cal, rider_cal, bike_derived, rider_derived,
-        bike_orientation, labels
-    Values are DataFrames (may be empty if file not found).
-    """
+    """Load section signals."""
     sec_dir = sections_root() / section_id
     out: dict[str, pd.DataFrame] = {}
 
     def _load(key: str, path: Path) -> None:
+        """Load."""
         out[key] = read_csv(path) if path.exists() else pd.DataFrame()
 
     _load("bike_cal",         sec_dir / "calibrated" / "sporsa.csv")
@@ -129,6 +107,7 @@ def _norm(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
 
 
 def _yclim(arr: np.ndarray, lo: float = 2.0, hi: float = 98.0) -> tuple[float, float]:
+    """Return yclim."""
     finite = arr[np.isfinite(arr)]
     if len(finite) == 0:
         return -1.0, 1.0
@@ -150,21 +129,7 @@ def plot_signal_example(
     context_s: float = 5.0,
     scenario_label: str = "",
 ) -> Optional[Path]:
-    """Generate a multi-panel zoomed signal illustration.
-
-    Parameters
-    ----------
-    section_id:
-        Section folder name (e.g. '2026-02-26_r4s1').
-    window_start_ms / window_end_ms:
-        Absolute timestamp bounds of the feature window (ms).
-    output_path:
-        Where to save the PNG.
-    context_s:
-        Seconds of context to show on each side of the window.
-    scenario_label:
-        Shown in the figure title.
-    """
+    """Plot signal example."""
     signals = load_section_signals(section_id)
 
     context_ms = context_s * 1000.0
@@ -197,6 +162,7 @@ def plot_signal_example(
     )
 
     def _shade_window(ax: plt.Axes) -> None:
+        """Return shade window."""
         ax.axvspan(
             (window_start_ms - t0_ms) / 1000.0,
             (window_end_ms   - t0_ms) / 1000.0,
@@ -399,6 +365,7 @@ def plot_cross_sensor_comparison(
     win_hi_s = (window_end_ms   - t0_ms) / 1000.0
 
     def _panel(ax: plt.Axes, df: pd.DataFrame, color: str, ylabel: str) -> None:
+        """Return panel."""
         if not df.empty and "timestamp" in df.columns:
             t = _to_s(df["timestamp"], t0_ms)
             norm_vals = _norm(df, ["ax", "ay", "az"])
@@ -443,20 +410,7 @@ def generate_all_signal_examples(
     context_s: float = 5.0,
     scenarios: list[str] | None = None,
 ) -> list[Path]:
-    """Generate signal example plots for all (or selected) scenario classes.
-
-    Parameters
-    ----------
-    df:
-        Feature table with at minimum: scenario_label, section_id,
-        window_start_ms, window_end_ms, overall_quality_score.
-    output_dir:
-        Directory where PNGs are written.
-    context_s:
-        Seconds of context shown on each side of the feature window.
-    scenarios:
-        Subset of scenario labels to process. None = all classes.
-    """
+    """Generate all signal examples."""
     required = {"scenario_label", "section_id", "window_start_ms", "window_end_ms"}
     if not required.issubset(df.columns):
         log.warning("Missing required columns for signal examples; skipping")

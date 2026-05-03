@@ -1,9 +1,4 @@
-"""Sync stage configuration (loaded from ``data/_configs/sync_args.json``).
-
-Each field is annotated with the module/function it influences. Keeping this
-config in one place lets every strategy share the same parameters while making
-the scope of each knob obvious.
-"""
+"""Config helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -21,7 +16,7 @@ SIGNAL_MODES: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class AnchorRefinementConfig:
-    """Parameters for `anchors._refine_offset_xcorr`."""
+    """Data container for anchor refinement config."""
 
     resample_rate_hz: float = 100.0  # rate for acc_norm xcorr inside each anchor window
     search_seconds: float = 1.0       # ± lag span searched around the coarse offset
@@ -29,7 +24,7 @@ class AnchorRefinementConfig:
 
 @dataclass(frozen=True)
 class WindowRefinementConfig:
-    """Parameters for windowed offset/drift refinement in `xcorr`."""
+    """Data container for window refinement config."""
 
     window_seconds: float = 20.0
     step_seconds: float = 10.0
@@ -42,22 +37,7 @@ class WindowRefinementConfig:
 
 @dataclass(frozen=True)
 class SyncConfig:
-    """Recording-level sync configuration.
-
-    Fields grouped by consumer:
-
-    Shared (activity-signal build, ``signals.build_resampled_activity_signal``):
-        signal_mode, resample_rate_hz
-    Correlation gate (``xcorr.masked_ncc``):
-        min_valid_fraction
-    Anchor extraction (``anchors.py``):
-        anchor_refinement
-    Windowed refinement (``xcorr.py``, used by adaptive + signal_only strategies):
-        window_refinement
-    Per-strategy constants:
-        signal_only_coarse_search_seconds  -> ``strategies.estimate_signal_only``
-        one_anchor_prior_drift_ppm          -> ``strategies.estimate_one_anchor_prior``
-    """
+    """Synchronization search settings."""
 
     signal_mode: str
     resample_rate_hz: float = 100.0
@@ -73,6 +53,7 @@ class SyncConfig:
 
 
 def _build(payload: dict) -> SyncConfig:
+    """Build."""
     signal_mode = payload.get("signal_mode")
     if not isinstance(signal_mode, str) or signal_mode not in SIGNAL_MODES:
         raise ValueError(

@@ -1,18 +1,4 @@
-"""Quaternion utilities for IMU orientation estimation.
-
-Quaternions are represented as NumPy arrays of shape (4,) in ``[w, x, y, z]`` order.
-
-Convention
-----------
-All quaternions in this module represent the rotation that maps vectors from the
-sensor/body frame into the world frame:
-
-    v_world = quat_rotate(q_bw, v_body)
-
-This is convenient because it lets you take raw accelerometer readings in the
-sensor frame and rotate them into a common world frame using the same
-orientation estimate used everywhere else.
-"""
+"""Quaternion math helpers for orientation estimation."""
 
 from __future__ import annotations
 
@@ -30,12 +16,7 @@ def quat_identity() -> np.ndarray:
 
 
 def quat_normalize(q: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """Return ``q`` normalized to unit length.
-
-    Falls back to identity (and logs at DEBUG) when the input norm is below
-    ``eps`` — this happens with underflow in orientation filter loops and
-    is worth surfacing when diagnosing divergence.
-    """
+    """Return a unit quaternion."""
     q = np.asarray(q, dtype=float)
     n = np.linalg.norm(q)
     if n < eps:
@@ -51,7 +32,7 @@ def quat_conjugate(q: np.ndarray) -> np.ndarray:
 
 
 def quat_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Hamilton product ``q = q1 ⊗ q2``."""
+    """Return the Hamilton product of two quaternions."""
     w1, x1, y1, z1 = np.asarray(q1, dtype=float)
     w2, x2, y2, z2 = np.asarray(q2, dtype=float)
 
@@ -76,15 +57,7 @@ def quat_from_axis_angle(axis: Iterable[float], angle_rad: float) -> np.ndarray:
 
 
 def quat_from_gyro(omega_body_rad: Iterable[float], dt: float) -> np.ndarray:
-    """Small rotation quaternion from body-frame angular velocity over ``dt``.
-
-    Parameters
-    ----------
-    omega_body_rad:
-        Angular velocity vector in body frame ``[wx, wy, wz]`` in rad/s.
-    dt:
-        Time step in seconds.
-    """
+    """Return a small rotation quaternion from gyro data."""
     omega = np.asarray(omega_body_rad, dtype=float)
     angle = np.linalg.norm(omega) * dt
     if angle == 0.0:
@@ -104,12 +77,7 @@ def quat_rotate(q_bw: np.ndarray, v_body: Iterable[float]) -> np.ndarray:
 
 
 def quat_rotate_batch(Q: np.ndarray, V_body: np.ndarray) -> np.ndarray:
-    """Rotate ``(N, 3)`` body-frame vectors into world frame using ``(N, 4)`` quaternions.
-
-    Vectorised equivalent of looping :func:`quat_rotate` per row, but with a
-    single closed-form rotation matrix expansion — much faster for streams of
-    IMU samples.  Inputs must have matching first dimension.
-    """
+    """Rotate body-frame vectors into the world frame."""
     Q = np.asarray(Q, dtype=float)
     V = np.asarray(V_body, dtype=float)
     if Q.ndim != 2 or Q.shape[1] != 4:
@@ -131,15 +99,7 @@ def quat_rotate_batch(Q: np.ndarray, V_body: np.ndarray) -> np.ndarray:
 
 
 def quat_slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
-    """Spherical linear interpolation between two unit quaternions.
-
-    Parameters
-    ----------
-    q0, q1:
-        End-point quaternions (will be normalized internally).
-    t:
-        Interpolation parameter in ``[0, 1]``.
-    """
+    """Interpolate between two quaternions."""
     q0 = quat_normalize(q0)
     q1 = quat_normalize(q1)
     dot = float(np.dot(q0, q1))
@@ -168,13 +128,7 @@ def quat_slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
 
 
 def euler_from_quat(q_bw: np.ndarray) -> Tuple[float, float, float]:
-    """Return yaw, pitch, roll (Z-Y-X) from body→world quaternion.
-
-    Angles are in radians, using the aerospace convention:
-    - yaw   ψ: rotation around world Z
-    - pitch θ: rotation around world Y
-    - roll  φ: rotation around world X
-    """
+    """Return yaw, pitch, and roll from a quaternion."""
     q = quat_normalize(q_bw)
     w, x, y, z = q
 
@@ -199,7 +153,7 @@ def euler_from_quat(q_bw: np.ndarray) -> Tuple[float, float, float]:
 
 
 def quat_from_euler(yaw: float, pitch: float, roll: float) -> np.ndarray:
-    """Create body→world quaternion from yaw, pitch, roll (Z-Y-X) in radians."""
+    """Create a body-to-world quaternion from yaw, pitch, and roll."""
     cy = np.cos(0.5 * yaw)
     sy = np.sin(0.5 * yaw)
     cp = np.cos(0.5 * pitch)
@@ -215,21 +169,7 @@ def quat_from_euler(yaw: float, pitch: float, roll: float) -> np.ndarray:
 
 
 def quat_from_rotation_matrix(R: np.ndarray) -> np.ndarray:
-    """Convert a 3×3 rotation matrix to a unit quaternion [w, x, y, z].
-
-    Uses Shepperd's method for numerical stability.  The input matrix must be
-    a proper rotation matrix (det ≈ +1, R.T @ R ≈ I).
-
-    Parameters
-    ----------
-    R:
-        3×3 rotation matrix (sensor→world or body→world convention).
-
-    Returns
-    -------
-    np.ndarray
-        Unit quaternion ``[w, x, y, z]`` representing the same rotation.
-    """
+    """Convert a rotation matrix to a quaternion."""
     R = np.asarray(R, dtype=float)
     trace = R[0, 0] + R[1, 1] + R[2, 2]
 
@@ -262,10 +202,7 @@ def quat_from_rotation_matrix(R: np.ndarray) -> np.ndarray:
 
 
 def tilt_quat_from_acc(acc_body: Iterable[float], g: float = 9.81) -> np.ndarray:
-    """Estimate roll and pitch from accelerometer, assuming it measures gravity.
-
-    Heading (yaw) is set to zero in the world frame by construction.
-    """
+    """Estimate tilt from accelerometer data."""
     ax, ay, az = np.asarray(acc_body, dtype=float)
     # Avoid division by zero; fall back to identity if completely invalid.
     if np.allclose([ax, ay, az], 0.0):

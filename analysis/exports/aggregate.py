@@ -53,31 +53,7 @@ def _session_and_suffix(name: str) -> tuple[str, str]:
 def aggregate_calibration_params(
     recording_names: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Collect calibration.json (schema v2) from all sections into a flat DataFrame.
-
-    One row per section.  Per-sensor columns (sporsa / arduino):
-
-    Intrinsics
-        ``<sensor>_gyro_bias_{x,y,z}``,
-        ``<sensor>_acc_bias_{x,y,z}`` (may be NaN when not estimated),
-        ``<sensor>_acc_scale_{x,y,z}`` (may be NaN when not estimated),
-        ``<sensor>_intrinsics_quality``, ``<sensor>_intrinsics_residual_ms2``.
-
-    Alignment
-        ``<sensor>_gravity_estimate_{x,y,z}``,
-        ``<sensor>_gravity_residual_ms2``,
-        ``<sensor>_yaw_source``,
-        ``<sensor>_yaw_confidence``,
-        ``<sensor>_alignment_window_start_ms``,
-        ``<sensor>_alignment_window_end_ms``.
-
-    Section-level
-        ``section_id``, ``recording_name``,
-        ``protocol_detected``,
-        ``calibration_quality`` (alias: ``quality_overall``),
-        ``quality_tags``,
-        ``fallback_used``.
-    """
+    """Aggregate calibration params."""
     root = sections_root()
     if not root.exists():
         log.warning("sections_root does not exist: %s", project_relative_path(root))
@@ -178,11 +154,7 @@ def aggregate_calibration_params(
 def aggregate_orientation_stats(
     recording_names: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Collect orientation_stats.json from all sections into a flat DataFrame.
-
-    One row per section.  Columns: ``section_id``, ``recording_name``,
-    ``<sensor>_residual_ms2``, ``<sensor>_quality``.
-    """
+    """Aggregate orientation stats."""
     root = sections_root()
     if not root.exists():
         log.warning("sections_root does not exist: %s", project_relative_path(root))
@@ -238,12 +210,7 @@ def aggregate_orientation_stats(
 
 
 def _unpack3(value, default: float) -> tuple[float, float, float]:
-    """Unpack a 3-element list, filling with default on failure.
-
-    Applied at the JSON-parsing boundary where the shape of ``value`` is
-    not guaranteed; narrow to type/value errors so programming mistakes
-    (e.g. missing attributes) are not silenced.
-    """
+    """Return unpack3."""
     try:
         lst = list(value)
         return float(lst[0]), float(lst[1]), float(lst[2])
@@ -252,6 +219,7 @@ def _unpack3(value, default: float) -> tuple[float, float, float]:
 
 
 def _as_float(value) -> float | None:
+    """Convert float."""
     if value is None:
         return None
     try:
@@ -267,19 +235,7 @@ def _as_float(value) -> float | None:
 def aggregate_sync_params(
     recording_names: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Collect sync parameters from all recordings into a flat DataFrame.
-
-    Reads ``<recording>/synced/sync_info.json``.
-
-    One row per recording with columns:
-    ``recording_name``, ``selected_method``, ``offset_seconds``,
-    ``drift_seconds_per_second``, ``drift_ppm``,
-    ``corr_offset_only``, ``corr_offset_and_drift``.
-
-    Per-method quality columns are also included:
-    ``<method>_available``, ``<method>_corr_offset_and_drift``,
-    ``<method>_drift_ppm``, ``<method>_drift_source``.
-    """
+    """Aggregate sync params."""
     root = recordings_root()
     if not root.exists():
         log.warning("recordings_root does not exist: %s", project_relative_path(root))
@@ -373,13 +329,7 @@ def _build_sync_row(recording_name: str, synced_dir: Path) -> dict | None:
 def aggregate_parsed_params(
     recording_names: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Collect recording_stats.json from all parsed recordings into a flat DataFrame.
-
-    One row per recording with columns:
-    ``recording_name``, ``session_name``, ``quality_category``, ``quality_reason``,
-    ``sporsa_segments``, ``arduino_segments``, and per-sensor timing fields
-    prefixed ``sporsa_`` / ``arduino_``.
-    """
+    """Aggregate parsed params."""
     root = recordings_root()
     if not root.exists():
         log.warning("recordings_root does not exist: %s", project_relative_path(root))

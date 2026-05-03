@@ -1,28 +1,4 @@
-"""Calibration-anchor extraction for synchronisation.
-
-The synchronisation model needs one time anchor per calibration sequence: a
-point where the reference and target clocks observed the same physical event.
-The recording protocol guarantees that both sensors are tapped simultaneously
-during each calibration sequence, so the **median tap timestamp** in each
-sensor stream is a direct coarse anchor.
-
-Anchor extraction:
-
-1. Load the calibration-segment JSON for both sensors (written by the parser).
-2. Match segments 1-to-1 in chronological order (equal counts required).
-3. For each pair compute a coarse offset from median peak timestamps::
-
-       coarse_offset_s = (median(ref_peak_ms) − median(tgt_peak_ms)) / 1000
-
-4. Refine each anchor by resampling the ``acc_norm`` signal within the
-   peak window at a common rate and maximising cross-correlation (via
-   :func:`sync.xcorr.estimate_lag`) within the configured local search span.
-   The best sample shift from correlation converts directly to an offset
-   correction in seconds.
-
-The result feeds directly into the drift-fitting step in
-:mod:`sync.strategies`.
-"""
+"""Anchors helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -46,11 +22,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CalibrationAnchor:
-    """A matched calibration-sequence pair with a derived time offset.
-
-    Timestamps are in **milliseconds** (raw sensor time); offset is in
-    **seconds** (consistent with the sync model).
-    """
+    """Data container for calibration anchor."""
 
     ref_ms: float   # median peak timestamp in reference stream
     tgt_ms: float   # inferred target timestamp (ref_ms − offset_s*1000)
@@ -72,12 +44,7 @@ def _refine_offset_xcorr(
     resample_rate_hz: float,
     search_seconds: float,
 ) -> tuple[float, float]:
-    """Refine *coarse_offset_s* by maximising acc_norm cross-correlation.
-
-    Uses the full segment span (not just detected peaks) so that partial
-    detections near recording gaps do not bias the window placement.
-    Searches within ±``search_seconds`` around zero sample shift.
-    """
+    """Return refine offset xcorr."""
     ref_start = ref_seg.start_ms
     ref_end = ref_seg.end_ms
 

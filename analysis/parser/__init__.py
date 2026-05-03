@@ -1,9 +1,4 @@
-"""Parsers for raw IMU log files.
-
-This package avoids eager imports so single submodules can still be executed
-even when optional higher-level pipeline modules are unavailable in the current
-checkout.
-"""
+"""Parse raw sensor logs and split recordings into sections."""
 
 from __future__ import annotations
 

@@ -1,24 +1,4 @@
-"""Thesis report bundle: assemble exactly the figures and tables needed for writing.
-
-Reads artefacts from the evaluation, exports, and reporting stages and copies
-or re-renders them into a single ``data/report/thesis_bundle/`` directory with
-a manifest (THESIS_BUNDLE.md).
-
-Artefacts produced
-------------------
-thesis_bundle/
-├── tables/
-│   ├── recording_section_counts.csv   – per-recording section/window counts
-│   ├── dataset_composition.csv        – window counts per class and quality tier
-│   ├── feature_set_comparison.csv     – accuracy / macro-F1 per model × feature set
-│   └── sync_summary.csv               – per-recording sync method and drift
-├── figures/
-│   ├── sync_summary/                  – copied from report/figures/sync/
-│   ├── feature_set_comparison.png     – model comparison figure (all feature sets)
-│   ├── best_model_confusion_matrix.png
-│   └── top_feature_importances.png
-└── THESIS_BUNDLE.md
-"""
+"""Thesis bundle helpers for build report tables, figures, and thesis bundles."""
 
 from __future__ import annotations
 
@@ -51,6 +31,7 @@ _DPI = 200
 # ---------------------------------------------------------------------------
 
 def _load_json(path: Path) -> dict:
+    """Load json."""
     if not path.exists():
         return {}
     try:
@@ -61,6 +42,7 @@ def _load_json(path: Path) -> dict:
 
 
 def _load_optional_csv(path: Path) -> pd.DataFrame:
+    """Load optional csv."""
     if not path.exists():
         log.debug("Optional CSV not found: %s", path)
         return pd.DataFrame()
@@ -85,6 +67,7 @@ def _copy_dir(src: Path, dst: Path) -> int:
 
 
 def _copy_file(src: Path, dst: Path) -> bool:
+    """Return copy file."""
     if not src.exists():
         log.warning("Source file not found: %s", src)
         return False
@@ -350,6 +333,7 @@ def _render_feature_importances(
         }
 
         def _group_color(feature: str) -> str:
+            """Return group color."""
             for prefix, color in _GROUP_COLORS.items():
                 if feature.startswith(prefix):
                     return color
@@ -438,6 +422,7 @@ def _write_manifest(
     classes: list[str],
     artefact_notes: dict[str, str],
 ) -> Path:
+    """Write manifest."""
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     lines = [
@@ -509,29 +494,7 @@ def run_thesis_bundle(
     report_dir: Optional[Path] = None,
     top_n_features: int = 20,
 ) -> dict:
-    """Assemble thesis-ready artefacts into ``output_dir/thesis_bundle/``.
-
-    Parameters
-    ----------
-    output_dir:
-        Root for thesis bundle. Defaults to ``data/report/thesis_bundle/``.
-    features_path:
-        Path to fused features CSV. Defaults to ``data/exports/features_fused.csv``.
-    evaluation_dir:
-        Evaluation output directory. Defaults to ``data/evaluation/``.
-    exports_dir:
-        Exports directory. Defaults to ``data/exports/``.
-    report_dir:
-        Report directory (for pre-rendered stage summary figures).
-        Defaults to ``data/report/``.
-    top_n_features:
-        Number of top features to show in the importances figure.
-
-    Returns
-    -------
-    dict with keys: ``bundle_dir``, ``best_key``, ``best_model``, ``best_fs``,
-    ``artefacts`` (dict of artefact name → path or status).
-    """
+    """Run thesis bundle."""
     if output_dir is None:
         output_dir = data_root() / "report" / "thesis_bundle"
     if features_path is None:

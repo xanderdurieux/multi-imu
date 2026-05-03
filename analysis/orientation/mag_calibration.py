@@ -1,32 +1,4 @@
-"""Magnetometer ellipsoid (hard + soft iron) calibration.
-
-The raw magnetometer measures ``m = A B + b + noise`` where ``A`` is the
-soft-iron transform (3×3, near-diagonal) and ``b`` is the hard-iron offset
-(3,).  Calibrated samples ``m' = A_inv @ (m - b)`` should lie on a sphere
-of constant radius, which the orientation filter expects.
-
-Fit strategy
-------------
-A direct general-quadric least-squares fit is tempting (single closed-form
-solve) but does *not* constrain the resulting Q to be positive definite.
-On noisy real-world mag streams the unconstrained Q comes back indefinite
-in practice, so we use a robust two-stage decomposition instead:
-
-1. Coope's sphere fit gives a closed-form hard-iron centre.  The same
-   linear system is well-conditioned even when the points lie on a
-   distorted ellipsoid — the centre estimate matches the ellipsoid centroid
-   to first order.
-2. After translating samples to the estimated centre, the sample
-   covariance is proportional to the ellipsoid's metric tensor.  An
-   eigendecomposition gives the principal axes; rescaling by the inverse
-   square-root of the eigenvalues maps the ellipsoid to a unit sphere.
-   This gives a symmetric soft-iron correction A_inv = U diag(λ⁻½) Uᵀ.
-
-Static six-face calibration only yields ~6 widely-spread samples (and ours
-has none at all), but a full cycling section provides thousands of mag
-readings at many heading/tilt combinations — more than enough for a stable
-fit at this complexity.
-"""
+"""Mag calibration helpers for estimate sensor orientation for calibrated section data."""
 
 from __future__ import annotations
 
@@ -44,12 +16,7 @@ _DEGENERATE_COND = 1e8  # condition number above which we reject the fit
 
 @dataclass
 class MagCalibration:
-    """Hard- and soft-iron correction for a magnetometer.
-
-    Apply with :meth:`apply` to get unit-sphere mag samples regardless of
-    rigid-body orientation.  ``residual`` is the post-fit standard deviation
-    of corrected mag norms (≈0 means a perfect ellipsoid fit).
-    """
+    """Data container for mag calibration."""
 
     offset: np.ndarray  # (3,) hard-iron bias
     transform: np.ndarray  # (3, 3) soft-iron correction (A_inv)
@@ -59,6 +26,7 @@ class MagCalibration:
 
     @classmethod
     def identity(cls) -> "MagCalibration":
+        """Return identity."""
         return cls(
             offset=np.zeros(3),
             transform=np.eye(3),
@@ -77,6 +45,7 @@ class MagCalibration:
         return out
 
     def to_dict(self) -> dict:
+        """Return a JSON-ready dictionary."""
         return {
             "offset": self.offset.tolist(),
             "transform": self.transform.tolist(),
@@ -95,11 +64,7 @@ def _coope_sphere_fit(pts: np.ndarray) -> np.ndarray:
 
 
 def fit_mag_ellipsoid(mag: np.ndarray) -> MagCalibration:
-    """Fit hard + soft iron correction from raw magnetometer samples.
-
-    Returns an identity calibration when the sample set is too small or
-    insufficiently diverse for a stable fit (logs the reason at WARNING).
-    """
+    """Fit mag ellipsoid."""
     m = np.asarray(mag, dtype=float)
     finite = np.all(np.isfinite(m), axis=1)
     pts = m[finite]

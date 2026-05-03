@@ -1,10 +1,4 @@
-"""Derived signal computation from calibrated IMU data.
-
-Functions operate on a pandas DataFrame with IMU columns:
-    timestamp, ax, ay, az, gx, gy, gz, [ax_world, ay_world, az_world, gx_world, gy_world, gz_world]
-
-Timestamps in milliseconds, accelerometer in m/s², gyro in degrees/s.
-"""
+"""Signals helpers for compute derived physical signals from calibrated imu streams."""
 
 from __future__ import annotations
 
@@ -62,26 +56,7 @@ def _compute_linear_acc(
     df_cal: pd.DataFrame,
     df_orient: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Return (ax_lin, ay_lin, az_lin, norm) arrays aligned to df_cal rows.
-
-    Uses the time-varying orientation quaternion to rotate calibrated
-    accelerometer readings into the world frame, then removes gravity.
-    The input acceleration is taken from ax_world/ay_world/az_world when
-    available (matching the input used by the orientation filter), otherwise
-    falls back to ax/ay/az.
-
-    Parameters
-    ----------
-    df_cal:
-        Calibrated sensor DataFrame (must contain timestamp + acc columns).
-    df_orient:
-        Orientation DataFrame with timestamp, qw, qx, qy, qz columns.
-
-    Returns
-    -------
-    Tuple of four arrays (all aligned to df_cal rows), or None if orientation
-    data is unavailable or missing required quaternion columns.
-    """
+    """Compute linear acc."""
     if df_orient is None or df_orient.empty:
         return None
     if not all(c in df_orient.columns for c in _QUAT_COLS):
@@ -132,43 +107,7 @@ def compute_sensor_signals(
     sample_rate_hz: float = 100.0,
     df_orient: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Compute derived signals for one sensor.
-
-    Parameters
-    ----------
-    df:
-        DataFrame with at minimum columns: timestamp, ax, ay, az, gx, gy, gz.
-        Optionally: ax_world, ay_world, az_world.
-    sample_rate_hz:
-        Nominal sampling rate used for filter design and jerk scaling.
-    df_orient:
-        Optional orientation DataFrame (timestamp, qw, qx, qy, qz) produced
-        by the orientation stage.  When provided, orientation-aware linear
-        acceleration columns are appended (see below).
-
-    Returns
-    -------
-    DataFrame with timestamp plus derived signal columns:
-
-    acc_norm          - sqrt(ax²+ay²+az²)
-    gyro_norm         - sqrt(gx²+gy²+gz²)
-    acc_vertical      - az_world if available, else az
-    acc_horizontal    - sqrt(ax_world²+ay_world²) or sqrt(ax²+ay²)
-    acc_deviation     - |acc_norm - 9.81|
-    acc_lf            - 4th-order Butterworth lowpass at 2 Hz of acc_norm
-    acc_hf            - acc_norm - acc_lf
-    jerk_norm         - norm of numerical derivative of [ax,ay,az] * sample_rate_hz
-    gyro_lf           - lowpass at 1 Hz of gyro_norm
-    gyro_hf           - gyro_norm - gyro_lf
-    energy_acc        - rolling RMS of acc_deviation over 1s window
-    energy_gyro       - rolling RMS of gyro_norm over 1s window
-
-    When df_orient is provided:
-    acc_linear_x      - dynamic (gravity-removed) world-frame acceleration, X
-    acc_linear_y      - dynamic (gravity-removed) world-frame acceleration, Y
-    acc_linear_z      - dynamic (gravity-removed) world-frame acceleration, Z
-    acc_linear_norm   - sqrt(acc_linear_x²+acc_linear_y²+acc_linear_z²)
-    """
+    """Compute sensor signals."""
     out = pd.DataFrame()
     out["timestamp"] = df["timestamp"].values
 
@@ -252,33 +191,7 @@ def compute_cross_sensor_signals(
     *,
     sample_rate_hz: float = 100.0,
 ) -> pd.DataFrame:
-    """Compute cross-sensor disagreement/coupling signals on a common time grid.
-
-    Both DataFrames are interpolated onto a common uniform timestamp grid
-    covering the overlap of their time ranges.
-
-    Parameters
-    ----------
-    sporsa_df:
-        Derived signals DataFrame for the sporsa sensor (output of
-        ``compute_sensor_signals``).  Must contain timestamp and derived
-        signal columns.
-    arduino_df:
-        Derived signals DataFrame for the arduino sensor (same schema).
-    sample_rate_hz:
-        Nominal rate used for rolling-window sizing.
-
-    Returns
-    -------
-    DataFrame with timestamp plus:
-
-    acc_diff_norm        - |acc_norm_sporsa - acc_norm_arduino|
-    gyro_diff_norm       - |gyro_norm_sporsa - gyro_norm_arduino|
-    acc_correlation      - rolling Pearson r of acc_norm over 2s window
-    acc_ratio            - acc_norm_arduino / (acc_norm_sporsa + 1e-6)
-    vertical_diff        - acc_vertical_arduino - acc_vertical_sporsa
-    disagree_score       - weighted combination: 0.6*norm(acc_diff_norm) + 0.4*norm(gyro_diff_norm)
-    """
+    """Compute cross sensor signals."""
     # Build common time grid over overlap.
     t_start = max(sporsa_df["timestamp"].iloc[0], arduino_df["timestamp"].iloc[0])
     t_end = min(sporsa_df["timestamp"].iloc[-1], arduino_df["timestamp"].iloc[-1])
@@ -301,6 +214,7 @@ def compute_cross_sensor_signals(
     common_ts = np.arange(t_start, t_end + dt_ms * 0.5, dt_ms)
 
     def _interp_series(src_df: pd.DataFrame, col: str, target_ts: np.ndarray) -> np.ndarray:
+        """Return interp series."""
         return np.interp(target_ts, src_df["timestamp"].to_numpy(dtype=float), src_df[col].to_numpy(dtype=float))
 
     sporsa_acc = _interp_series(sporsa_df, "acc_norm", common_ts)

@@ -1,27 +1,4 @@
-"""Parsed-stage plots for thesis reporting.
-
-Aggregate plots (read from parsed_recording_summary.csv)
----------------------------------------------------------
-plot_session_bar_chart(summary_df, output_path)
-    Grouped bar chart of recording durations and sample counts.
-
-plot_interval_jitter(summary_df, output_path)
-    Per-recording per-sensor median Δt with IQR error bars.
-
-plot_packet_loss(summary_df, output_path)
-    Estimated BLE packet loss rate per recording (Arduino only).
-
-Per-recording diagnostic plots
--------------------------------
-plot_timestamp_continuity(dfs, output_path)
-    Timestamp progression over sample index per sensor; flags large gaps.
-
-plot_interval_distribution(dfs, output_path)
-    Histogram of inter-sample intervals per sensor with median marker.
-
-plot_packet_loss_received(arduino_df, output_path)
-    Device Δt vs host-received Δt; highlights BLE dropout events.
-"""
+"""Plot parsed stats helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -48,12 +25,14 @@ _QUALITY_COLORS = {
 
 
 def _quality_badge(category: str) -> str:
+    """Return quality badge."""
     return {"good": "G", "usable": "U", "limited": "L"}.get(
         str(category).strip().lower(), "?"
     )
 
 
 def _quality_badge_color(category: str) -> str:
+    """Return quality badge color."""
     return _QUALITY_COLORS.get(str(category).strip().lower(), "#90A4AE")
 
 
@@ -311,7 +290,7 @@ def plot_packet_loss_received(
     arduino_df: pd.DataFrame,
     output_path: Path,
 ) -> Path | None:
-    """Device Δt vs host-received Δt; highlights BLE dropout events."""
+    """Plot device and host receive intervals."""
     if "timestamp" not in arduino_df.columns or "timestamp_received" not in arduino_df.columns:
         return None
 

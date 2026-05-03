@@ -1,22 +1,4 @@
-"""Thesis-level aggregate summary plots for calibration, synchronisation, and orientation.
-
-Each function reads exported CSVs or per-section JSON files and generates a
-publication-quality figure summarising results across ALL sections/recordings.
-
-Functions
----------
-generate_calibration_summary(cal_df, output_dir)
-    Gyro/acc bias distributions, gravity residuals, quality overview, protocol rate.
-
-generate_sync_summary(sync_df, output_dir)
-    Method selection, correlation comparison, drift distribution.
-
-generate_orientation_summary(orientation_df, output_dir)
-    Method selection, residuals, and quality — read from orientation_stats.csv.
-
-generate_all_stage_summaries(exports_dir, sections_root_dir, output_dir)
-    Top-level entry point — calls all three generators.
-"""
+"""Stage summaries helpers for build report tables, figures, and thesis bundles."""
 
 from __future__ import annotations
 
@@ -134,6 +116,7 @@ def _violin_or_box(
 
 
 def _session_from_recording(recording_name: str) -> str:
+    """Return session from recording."""
     parts = str(recording_name).rsplit("_", 1)
     if len(parts) == 2 and parts[1].startswith("r") and parts[1][1:].isdigit():
         return parts[0]
@@ -141,6 +124,7 @@ def _session_from_recording(recording_name: str) -> str:
 
 
 def _safe_path_part(value: str) -> str:
+    """Return NaN-safe path part."""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
     return safe or "unknown_session"
 
@@ -658,24 +642,7 @@ def generate_all_stage_summaries(
     sections_root_dir: Path,
     output_dir: Path,
 ) -> dict[str, list[Path]]:
-    """Generate calibration, sync, and orientation summary plots.
-
-    Parameters
-    ----------
-    exports_dir:
-        ``data/exports/`` directory containing ``parsed_recording_summary.csv``,
-        ``calibration_params.csv``, and ``sync_params.csv``.
-    sections_root_dir:
-        Kept for compatibility with callers. Orientation summaries are generated
-        from ``orientation_stats.csv`` in ``exports_dir``.
-    output_dir:
-        Root output directory; sub-folders ``parsed/``, ``calibration/``, ``sync/``,
-        ``orientation/`` are created automatically.
-
-    Returns
-    -------
-    Dict mapping stage name → list of generated Path objects.
-    """
+    """Generate all stage summaries."""
     results: dict[str, list[Path]] = {
         "parsed": [],
         "calibration": [],

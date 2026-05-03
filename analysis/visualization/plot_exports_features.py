@@ -369,6 +369,7 @@ def plot_section_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
         return None
 
     def dominant_label(sub: pd.DataFrame) -> str:
+        """Return dominant label."""
         if "scenario_label" not in sub.columns:
             return "unlabeled"
         labeled = sub[sub["scenario_label"].notna() & (sub["scenario_label"] != "unlabeled")]
@@ -430,6 +431,7 @@ def run_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     generated: list[Path] = []
 
     def _add(result: Path | list[Path] | None) -> None:
+        """Add."""
         if result is None:
             return
         if isinstance(result, list):

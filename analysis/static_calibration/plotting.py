@@ -31,11 +31,13 @@ FACE_COLORS = {
 
 
 def _relative_time_seconds(df: pd.DataFrame) -> np.ndarray:
+    """Return relative time seconds."""
     timestamps = df["timestamp"].to_numpy(dtype=float)
     return (timestamps - timestamps[0]) / 1000.0
 
 
 def _selected_interval_seconds(record: dict, df: pd.DataFrame) -> tuple[float, float]:
+    """Return selected interval seconds."""
     origin = float(df["timestamp"].iloc[0])
     start = (float(record["t_start_ms"]) - origin) / 1000.0
     end = (float(record["t_end_ms"]) - origin) / 1000.0
@@ -171,6 +173,7 @@ def plot_recording_details(
 
 
 def _analysis_window_column(df: pd.DataFrame, record: dict[str, Any], column: str) -> np.ndarray:
+    """Return analysis window column."""
     t0 = float(record["t_start_ms"])
     t1 = float(record["t_end_ms"])
     sub = df[(df["timestamp"] >= t0) & (df["timestamp"] <= t1)]

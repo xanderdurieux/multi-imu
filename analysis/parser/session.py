@@ -36,10 +36,7 @@ log = logging.getLogger(__name__)
 
 
 def _process_file(sensor_type: str, src: Path, dst: Path):
-    """Dispatch one raw log file (or folder) to the matching parser and write CSV output.
-
-    Returns the parsed DataFrame on success, or None if the file is skipped.
-    """
+    """Process file."""
     if sensor_type == "arduino":
         df = parse_arduino_log(src)
     elif sensor_type == "sporsa":
@@ -256,6 +253,7 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         prog="python -m parser",
         description="Parse all recordings for a session date into CSVs, plots, and stats.",
@@ -273,6 +271,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    """Run the command-line interface."""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
     process_session(args.session_name, plot=not args.no_plot)

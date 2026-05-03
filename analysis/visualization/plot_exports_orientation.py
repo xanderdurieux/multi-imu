@@ -24,15 +24,18 @@ log = logging.getLogger(__name__)
 
 
 def _numeric(series: pd.Series) -> pd.Series:
+    """Return numeric."""
     return pd.to_numeric(series, errors="coerce")
 
 
 def _residual_values(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return residual values."""
     vals = _numeric(df[col])
     return vals.replace([np.inf, -np.inf], np.nan)
 
 
 def plot_orientation_quality_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot orientation quality overview."""
     out_path = output_dir / "orientation_quality_overview.png"
     if df.empty or "section_id" not in df.columns:
         return None
@@ -80,6 +83,7 @@ def plot_orientation_quality_overview(df: pd.DataFrame, output_dir: Path) -> Pat
 
 
 def plot_orientation_residuals(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot orientation residuals."""
     out_path = output_dir / "orientation_residuals.png"
     if df.empty or "section_id" not in df.columns:
         return None
@@ -141,6 +145,7 @@ def plot_orientation_residuals(df: pd.DataFrame, output_dir: Path) -> Path | Non
 
 
 def run_orientation_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
+    """Run orientation eda."""
     if df.empty:
         log.warning("Orientation stats DataFrame is empty; skipping orientation EDA")
         return []

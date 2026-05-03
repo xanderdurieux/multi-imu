@@ -1,13 +1,4 @@
-"""Sync-stage visualizations — diagnostic plots for per-recording synchronization.
-
-CLI (from the ``analysis`` directory)::
-
-    python -m visualization.plot_sync <recording>
-    python -m visualization.plot_sync all <recording>
-    python -m visualization.plot_sync before-after <recording>
-    python -m visualization.plot_sync offset-drift <recording>
-    python -m visualization.plot_sync offset-drift-zoomed <recording> [--zoom-start S] [--zoom-end S]
-"""
+"""Plot sync helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -70,11 +61,7 @@ _METHOD_LABELS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _load_sync_infos(recording_name: str) -> dict[str, dict | None]:
-    """Load sync model info for every method.
-
-    Your pipeline produces a consistent layout:
-    - ``synced/sync_info.json`` contains the selected model plus per-method summaries.
-    """
+    """Load sync infos."""
     synced_root = recording_stage_dir(recording_name, "synced")
     sync_info_path = synced_root / "sync_info.json"
     if not sync_info_path.exists():
@@ -259,18 +246,7 @@ def draw_sync_model_comparison(
     anchors: list[dict] | None = None,
     show_anchor_scorebar: bool = False,
 ) -> plt.Axes:
-    """Draw sync method offset lines + calibration anchor scatter on *ax*.
-
-    **Coordinate system** (origin = ``target_time_origin_seconds``):
-
-    - x-axis: τ_tgt = t_tgt − origin_s  (target clock, s from recording start)
-    - y-axis: Δ = t_ref − t_tgt  (local offset between clocks, s)
-
-    Each method is drawn as the offset model
-    ``Δ(τ_tgt) = offset_seconds + drift_seconds_per_second * τ_tgt``.
-    Calibration anchors appear as score-colored dots at their measured
-    ``(τ_tgt, offset_s)`` positions.
-    """
+    """Draw sync model comparison."""
     if anchors is None:
         anchors = _collect_anchors(sync_infos)
 
@@ -518,15 +494,7 @@ def plot_before_after_imu(
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Accelerometer |acc|: parsed sensors separately, then merged synced pair.
-
-    Three-panel layout:
-
-    - **Before (top two)**: SPORSA and Arduino each at their own t = 0
-    - **After (bottom)**: both sensors on a shared timeline post-sync
-
-    Output: ``synced/before_after_comparison.png``.
-    """
+    """Plot before after imu."""
     parsed_dir = recording_stage_dir(recording_name, "parsed")
     synced_dir = recording_stage_dir(recording_name, "synced")
 
@@ -595,15 +563,7 @@ def plot_sync_offset_drift_model_comparison(
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Offset vs target time: all sync methods as model lines + calibration anchors.
-
-    The coordinate origin is ``target_time_origin_seconds`` (the Arduino epoch),
-    so each method line starts at ``offset_seconds`` and changes with slope
-    ``drift_seconds_per_second``. This keeps the y-axis in offset space, which
-    makes anchor-vs-model differences visible at millisecond scale.
-
-    Output: ``synced/offset_drift_comparison.png``.
-    """
+    """Plot sync offset drift model comparison."""
     synced_dir = recording_stage_dir(recording_name, "synced")
     if not synced_dir.is_dir():
         raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
@@ -646,15 +606,7 @@ def plot_sync_zoomed_comparison(
     zoom_end_s: float | None = None,
     output_path: Path | None = None,
 ) -> Path:
-    """Three-window synced comparison between SPORSA and Arduino.
-
-    Creates three stacked comparison panels from the synced streams:
-    the first, middle, and final 45 s of the shared recording overlap.
-    ``zoom_start_s`` / ``zoom_end_s`` remain accepted for CLI compatibility,
-    but are ignored by this view.
-
-    Output: ``synced/zoomed_comparison.png``.
-    """
+    """Plot sync zoomed comparison."""
     synced_dir = recording_stage_dir(recording_name, "synced")
     if not synced_dir.is_dir():
         raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
@@ -729,10 +681,7 @@ def plot_sync_method_metrics(
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Plot method correlation bars with selected-method highlight and metrics table.
-
-    Output: ``synced/method_metrics_comparison.png``.
-    """
+    """Plot sync method metrics."""
     synced_dir = recording_stage_dir(recording_name, "synced")
     if not synced_dir.is_dir():
         raise FileNotFoundError(f"Synced directory not found: {synced_dir}")
@@ -874,18 +823,7 @@ def plot_anchor_fits(
     *,
     output_path: Path | None = None,
 ) -> Path:
-    """Per-anchor acc_norm alignment: ref vs tgt under coarse and refined offset.
-
-    One panel per calibration anchor.  Each panel overlays:
-
-    - **ref** (blue): acc_norm over the full segment window.
-    - **tgt coarse** (orange dashed): tgt acc_norm shifted by the shake-center offset.
-    - **tgt refined** (orange solid): tgt acc_norm shifted by the xcorr-refined offset.
-    - Detected peaks for both sensors as vertical dashed lines.
-    - Shake zone shaded in light grey.
-
-    Output: ``synced/anchor_fits.png``.
-    """
+    """Plot anchor fits."""
     from parser.calibration_segments import load_calibration_segments_from_json
     from sync.signals import load_stream, resample_stream
 
@@ -914,6 +852,7 @@ def plot_anchor_fits(
     tgt_df = load_stream(parsed_dir / f"{_TGT_SENSOR}.csv")
 
     def _shake_center(seg) -> float:
+        """Return shake center."""
         return (seg.start_ms + seg.static_pre_ms + seg.end_ms - seg.static_post_ms) / 2.0
 
     n = len(ref_segs)
@@ -1045,6 +984,7 @@ def plot_sync_stage(recording_name: str, output_path: Path | None = None):
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         prog="python -m visualization.plot_sync",
         description=(
@@ -1071,6 +1011,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     argv = list(argv if argv is not None else sys.argv[1:])
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 

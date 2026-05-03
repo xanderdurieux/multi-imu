@@ -1,9 +1,4 @@
-"""Plot derived signals for one section.
-
-Generates:
-- ``derived/derived_overview.png``     all derived signals, both sensors
-- ``derived/linear_acceleration.png``  orientation-aware linear acc, per axis
-"""
+"""Plot derived helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -39,6 +34,7 @@ _AXIS_COLORS = {"x": "#e41a1c", "y": "#4daf4a", "z": "#377eb8"}
 # ---------------------------------------------------------------------------
 
 def _load_derived_csvs(section_dir: Path) -> dict[str, pd.DataFrame]:
+    """Load derived csvs."""
     derived_dir = section_dir / "derived"
     out: dict[str, pd.DataFrame] = {}
     for name in ("sporsa_signals", "arduino_signals", "cross_sensor_signals"):
@@ -245,6 +241,7 @@ def plot_linear_acceleration(section_dir: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 def _get_method_label(section_dir: Path) -> str:
+    """Return get method label."""
     data = load_json(section_dir / "orientation" / "orientation_stats.json")
     if data:
         return data.get("selected_method", "orientation")
@@ -272,6 +269,7 @@ def plot_derived_stage(target: str | Path) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(prog="python -m visualization.plot_derived")

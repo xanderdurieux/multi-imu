@@ -1,11 +1,4 @@
-"""CLI entry point for the orientation estimation stage.
-
-Usage::
-
-    python -m orientation <section_name>
-    python -m orientation <section_name> --force
-    python -m orientation --recording <recording_name>
-"""
+"""Command-line entry point for orientation."""
 
 from __future__ import annotations
 
@@ -19,6 +12,7 @@ from .pipeline import process_section_orientation, process_recording_orientation
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     argv = list(argv if argv is not None else sys.argv[1:])
 

@@ -1,9 +1,4 @@
-"""Plot raw or processed IMU data for a single sensor.
-
-CLI usage::
-
-    python -m visualization.plot_sensor <recording>/<stage> <sensor> [--norm] [--acc]
-"""
+"""Plot sensor helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -35,10 +30,7 @@ def plot_sensor_data(
     acc_only: bool = False,
     output_path: Path | None = None,
 ) -> Path:
-    """Load a sensor CSV and save a plot.
-
-    Returns the path of the saved figure.
-    """
+    """Plot sensor data."""
     df = read_csv(csv_path)
     for col in ["timestamp", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"]:
         if col in df.columns:
@@ -126,6 +118,7 @@ def plot_sensor_data(
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(prog="python -m visualization.plot_sensor")

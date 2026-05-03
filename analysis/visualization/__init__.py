@@ -21,6 +21,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    """Lazily import visualization helpers."""
     if name == "thesis_plots":
         from . import thesis_plots as _thesis_plots
 
@@ -29,4 +30,5 @@ def __getattr__(name: str):
 
 
 def __dir__():
+    """Return exported visualization helper names."""
     return sorted({*globals(), *__all__})

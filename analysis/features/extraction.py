@@ -1,23 +1,4 @@
-"""Windowed feature extraction dispatcher for dual-IMU calibrated data.
-
-All features are extracted for a single time window. Every public function
-takes pre-sliced DataFrames and returns a flat dict of scalar feature values.
-
-Feature families (split into sibling modules):
-
-- ``stats_helpers`` - basic window stats (mean, std, iqr, skew, ...)
-- ``spectral``      - FFT-based centroid / band energies / dominant freq
-- ``orientation_features`` - pitch/roll mean/std + rate std
-- ``cross_sensor``  - inter-sensor agreement, disagreement, energy ratio
-- ``labels``        - fine/coarse/binary label taxonomy + assignment
-- ``quality``       - multi-IMU quality scoring
-
-Naming conventions for feature columns:
-
-- ``bike_``  prefix -> sporsa sensor (frame / bike)
-- ``rider_`` prefix -> arduino sensor (rider / body)
-- ``cross_`` prefix -> cross-sensor comparison features
-"""
+"""Extraction helpers for extract labelled sliding-window features from section signals."""
 
 from __future__ import annotations
 
@@ -62,6 +43,7 @@ except AttributeError:
 
 
 def _peak_features(prefix: str, arr: np.ndarray) -> dict[str, float]:
+    """Return peak features."""
     out = {f"{prefix}_peak_count": 0.0, f"{prefix}_peak_max": float("nan"), f"{prefix}_peak_prominence_mean": float("nan"), f"{prefix}_peak_prominence_max": float("nan"), f"{prefix}_peak_width_mean": float("nan")}
     x = arr[np.isfinite(arr)]
     if len(x) < 4:
@@ -79,6 +61,7 @@ def _peak_features(prefix: str, arr: np.ndarray) -> dict[str, float]:
 
 
 def _bandpower_features(prefix: str, arr: np.ndarray, sample_rate_hz: float) -> dict[str, float]:
+    """Return bandpower features."""
     out: dict[str, float] = {}
     x = arr[np.isfinite(arr)]
     for lo, hi in _BANDS:
@@ -115,11 +98,7 @@ def extract_window_features(
     label_config: LabelConfig | None = None,
     quality_metadata: dict[str, float | str | int | bool] | None = None,
 ) -> dict[str, float | str | int]:
-    """Extract all features for one window and return a flat dict.
-
-    See submodule docstrings for the feature definitions themselves. This
-    function wires window slices to each family and flattens the output.
-    """
+    """Return extract window features."""
     feats: dict[str, float | str | int] = {}
 
     # ------------------------------------------------------------------

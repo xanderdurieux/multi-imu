@@ -15,7 +15,7 @@ _DISAGREE_THRESH = 4.0
 
 
 def _linear_slope(arr: np.ndarray) -> float:
-    """Least-squares linear trend. Returns nan when fewer than 2 finite values."""
+    """Return linear slope."""
     finite_idx = np.where(np.isfinite(arr))[0]
     if len(finite_idx) < 2:
         return float("nan")

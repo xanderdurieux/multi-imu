@@ -26,11 +26,13 @@ log = logging.getLogger(__name__)
 
 
 def _safe_path_part(value: str) -> str:
+    """Return NaN-safe path part."""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
     return safe or "unknown_session"
 
 
 def plot_sync_method_selection(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot sync method selection."""
     out_path = output_dir / "sync_method_selection.png"
     if df.empty or "recording_name" not in df.columns or "selected_method" not in df.columns:
         return None
@@ -53,6 +55,7 @@ def plot_sync_method_selection(df: pd.DataFrame, output_dir: Path) -> Path | Non
 
 
 def plot_sync_method_availability(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot sync method availability."""
     out_path = output_dir / "sync_method_availability.png"
     if df.empty or "recording_name" not in df.columns:
         return None
@@ -80,6 +83,7 @@ def plot_sync_method_availability(df: pd.DataFrame, output_dir: Path) -> Path | 
 
 
 def plot_sync_correlation_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot sync correlation overview."""
     out_path = output_dir / "sync_correlation_overview.png"
     if df.empty or "recording_name" not in df.columns:
         return None
@@ -133,6 +137,7 @@ def plot_sync_correlation_overview(df: pd.DataFrame, output_dir: Path) -> Path |
 
 
 def plot_sync_drift_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot sync drift overview."""
     out_path = output_dir / "sync_drift_overview.png"
     if df.empty or "recording_name" not in df.columns:
         return None
@@ -203,6 +208,7 @@ def plot_sync_drift_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
 
 
 def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot sync calibration anchor overview."""
     out_path = output_dir / "sync_calibration_anchors_overview.png"
     if df.empty or "recording_name" not in df.columns:
         return None
@@ -254,6 +260,7 @@ def plot_sync_calibration_anchor_overview(df: pd.DataFrame, output_dir: Path) ->
 
 
 def plot_sync_offset_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Plot sync offset overview."""
     out_path = output_dir / "sync_offset_overview.png"
     if df.empty or "recording_name" not in df.columns or "offset_seconds" not in df.columns:
         return None
@@ -446,6 +453,7 @@ def plot_sync_session_drift(df: pd.DataFrame, output_dir: Path) -> Path | None:
 
 
 def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
+    """Run sync eda."""
     if df.empty:
         log.warning("Sync params DataFrame is empty; skipping sync EDA")
         return []
@@ -454,6 +462,7 @@ def run_sync_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     generated: list[Path] = []
 
     def _add(result):
+        """Add."""
         if result is not None:
             generated.append(result)
 

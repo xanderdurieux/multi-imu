@@ -1,14 +1,4 @@
-"""Recording-level sync I/O, method orchestration, and CLI entrypoint.
-
-Workflow per recording:
-
-1. Run each strategy in ``SYNC_METHODS`` order; write its outputs to
-   ``synced/<method>/`` (``sporsa.csv``, ``arduino.csv``, ``sync_info.json``,
-   ``sync_metadata.json``).
-2. Load all per-method ``sync_info.json`` files and pick the winner via
-   ``selection.select_best_sync_method``.
-3. Copy the winner into flat ``synced/`` and prune the per-method dirs.
-"""
+"""Pipeline helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -69,6 +59,7 @@ _STRATEGIES = {
 
 @dataclass
 class MethodResult:
+    """Data container for method result."""
     method: str
     ok: bool
     error: Optional[str] = None
@@ -76,6 +67,7 @@ class MethodResult:
 
 @dataclass
 class RecordingResult:
+    """Data container for recording result."""
     recording_name: str
     method_results: list[MethodResult] = field(default_factory=list)
     selection: Optional[SyncSelectionResult] = None
@@ -83,10 +75,12 @@ class RecordingResult:
 
     @property
     def succeeded(self) -> list[str]:
+        """Return succeeded."""
         return [r.method for r in self.method_results if r.ok]
 
     @property
     def failed(self) -> list[str]:
+        """Return failed."""
         return [r.method for r in self.method_results if not r.ok]
 
 
@@ -96,6 +90,7 @@ class RecordingResult:
 
 
 def _drop_alignment_columns(df):
+    """Return drop alignment columns."""
     drop = [c for c in ("timestamp_orig", "timestamp_aligned", "timestamp_received")
             if c in df.columns]
     return df.drop(columns=drop) if drop else df
@@ -104,6 +99,7 @@ def _drop_alignment_columns(df):
 def _method_summary_block(
     model, meta: dict[str, Any], correlation: dict[str, Any]
 ) -> dict[str, Any]:
+    """Return method summary block."""
     calibration = meta.get("calibration") or {}
     return {
         "available": True,
@@ -121,6 +117,7 @@ def _method_summary_block(
 def _build_sync_info(
     *, method: str, model, meta: dict[str, Any], correlation: dict[str, Any]
 ) -> dict[str, Any]:
+    """Build sync info."""
     payload: dict[str, Any] = {
         "selected_method": method,
         "target_time_origin_seconds": model.target_time_origin_seconds,
@@ -140,6 +137,7 @@ def _build_sync_info(
 def _build_sync_metadata(
     *, reference_csv: Path, target_csv: Path, meta: dict[str, Any]
 ) -> dict[str, Any]:
+    """Build sync metadata."""
     payload: dict[str, Any] = {
         "created_at_utc": datetime.now(UTC).isoformat(),
         "reference_csv": str(reference_csv),
@@ -218,6 +216,7 @@ def _run_method(
 
 
 def _prune_method_stage_directories(recording_name: str) -> None:
+    """Return prune method stage directories."""
     for method in SYNC_METHODS:
         path = recording_stage_dir(recording_name, method_stage(method))
         if path.is_dir():
@@ -335,7 +334,7 @@ def synchronize_recording_chosen_method(
 
 
 def _synchronize_session(session_name: str) -> list[RecordingResult]:
-    """Run sync for every recording in a session (CLI helper)."""
+    """Synchronize session."""
     root = recordings_root()
     recordings = sorted(
         d.name
@@ -363,6 +362,7 @@ def _synchronize_session(session_name: str) -> list[RecordingResult]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(
         prog="python -m sync",

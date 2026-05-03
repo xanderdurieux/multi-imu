@@ -1,18 +1,4 @@
-"""Mahony MARG orientation filter.
-
-Implements the Mahony complementary filter with PI gyroscope correction
-derived from accelerometer and magnetometer measurements.
-
-Reference
----------
-Mahony, R., Hamel, T., & Pflimlin, J.-M. (2008). Nonlinear complementary
-filters on the special orthogonal group. IEEE Transactions on Automatic
-Control, 53(5), 1203–1218.
-
-Madgwick, S. O. H., Harrison, A. J. L., & Vaidyanathan, R. (2011).
-Estimation of IMU and MARG orientation using a gradient descent algorithm.
-IEEE International Conference on Rehabilitation Robotics.
-"""
+"""Mahony helpers for estimate sensor orientation for calibrated section data."""
 
 from __future__ import annotations
 
@@ -26,23 +12,10 @@ from common.quaternion import (
 
 
 class MahonyFilter:
-    """Mahony MARG orientation filter.
-
-    Uses a proportional-integral (PI) controller on the gyroscope rate to
-    fuse accelerometer and (optionally) magnetometer measurements.
-
-    Parameters
-    ----------
-    Kp:
-        Proportional gain.  Higher values give faster convergence but more
-        susceptibility to measurement noise.  Default 2.0.
-    Ki:
-        Integral gain for gyroscope bias estimation.  Default 0.005.
-    sample_rate_hz:
-        Expected sampling rate in Hz (used as default dt).
-    """
+    """Stateful Mahony orientation filter."""
 
     def __init__(self, Kp: float = 2.0, Ki: float = 0.005, sample_rate_hz: float = 100.0) -> None:
+        """Return init."""
         self.Kp = Kp
         self.Ki = Ki
         self._dt = 1.0 / sample_rate_hz
@@ -50,14 +23,17 @@ class MahonyFilter:
         self._integral: np.ndarray = np.zeros(3)
 
     def reset(self, q: np.ndarray | None = None) -> None:
+        """Return reset."""
         self._q = quat_normalize(q) if q is not None else quat_identity()
         self._integral = np.zeros(3)
 
     def initialize_from_acc(self, acc: np.ndarray) -> None:
+        """Return initialize from acc."""
         self._q = tilt_quat_from_acc(acc)
         self._integral = np.zeros(3)
 
     def current_quaternion(self) -> np.ndarray:
+        """Return current quaternion."""
         return self._q.copy()
 
     def update(
@@ -67,19 +43,7 @@ class MahonyFilter:
         mag: np.ndarray | None = None,
         dt: float | None = None,
     ) -> np.ndarray:
-        """Run one filter step and return the updated quaternion [w, x, y, z].
-
-        Parameters
-        ----------
-        acc:
-            Accelerometer [ax, ay, az] m/s² (normalised internally).
-        gyro_rad:
-            Gyroscope [gx, gy, gz] rad/s.
-        mag:
-            Optional magnetometer [mx, my, mz] (any unit, normalised internally).
-        dt:
-            Time step in seconds. Defaults to ``1 / sample_rate_hz``.
-        """
+        """Return update."""
         if dt is None:
             dt = self._dt
 

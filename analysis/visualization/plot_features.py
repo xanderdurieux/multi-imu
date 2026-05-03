@@ -28,6 +28,7 @@ _DEFAULT_PREFIXES = ("bike_", "rider_", "cross_")
 
 
 def _resolve_features_csv(target: str | Path) -> Path:
+    """Resolve features csv."""
     base = resolve_data_dir(target)
     if base.name == "features" and (base / "features.csv").exists():
         return base / "features.csv"
@@ -41,6 +42,7 @@ def _resolve_features_csv(target: str | Path) -> Path:
 
 
 def _default_x_axis(df: pd.DataFrame) -> np.ndarray:
+    """Return the default x axis."""
     if "window_idx" in df.columns:
         x = pd.to_numeric(df["window_idx"], errors="coerce").to_numpy(dtype=float)
     elif "window_start_ms" in df.columns:
@@ -51,6 +53,7 @@ def _default_x_axis(df: pd.DataFrame) -> np.ndarray:
 
 
 def _select_feature_columns(df: pd.DataFrame, top_n: int) -> list[str]:
+    """Select feature columns."""
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     candidates = [c for c in numeric_cols if c not in _EXCLUDE_COLS]
     if not candidates:
@@ -118,6 +121,7 @@ def plot_features_stage(
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(prog="python -m visualization.plot_features")

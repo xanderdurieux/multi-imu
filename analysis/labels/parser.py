@@ -1,32 +1,4 @@
-"""Label file parsing.
-
-Canonical label CSV format
---------------------------
-Columns:
-    start_ms        float   Absolute timestamp (ms) of interval start.
-    end_ms          float   Absolute timestamp (ms) of interval end.
-    start_s         float   Optional seconds from the folder origin used while labeling.
-    end_s           float   Optional seconds from the folder origin used while labeling.
-    label           str     Short event/scenario label (e.g. "bump", "sprint").
-    scenario_label  str     Broader scenario label (e.g. "road_section_1").
-    scope           str     One of "section", "interval", "event".
-    recording_id    str     Recording identifier (optional).
-    section_id      str     Section identifier (optional).
-    label_source    str     Source of the label rows (optional).
-    annotator       str     Annotator identifier (optional).
-    confidence      float   Annotation confidence in [0, 1] (optional, default 1.0).
-    ambiguous       bool    True if the annotation is uncertain (optional).
-    notes           str     Free-form notes (optional).
-
-Legacy event-labeler CSVs that store ``window_start_s`` / ``window_end_s`` are
-also accepted. When ``time_origin_ms`` is provided to :func:`load_labels`, those
-relative seconds are converted into absolute ``start_ms`` / ``end_ms`` values.
-
-Label JSON format
------------------
-A JSON file with a top-level key ``"labels"`` containing a list of objects
-with the same field names as the CSV columns above.
-"""
+"""Parser helpers for parse, inspect, and transfer manual interval labels."""
 
 from __future__ import annotations
 
@@ -66,6 +38,7 @@ class LabelRow:
         *,
         time_origin_ms: float | None = None,
     ) -> "LabelRow":
+        """Create an instance from a dictionary."""
         start_s = _maybe_float(
             d.get("start_s", d.get("window_start_s"))
         )
@@ -103,6 +76,7 @@ class LabelRow:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready dictionary."""
         return {
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
@@ -122,6 +96,7 @@ class LabelRow:
 
 
 def _clean_str(value: Any) -> str:
+    """Return clean str."""
     if value is None:
         return ""
     text = str(value).strip()
@@ -129,6 +104,7 @@ def _clean_str(value: Any) -> str:
 
 
 def _maybe_float(value: Any) -> float | None:
+    """Return maybe float."""
     if value is None:
         return None
     text = str(value).strip()
@@ -141,6 +117,7 @@ def _maybe_float(value: Any) -> float | None:
 
 
 def _parse_bool(value: Any) -> bool:
+    """Parse bool."""
     if isinstance(value, bool):
         return value
     text = str(value).strip().lower()
@@ -152,10 +129,7 @@ def _parse_bool(value: Any) -> bool:
 
 
 def load_labels(path: Path | str, *, time_origin_ms: float | None = None) -> list[LabelRow]:
-    """Load labels from a CSV or JSON file.
-
-    Returns an empty list if the file does not exist.
-    """
+    """Load labels."""
     p = Path(path)
     if not p.exists():
         return []
@@ -166,6 +140,7 @@ def load_labels(path: Path | str, *, time_origin_ms: float | None = None) -> lis
 
 
 def _load_csv_labels(path: Path, *, time_origin_ms: float | None = None) -> list[LabelRow]:
+    """Load csv labels."""
     try:
         df = read_csv(path)
     except Exception:
@@ -180,6 +155,7 @@ def _load_csv_labels(path: Path, *, time_origin_ms: float | None = None) -> list
 
 
 def _load_json_labels(path: Path, *, time_origin_ms: float | None = None) -> list[LabelRow]:
+    """Load json labels."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:

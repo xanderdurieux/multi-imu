@@ -1,10 +1,4 @@
-"""Protocol-aware IMU calibration and world-frame alignment.
-
-CLI::
-
-    python -m calibration <section_name>
-    python -m calibration --recording 2026-02-26_r1 --force
-"""
+"""Estimate and apply section-level IMU calibration."""
 
 from .core import (
     OpeningSequence,

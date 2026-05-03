@@ -1,21 +1,4 @@
-"""CLI for running individual pipeline stages.
-
-Usage::
-
-    python -m pipeline <stage> [target] [options]
-
-Stages: calibration, orientation, derived, features, exports
-
-Examples::
-
-    python -m pipeline calibration 2026-02-26_r1s1
-    python -m pipeline calibration --recording 2026-02-26_r1
-    python -m pipeline calibration --recording 2026-02-26_r1 --frame gravity_plus_forward
-    python -m pipeline orientation 2026-02-26_r1s1 --filter madgwick
-    python -m pipeline derived --recording 2026-02-26_r1
-    python -m pipeline features --recording 2026-02-26_r1 --window 2.0 --hop 1.0
-    python -m pipeline exports --quality good
-"""
+"""Command-line entry point for pipeline."""
 
 from __future__ import annotations
 
@@ -29,6 +12,7 @@ from visualization.stage_plots import plot_section_pipeline_stage
 
 
 def _section_dir(name: str) -> Path:
+    """Return section dir."""
     try:
         parse_section_folder_name(name)
     except ValueError:
@@ -48,6 +32,7 @@ def _run_stage_plots_for_sections(recording: str, stage: str) -> None:
 
 
 def _run_calibration(args: argparse.Namespace) -> None:
+    """Run calibration."""
     from calibration.pipeline import calibrate_section, calibrate_recording_sections
     if args.recording:
         cals = calibrate_recording_sections(
@@ -67,6 +52,7 @@ def _run_calibration(args: argparse.Namespace) -> None:
 
 
 def _run_orientation(args: argparse.Namespace) -> None:
+    """Run orientation."""
     from orientation.pipeline import process_section_orientation, process_recording_orientation
 
     if args.recording:
@@ -83,6 +69,7 @@ def _run_orientation(args: argparse.Namespace) -> None:
 
 
 def _run_derived(args: argparse.Namespace) -> None:
+    """Run derived."""
     from derived.pipeline import process_section_derived, process_recording_derived
     if args.recording:
         ok_list = process_recording_derived(args.recording, force=args.force)
@@ -94,6 +81,7 @@ def _run_derived(args: argparse.Namespace) -> None:
 
 
 def _run_features(args: argparse.Namespace) -> None:
+    """Run features."""
     from features.pipeline import process_section_features, process_recording_features
     if args.recording:
         df = process_recording_features(
@@ -116,6 +104,7 @@ def _run_features(args: argparse.Namespace) -> None:
 
 
 def _run_exports(args: argparse.Namespace) -> None:
+    """Run exports."""
     from exports.pipeline import run_exports
     recordings = [args.recording] if args.recording else None
     paths = run_exports(recordings, min_quality_label=args.quality, force=args.force)
@@ -133,6 +122,7 @@ _STAGE_RUNNERS = {
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     argv = list(argv if argv is not None else sys.argv[1:])
 

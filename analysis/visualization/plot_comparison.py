@@ -1,9 +1,4 @@
-"""Plot overlaid comparison of bike and rider IMU signals.
-
-CLI usage::
-
-    python -m visualization.plot_comparison <recording>/<stage> [--norm]
-"""
+"""Plot comparison helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -132,6 +127,7 @@ def plot_stage_data(
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(prog="python -m visualization.plot_comparison")

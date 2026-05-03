@@ -1,4 +1,4 @@
-"""Internal visualization utilities — shared constants, IO, and plot helpers."""
+"""Internal visualization constants and helpers."""
 
 from __future__ import annotations
 
@@ -42,10 +42,7 @@ MAG_COLS: tuple[str, ...] = ("mx", "my", "mz")
 
 
 def label_color(label: str, label_list: list[str]) -> str:
-    """Return a stable color for ``label`` given its position in ``label_list``.
-
-    Unknown labels fall back to ``UNKNOWN_LABEL_COLOR``.
-    """
+    """Return label color."""
     try:
         return QUALITATIVE_PALETTE[label_list.index(label) % len(QUALITATIVE_PALETTE)]
     except ValueError:
@@ -83,7 +80,7 @@ def filter_valid_plot_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.n
 
 
 def acc_norm(df: pd.DataFrame) -> np.ndarray | None:
-    """Accelerometer magnitude — uses pre-computed ``acc_norm`` column when present."""
+    """Return accelerometer magnitude."""
     if "acc_norm" in df.columns:
         return pd.to_numeric(df["acc_norm"], errors="coerce").to_numpy(dtype=float)
     cols = [c for c in ACC_COLS if c in df.columns]
@@ -91,7 +88,7 @@ def acc_norm(df: pd.DataFrame) -> np.ndarray | None:
 
 
 def gyro_norm(df: pd.DataFrame) -> np.ndarray | None:
-    """Gyroscope magnitude — uses pre-computed ``gyro_norm`` column when present."""
+    """Return gyroscope magnitude."""
     if "gyro_norm" in df.columns:
         return pd.to_numeric(df["gyro_norm"], errors="coerce").to_numpy(dtype=float)
     cols = [c for c in GYRO_COLS if c in df.columns]
@@ -139,7 +136,7 @@ def relative_seconds(ts_ms: np.ndarray, t0_ms: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def load_json(path: Path) -> dict | None:
-    """Load a JSON file. Returns None if the file is missing or unreadable."""
+    """Load json."""
     if not path.exists():
         return None
     try:
@@ -150,15 +147,12 @@ def load_json(path: Path) -> dict | None:
 
 
 def prepare_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop NaN timestamps, sort, reset index — standard pre-plot cleanup."""
+    """Sort and clean a sensor table for plotting."""
     return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
 
 def load_sensor_df(stage_dir: Path, sensor: str) -> pd.DataFrame | None:
-    """Load a sensor CSV, coerce to numeric, and prepare for plotting.
-
-    Returns None if the CSV does not exist.
-    """
+    """Load sensor df."""
     csv = stage_dir / f"{sensor}.csv"
     if not csv.exists():
         return None

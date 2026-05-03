@@ -1,11 +1,4 @@
-"""Recording-level synchronization package.
-
-Tier hierarchy (strongest to weakest):
-  1. multi_anchor        — shared anchor extraction + anchor-fit drift
-  2. one_anchor_adaptive — first anchor + causal signal refinement
-  3. one_anchor_prior    — first anchor + fixed drift prior
-  4. signal_only         — coarse signal alignment + windowed drift refinement
-"""
+"""Align Arduino timestamps to the Sporsa reference clock."""
 
 from .model import (
     SyncModel,

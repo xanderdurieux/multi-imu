@@ -1,22 +1,4 @@
-"""Interactive browser labeler: synced IMU (acc, gyro, mag) + session GPS on a map.
-
-Time on the x-axis is **seconds from the first ``sporsa`` sample** in the chosen folder.
-Exported CSVs include both these relative seconds and feature-compatible
-absolute ``start_ms`` / ``end_ms`` timestamps.
-
-GPS is clipped to the IMU span plus a few seconds, loaded from
-``data/_sessions/<session>/*gps*.csv``. The map sits beside the time stack; charts use the browser width (no horizontal
-scrollbar on the plot strip). Hover on any sensor panel highlights the same time
-(unified hover + crosshair) and moves a marker on the map.
-
-Usage (from ``analysis/``)::
-
-    uv run python -m labels.event_labeler 2026-02-26_r2
-    uv run python -m labels.event_labeler 2026-02-26_r2 /tmp/out.html
-
-The CLI always resolves the recording's ``synced/`` stage automatically.
-If the output path is omitted, writes ``event_labeler.html`` inside that folder.
-"""
+"""Event labeler helpers for parse, inspect, and transfer manual interval labels."""
 
 from __future__ import annotations
 
@@ -123,6 +105,7 @@ LABEL_CSV_HEADER = [
 
 
 def infer_recording_section_ids(data_dir: Path) -> tuple[str, str]:
+    """Infer recording section ids."""
     p = data_dir.resolve()
     parts = list(p.parts)
     if "sections" in parts:
@@ -138,12 +121,14 @@ def infer_recording_section_ids(data_dir: Path) -> tuple[str, str]:
 
 
 def session_name_from_recording_id(recording_id: str) -> str | None:
+    """Return session name from recording id."""
     rid = recording_id.strip()
     m = re.match(r"^(.+)_r(\d+)$", rid)
     return m.group(1) if m else None
 
 
 def _nan_where_bad_time_x(t: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return nan where bad time x."""
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
     xm = mask_valid_plot_x(t)
@@ -155,6 +140,7 @@ def _load_imu(
     t0_ms: float,
     required: tuple[str, ...],
 ) -> tuple[np.ndarray, pd.DataFrame] | None:
+    """Load imu."""
     if not csv_path.is_file():
         return None
     df = read_csv(csv_path)
@@ -170,12 +156,14 @@ def _load_imu(
 
 
 def _gps_epoch_ms_series(time_utc: pd.Series) -> pd.Series:
+    """Return gps epoch ms series."""
     s = pd.to_datetime(time_utc, utc=True, errors="coerce")
     epoch = pd.Timestamp("1970-01-01", tz="UTC")
     return (s - epoch) / pd.Timedelta(milliseconds=1)
 
 
 def find_best_gps_csv(session_dir: Path, imu_t0_ms: float, imu_t1_ms: float) -> Path | None:
+    """Return find best GPS CSV."""
     if not session_dir.is_dir():
         return None
     candidates = sorted(
@@ -221,6 +209,7 @@ MAX_GPS_MAP_POINTS = 5_000
 
 @dataclass(frozen=True)
 class ContextBand:
+    """Data container for context band."""
     start_ms: float
     end_ms: float
     label: str
@@ -228,12 +217,14 @@ class ContextBand:
 
 @dataclass(frozen=True)
 class ContextMarker:
+    """Data container for context marker."""
     timestamp_ms: float
     label: str
 
 
 @dataclass(frozen=True)
 class LabelerContext:
+    """Data container for labeler context."""
     cards: list[tuple[str, list[str]]]
     calibration_bands: list[ContextBand]
     sync_markers: list[ContextMarker]
@@ -305,6 +296,7 @@ def _prepare_gps_track_arrays(
 
 
 def _safe_json_dict(path: Path) -> dict[str, Any]:
+    """Return NaN-safe json dict."""
     if not path.is_file():
         return {}
     try:
@@ -316,6 +308,7 @@ def _safe_json_dict(path: Path) -> dict[str, Any]:
 
 
 def _finite_float(value: Any) -> float | None:
+    """Return finite float."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -324,18 +317,22 @@ def _finite_float(value: Any) -> float | None:
 
 
 def _fmt_s(value: float | None) -> str:
+    """Format s."""
     return "n/a" if value is None else f"{value:.1f} s"
 
 
 def _fmt_hz(value: float | None) -> str:
+    """Format hz."""
     return "n/a" if value is None else f"{value:.1f} Hz"
 
 
 def _fmt_ppm(value: float | None) -> str:
+    """Format ppm."""
     return "n/a" if value is None else f"{value:+.1f} ppm"
 
 
 def _fmt_corr(value: float | None) -> str:
+    """Format corr."""
     return "n/a" if value is None else f"{value:.3f}"
 
 
@@ -345,6 +342,7 @@ def _build_labeler_context(
     view_start_ms: float,
     view_end_ms: float,
 ) -> LabelerContext:
+    """Build labeler context."""
     if not recording_id:
         return LabelerContext(cards=[], calibration_bands=[], sync_markers=[])
 
@@ -472,6 +470,7 @@ def _add_context_overlays(
     t0_ms: float,
     context: LabelerContext,
 ) -> None:
+    """Add context overlays."""
     for band in context.calibration_bands:
         x0 = (band.start_ms - t0_ms) / 1000.0
         x1 = (band.end_ms - t0_ms) / 1000.0
@@ -517,6 +516,7 @@ def _add_context_overlays(
 
 
 def _render_context_cards_html(context: LabelerContext) -> str:
+    """Return render context cards HTML."""
     if not context.cards:
         return ""
 
@@ -536,6 +536,7 @@ def _render_context_cards_html(context: LabelerContext) -> str:
 
 
 def _downsample_index(n: int, max_points: int) -> np.ndarray:
+    """Return downsample index."""
     if n <= max_points:
         return np.arange(n, dtype=int)
     step = max(1, int(np.ceil(n / max_points)))
@@ -712,6 +713,7 @@ def _build_gps_column_figure(
 
 
 def _downsample_imu_pair(t_s: np.ndarray, df: pd.DataFrame, max_n: int) -> tuple[np.ndarray, pd.DataFrame]:
+    """Return downsample IMU pair."""
     n = len(t_s)
     if n <= max_n:
         return t_s, df
@@ -720,10 +722,12 @@ def _downsample_imu_pair(t_s: np.ndarray, df: pd.DataFrame, max_n: int) -> tuple
 
 
 def _legend_id_for_row(row_1based: int) -> str:
+    """Return legend id for row."""
     return "legend" if row_1based == 1 else f"legend{row_1based}"
 
 
 def _series_or_nan(df: pd.DataFrame, col: str, n: int) -> np.ndarray:
+    """Return series or nan."""
     if col in df.columns:
         return df[col].to_numpy(dtype=float)
     return np.full(n, np.nan, dtype=float)
@@ -792,7 +796,7 @@ def _imu_xyz_traces(
 
 
 def _apply_per_subplot_legends(fig: go.Figure, n_rows: int, *, legend_x_paper: float = 1.0) -> None:
-    """Place ``legend``, ``legend2``, … at the top-right of each subplot in paper coordinates."""
+    """Place subplot legends at the top right."""
     updates: dict[str, Any] = {}
     for i in range(1, n_rows + 1):
         yax = fig.layout.yaxis if i == 1 else getattr(fig.layout, f"yaxis{i}", None)
@@ -823,10 +827,7 @@ def _apply_per_subplot_legends(fig: go.Figure, n_rows: int, *, legend_x_paper: f
 def build_event_labeler_figure(
     data_dir: Path,
 ) -> tuple[go.Figure, go.Figure | None, float, str, dict[str, list[float]], float, LabelerContext]:
-    """Return time-series figure, optional map figure, duration (s), GPS note, GPS arrays for JS sync.
-
-    Figures use ``autosize=True`` so the HTML page can fit them to the viewport (no fixed pixel width).
-    """
+    """Build event labeler figure."""
     data_dir = Path(data_dir)
     sp = data_dir / "sporsa.csv"
     ts_b = read_csv(sp).dropna(subset=["timestamp"]).sort_values("timestamp")
@@ -879,6 +880,7 @@ def build_event_labeler_figure(
         rider_ds = _downsample_imu_pair(t_r0, df_r0, MAX_IMU_POINTS)
 
     def next_legend_id() -> str:
+        """Return next legend id."""
         return _legend_id_for_row(len(subplot_specs) + 1)
 
     # Order: acc, acc, gyro, gyro, mag, mag (bike then rider per sensor when rider exists).
@@ -1076,6 +1078,7 @@ def build_event_labeler_figure(
 
 
 def _plotly_js_cdn_url() -> str:
+    """Return plotly js cdn url."""
     js_path = Path(plotly.__file__).resolve().parent / "package_data" / "plotly.min.js"
     try:
         head = js_path.read_text(encoding="utf-8", errors="ignore")[:600]
@@ -1763,6 +1766,7 @@ def write_event_labeler_html(
     *,
     pixels_per_second: float | None = None,
 ) -> Path:
+    """Write event labeler html."""
     recording_dir = resolve_data_dir(recording_name)
     data_dir = recording_stage_dir(recording_dir.name, "synced")
     if out_path is None:
@@ -1826,6 +1830,7 @@ def write_event_labeler_html(
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     argv = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if not argv:

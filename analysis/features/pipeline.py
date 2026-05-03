@@ -1,11 +1,4 @@
-"""Feature extraction pipeline: sliding-window extraction for one section or recording.
-
-Reads all required inputs from a section directory, generates sliding windows,
-calls extraction.extract_window_features for each window, and writes:
-
-- ``<section_dir>/features/features.csv``   — one row per window
-- ``<section_dir>/features/features_stats.json``
-"""
+"""Pipeline helpers for extract labelled sliding-window features from section signals."""
 
 from __future__ import annotations
 
@@ -64,6 +57,7 @@ def _load_calibration_json(path: Path) -> dict[str, Any]:
 
 
 def _load_sync_metadata(section_id: str) -> dict[str, Any]:
+    """Load sync metadata."""
     try:
         rec_name, _ = parse_section_folder_name(section_id)
     except Exception:
@@ -72,6 +66,7 @@ def _load_sync_metadata(section_id: str) -> dict[str, Any]:
 
 
 def _sensor_saturation(window_df: pd.DataFrame, kind: str, full_scale: float = 2000.0, frac: float = 0.95) -> tuple[float, int]:
+    """Return sensor saturation."""
     axes = ("ax", "ay", "az") if kind == "acc" else ("gx", "gy", "gz")
     if window_df is None or window_df.empty or any(c not in window_df.columns for c in axes):
         return float("nan"), 0
@@ -120,30 +115,7 @@ def extract_features_for_section(
     label_config_path: Path | str | None = None,
     force: bool = False,
 ) -> pd.DataFrame:
-    """Extract sliding-window features for one section.
-
-    Parameters
-    ----------
-    section_dir:
-        Path to the section directory (e.g. ``data/sections/2026-02-26_r1s1``).
-    window_s:
-        Window length in seconds.
-    hop_s:
-        Hop (stride) length in seconds.
-    min_samples:
-        Minimum number of sporsa samples required in a window; windows below
-        this threshold are skipped.
-    sample_rate_hz:
-        Nominal sampling rate used for spectral feature computation.
-    force:
-        If True, overwrite existing outputs.
-
-    Returns
-    -------
-    pd.DataFrame
-        Feature DataFrame (one row per accepted window).  Also written to
-        ``<section_dir>/features/features.csv``.
-    """
+    """Return extract features for section."""
     features_dir = section_dir / "features"
     features_csv = features_dir / "features.csv"
     features_stats_json = features_dir / "features_stats.json"
@@ -456,20 +428,7 @@ def process_recording_features(
     label_set: str | None = None,
     **kwargs,
 ) -> pd.DataFrame:
-    """Extract features for all sections of a recording and return combined DataFrame.
-
-    Parameters
-    ----------
-    recording_name:
-        Recording name (e.g. ``2026-02-26_r1``).
-    **kwargs:
-        Forwarded to :func:`extract_features_for_section`.
-
-    Returns
-    -------
-    pd.DataFrame
-        Concatenation of all section feature DataFrames (empty if none).
-    """
+    """Process recording features."""
     section_dirs = iter_sections_for_recording(recording_name)
     if not section_dirs:
         log.warning("No sections found for recording '%s'.", recording_name)

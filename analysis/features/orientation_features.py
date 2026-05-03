@@ -27,10 +27,7 @@ def _finite(arr: np.ndarray) -> np.ndarray:
 
 
 def _angular_diff_deg(angles_deg: np.ndarray) -> np.ndarray:
-    """Discrete angular difference wrapped to [-180, 180]°.
-
-    Prevents yaw wraparound from producing spurious ~360° spikes.
-    """
+    """Return angular diff deg."""
     diff = np.diff(angles_deg)
     return (diff + 180.0) % 360.0 - 180.0
 
@@ -47,12 +44,7 @@ def orientation_features(
     sensor_prefix: str,
     window_orient: pd.DataFrame | None,
 ) -> dict[str, Any]:
-    """Extract per-sensor orientation stats.
-
-    Includes pitch/roll mean/std, pitch/roll rate std, pitch/roll peak-to-peak
-    range, and yaw rate stats (std and max magnitude).  Yaw itself has an
-    arbitrary frame origin so mean/std aren't meaningful; yaw *rate* is.
-    """
+    """Return orientation features."""
     base = {f"{sensor_prefix}_{k}": float("nan") for k in _PITCH_ROLL_KEYS}
     if window_orient is None or window_orient.empty:
         return base
@@ -96,12 +88,7 @@ def orientation_features(
 
 
 def _yaw_rate_dps_from_window(window_orient: pd.DataFrame) -> np.ndarray | None:
-    """Return finite yaw rate samples in deg/s, preferring gyro-z when present.
-
-    The gyro-z column is in deg/s already; the yaw_deg fallback returns
-    deg/sample diffs scaled to deg/s using the median sample interval inside
-    the window so feature units stay consistent across paths.
-    """
+    """Return yaw rate dps from window."""
     if "gyro_world_z_dps" in window_orient.columns:
         arr = window_orient["gyro_world_z_dps"].to_numpy(dtype=float)
         finite = _finite(arr)
@@ -153,12 +140,7 @@ _CROSS_ORIENT_KEYS = (
 def _interp_onto(
     t_target: np.ndarray, t_src: np.ndarray, v_src: np.ndarray
 ) -> np.ndarray:
-    """Linear interpolation of *v_src* (at *t_src*) onto *t_target*.
-
-    Samples outside the source range or where the source is non-finite
-    become NaN; the source is sorted into ascending time and its finite
-    subset is used for np.interp.
-    """
+    """Return interp onto."""
     order = np.argsort(t_src)
     t_src = t_src[order]
     v_src = v_src[order]
@@ -184,20 +166,7 @@ def orientation_cross_features(
     window_bike: pd.DataFrame | None,
     window_rider: pd.DataFrame | None,
 ) -> dict[str, Any]:
-    """Cross-sensor orientation divergence features.
-
-    Captures helmet-vs-bike behaviour that unimodal features cannot:
-
-    * ``cross_pitch_diff_*``     rider forward/back lean independent of bike
-    * ``cross_roll_diff_*``      rider body lean independent of bike roll
-    * ``cross_pitch_corr``       lock-step seated vs. standing pedalling
-    * ``cross_roll_corr``        matched-lean cornering vs. swerve/countersteer
-    * ``cross_yaw_rate_diff_*``  helmet turning while frame holds straight
-                                 (shoulder check, head scanning)
-
-    Rider orientation is resampled onto bike timestamps within the window so
-    per-sample differences/correlations are aligned.
-    """
+    """Return orientation cross features."""
     base = {k: float("nan") for k in _CROSS_ORIENT_KEYS}
     if (window_bike is None or window_bike.empty
             or window_rider is None or window_rider.empty):

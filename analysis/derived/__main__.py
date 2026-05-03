@@ -1,12 +1,4 @@
-"""CLI entry point for the derived signal computation stage.
-
-Usage::
-
-    python -m derived <section_name>
-    python -m derived <section_name> --sample-rate-hz 50
-    python -m derived --recording 2026-02-26_r1
-    python -m derived --recording 2026-02-26_r1 --force
-"""
+"""Command-line entry point for derived."""
 
 from __future__ import annotations
 
@@ -19,6 +11,7 @@ from .pipeline import process_section_derived, process_recording_derived
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     argv = list(argv if argv is not None else sys.argv[1:])
 

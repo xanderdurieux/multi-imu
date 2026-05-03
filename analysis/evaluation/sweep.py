@@ -1,19 +1,4 @@
-"""Evaluation sweep across the cross-product of label_cols × min_quality.
-
-Wraps :func:`evaluation.experiments.run_evaluation` so the thesis evaluation
-covers two orthogonal axes in one go:
-
-  1. **Label scheme** — fine ``scenario_label`` plus derived single-label
-     taxonomies (activity / coarse / binary) and set-based binary objectives
-     (riding / cornering / head_motion).  Lets the reader see where
-     coarsening helps and where it merely hides confusions.
-  2. **Quality filter** — ``poor`` / ``marginal`` / ``good``.  Quantifies the
-     accuracy / coverage trade-off introduced by the multi-IMU quality model.
-
-Permutation feature importance (the only expensive analysis) is only run for
-``min_quality == primary_quality`` so the sweep finishes in a reasonable
-time without losing the headline interpretability artifact.
-"""
+"""Sweep helpers for train models and build evaluation outputs from exported features."""
 
 from __future__ import annotations
 
@@ -54,27 +39,7 @@ def run_evaluation_sweep(
     no_plots: bool = False,
     permutation_models: tuple[str, ...] = ("random_forest",),
 ) -> dict[str, Any]:
-    """Run :func:`run_evaluation` across the (label_col × min_quality) grid.
-
-    For each combination, evaluation outputs are written to::
-
-        <output_dir>/<label_col>__q-<quality>/
-
-    Aggregated CSVs at ``<output_dir>``:
-
-    * ``evaluation_sweep.csv`` — full long-form table of every run's metrics.
-    * ``sweep_imu_contribution.csv`` — IMU contribution rows from every run,
-      tagged with ``label_col`` / ``min_quality`` so the second-IMU value is
-      visible across all configurations in one place.
-    * ``sweep_summary.json`` — provenance manifest.
-
-    Parameters
-    ----------
-    primary_quality:
-        Permutation importance is computed only for runs with this quality
-        filter — bounds runtime while still surfacing one canonical feature
-        ranking per label scheme.
-    """
+    """Run evaluation across label and quality settings."""
     label_cols = list(label_cols) if label_cols else list(DEFAULT_LABEL_COLS)
     qualities = list(qualities) if qualities else list(DEFAULT_QUALITIES)
 

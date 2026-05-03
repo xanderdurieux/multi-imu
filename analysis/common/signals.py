@@ -21,11 +21,7 @@ _DEFAULT_IMU_AXES: Mapping[str, Sequence[str]] = {
 
 
 def vector_norm(df: pd.DataFrame, columns: Sequence[str]) -> np.ndarray:
-    """Euclidean norm of the given columns per row, preserving NaN.
-
-    Rows with any NaN component yield NaN; other rows get the standard
-    Euclidean norm. Raises KeyError if any listed column is missing.
-    """
+    """Return the row-wise vector norm."""
     data = df[list(columns)].to_numpy(dtype=float)
     nan_mask = np.isnan(data).any(axis=1)
     norms = np.sqrt(np.nansum(data * data, axis=1))
@@ -45,11 +41,7 @@ def add_vector_norms(
     df: pd.DataFrame,
     vector_axes: Mapping[str, Iterable[str]] | None = None,
 ) -> pd.DataFrame:
-    """Return a copy of *df* with ``{name}_norm`` columns for each (name, axes).
-
-    When ``vector_axes`` is None, defaults to the standard IMU layout
-    ({'acc', 'gyro', 'mag'}). Columns whose axes are absent become NaN.
-    """
+    """Add vector norms."""
     axes_map = _DEFAULT_IMU_AXES if vector_axes is None else vector_axes
     out = df.copy()
     for name, axes in axes_map.items():
@@ -116,12 +108,7 @@ def butter_lowpass(
     sample_rate_hz: float,
     order: int = 4,
 ) -> np.ndarray:
-    """Zero-phase Butterworth low-pass filter that preserves NaN gaps.
-
-    Contiguous finite segments are filtered independently so that NaN spans
-    do not contaminate the rest of the trace. Segments shorter than
-    ``3 * (order + 1)`` samples are left untouched.
-    """
+    """Apply a NaN-aware low-pass filter."""
     min_samples = 3 * (order + 1)
     if len(data) <= min_samples:
         log.debug(

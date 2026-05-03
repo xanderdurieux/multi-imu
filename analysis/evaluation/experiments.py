@@ -121,17 +121,7 @@ def _select_feature_cols(df: pd.DataFrame, prefixes: list[str]) -> list[str]:
 
 
 def _auto_detect_feature_sets(df: pd.DataFrame) -> dict[str, list[str]]:
-    """Return default feature set → prefix mapping based on available columns.
-
-    Four sets form a 2×2 ablation:
-      bike             unimodal, frame sensor only
-      rider            unimodal, body sensor only
-      fused_no_cross   bimodal, no cross-sensor features (baseline fusion)
-      fused            bimodal, full feature set including cross-sensor features
-
-    Comparing fused vs fused_no_cross directly quantifies the added value of
-    the cross-sensor alignment and disagreement features.
-    """
+    """Return auto detect feature sets."""
     return {
         "bike": ["bike_", "sporsa_"],
         "rider": ["rider_", "arduino_"],
@@ -148,12 +138,7 @@ def _binary_metrics(
     *,
     positive_class: str = "riding",
 ) -> dict[str, Any]:
-    """Compute the full binary-classification metric block on OOF predictions.
-
-    Returns per-class precision/recall/F1/support, balanced accuracy, and (when
-    probabilities are available) average precision (PR-AUC) and ROC-AUC for the
-    positive class.  Confusion matrix is included for downstream plotting.
-    """
+    """Return binary metrics."""
     if len(classes) != 2:
         raise ValueError(f"_binary_metrics expects exactly 2 classes, got {classes!r}")
 
@@ -268,13 +253,7 @@ def _export_misclassified(
     output_path: Path,
     positive_class: str = "riding",
 ) -> int:
-    """Write a per-window CSV of misclassified rows for label refinement.
-
-    Sorted by descending model confidence so the most-confidently-wrong rows —
-    the strongest candidates for relabelling — appear at the top.  Includes
-    section_id, time range, fine-grained label, true/predicted binary label,
-    and the predicted positive-class probability.
-    """
+    """Export misclassified."""
     pos_idx = classes.index(positive_class)
     neg_idx = 1 - pos_idx
     inv_class = {neg_idx: classes[neg_idx], pos_idx: classes[pos_idx]}
@@ -351,6 +330,7 @@ def _export_misclassified(
 
 
 def _build_model(name: str, seed: int) -> Any:
+    """Build model."""
     cls = _MODEL_REGISTRY[name]
     kwargs: dict[str, Any] = {"random_state": seed}
     if name == "logistic_regression":
@@ -372,23 +352,7 @@ def _cv_evaluate(
     seed: int = 42,
     class_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run GroupKFold CV; ALL metrics are derived from out-of-fold predictions.
-
-    Each fold trains on groups unseen by the validation set.  OOF predictions
-    are concatenated across folds so that the final confusion matrix and
-    per-class classification report reflect held-out performance only — no
-    in-sample evaluation anywhere.
-
-    Returns
-    -------
-    dict with keys:
-        accuracy, accuracy_std       – mean / std of per-fold accuracy
-        macro_f1, macro_f1_std       – mean / std of per-fold macro-F1
-        fold_accuracies, fold_f1s    – per-fold scores (length = n_splits)
-        per_class                    – classification_report on OOF predictions
-        confusion_matrix             – confusion matrix on OOF predictions
-        feature_importances          – mean importances across folds, or None
-    """
+    """Return cv evaluate."""
     cv = GroupKFold(n_splits=n_splits)
 
     # Pre-allocate OOF arrays — every sample is a validation sample exactly once.
@@ -488,45 +452,7 @@ def run_evaluation(
     permutation_n_repeats: int = 5,
     permutation_models: tuple[str, ...] = ("random_forest",),
 ) -> dict:
-    """Train and evaluate models on feature table.
-
-    Parameters
-    ----------
-    features_path:
-        Path to the CSV feature table (e.g. features_fused.csv).
-    output_dir:
-        Directory for all output artefacts.
-    label_col:
-        Column name for the classification target.
-    group_col:
-        Column for group-based CV splitting (prevents data leakage).
-    seed:
-        Random seed for reproducibility.
-    min_quality:
-        Minimum quality label. Rows below this are dropped.
-    feature_sets:
-        Mapping of set name → list of column prefixes. ``None`` = auto-detect.
-    exclude_non_riding:
-        If ``True``, drop windows whose binary label is ``non_riding`` before
-        evaluating any target label scheme.
-    no_plots:
-        If ``True``, skip thesis figure generation.
-    compute_permutation_importance:
-        Run model-agnostic permutation importance on each held-out fold and
-        write per-feature + per-sensor-group rankings.  Disable to skip the
-        only expensive analysis (multiplies runtime by roughly 2×).
-    permutation_n_repeats:
-        Permutations per feature per fold.  Default 5 is the sklearn default.
-    permutation_models:
-        Models to run permutation importance for.  Default is
-        ``("random_forest",)`` — keeping it to one tree-ensemble model gives
-        a defensible thesis figure without re-running the analysis for every
-        model.
-
-    Returns
-    -------
-    Evaluation summary dict (also written to evaluation_summary.json).
-    """
+    """Train and evaluate models on a feature table."""
     features_path = Path(features_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1070,7 +996,7 @@ def run_evaluation(
 
 
 def _ordered_feature_sets(metrics_rows: list[dict]) -> list[str]:
-    """Return feature sets in canonical order (simple → complex), unknowns last."""
+    """Return feature sets in canonical order."""
     present = {r["feature_set"] for r in metrics_rows}
     ordered = [fs for fs in _FS_ORDER if fs in present]
     extras = sorted(fs for fs in present if fs not in _FS_ORDER)
@@ -1085,12 +1011,7 @@ def _pivot_table_lines(
     label_display: dict[str, str],
     fs_display: dict[str, str],
 ) -> list[str]:
-    """Build markdown lines for a model × feature-set pivot table.
-
-    Rows = models (in _MODEL_REGISTRY insertion order).
-    Columns = feature sets (canonical order from _FS_ORDER).
-    Cells = ``mean% ± std%``.
-    """
+    """Return pivot table lines."""
     # Column headers
     fs_headers = " | ".join(fs_display.get(fs, fs) for fs in ordered_fs)
     sep = "|---" * (len(ordered_fs) + 1) + "|"

@@ -66,14 +66,7 @@ _SPORSA_LINE_RE_NO_MAG = re.compile(
 
 
 def _parse_sporsa_line(line: str) -> Optional[dict]:
-    """
-    Parse a single line from a Sporsa log file.
-
-    Expected format (txt):
-        <timestamp_ms>,<acc_x>,<acc_y>,<acc_z>,<gyro_x>,<gyro_y>,<gyro_z>,<mag_x>,<mag_y>,<mag_z>
-    Optionally prefixed with "uart:~$ ".
-    Any line that does not match this pattern is ignored.
-    """
+    """Parse sporsa line."""
     if not line:
         return None
 
@@ -189,6 +182,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    """Run the command-line interface."""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 

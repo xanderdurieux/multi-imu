@@ -1,9 +1,4 @@
-"""Calibration-sequence detection: static pre period → some peaks → static post period.
-
-All timestamps in milliseconds throughout. No sample-index arithmetic is
-exposed in the public API; parameter windows are computed from the median
-inter-sample interval estimated from the data.
-"""
+"""Calibration segments helpers for parse raw sensor logs and split recordings into sections."""
 
 from __future__ import annotations
 
@@ -107,12 +102,14 @@ def load_cal_seg_params(sensor: str, **overrides: Any) -> CalSegParams:
 
 
 def _median_dt(ts_ms: np.ndarray) -> float:
+    """Return median dt."""
     dt = np.diff(ts_ms)
     pos = dt[(dt > 0) & np.isfinite(dt)]
     return float(np.median(pos)) if pos.size > 0 else 10.0
 
 
 def _to_samples(ms: float, dt: float) -> int:
+    """Convert samples."""
     return max(1, round(ms / dt))
 
 
@@ -173,7 +170,7 @@ def _find_candidate_peaks(
 
 
 def _cluster_peaks(peak_ms: list[float], params: CalSegParams) -> list[list[float]]:
-    """Split peaks into bursts where every consecutive gap ≤ peak_pair_max_gap_ms."""
+    """Split peaks into nearby bursts."""
     if not peak_ms:
         return []
     clusters: list[list[float]] = []
@@ -195,12 +192,7 @@ def _cluster_is_near_recording_gap(
     nearby_window_ms: float,
     min_gap_ms: float,
 ) -> bool:
-    """Return whether *cluster_ms* is adjacent to a large timestamp gap.
-
-    This is a small heuristic for recordings with dropped samples inside a
-    calibration routine. We only use it to slightly relax the minimum peak
-    count for otherwise calibration-like bursts near a clear acquisition gap.
-    """
+    """Return cluster is near recording gap."""
     if len(cluster_ms) == 0 or len(ts_ms) < 2:
         return False
 
@@ -349,12 +341,7 @@ def _cluster_is_near_recording_gap(
     nearby_window_ms: float,
     min_gap_ms: float,
 ) -> bool:
-    """Return whether *cluster_ms* is adjacent to a large timestamp gap.
-
-    This is a small heuristic for recordings with dropped samples inside a
-    calibration routine. We only use it to slightly relax the minimum peak
-    count for otherwise calibration-like bursts near a clear acquisition gap.
-    """
+    """Return cluster is near recording gap."""
     if len(cluster_ms) == 0 or len(ts_ms) < 2:
         return False
 
@@ -402,6 +389,7 @@ def _deduplicate_segments(
     parent = list(range(n))
 
     def find(i: int) -> int:
+        """Return find."""
         while parent[i] != i:
             parent[i] = parent[parent[i]]
             i = parent[i]
@@ -435,10 +423,7 @@ def find_calibration_segments(
     sensor: str,
     **overrides: Any,
 ) -> list[CalibrationSegment]:
-    """Detect calibration sequences in *df* for *sensor*.
-
-    Returns segments sorted chronologically.
-    """
+    """Return find calibration segments."""
     params = load_cal_seg_params(sensor, **overrides)
 
     norm = df["acc_norm"].to_numpy(dtype=float)
@@ -539,6 +524,7 @@ def load_calibration_segments_from_json(
 
 
 def _parse_segments(records: list[dict]) -> list[CalibrationSegment]:
+    """Parse segments."""
     return [
         CalibrationSegment(
             start_ms=float(r.get("start_ms", 0.0)),
@@ -553,6 +539,7 @@ def _parse_segments(records: list[dict]) -> list[CalibrationSegment]:
 
 
 def _segments_to_records(segments: list[CalibrationSegment]) -> list[dict]:
+    """Return segments to records."""
     return [
         {
             "start_ms": seg.start_ms,

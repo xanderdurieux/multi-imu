@@ -50,14 +50,7 @@ def _parse_time_of_day_ms(time_str: str) -> int | None:
 
 
 def _parse_arduino_line(line: str) -> Optional[tuple[int, int, float, float, float]]:
-    """
-    Parse a single line from the Arduino log produced by the BLE central.
-
-    Expected pattern (simplified):
-        A<TAB><received timestamp><TAB><hex bytes ...>
-
-    Only lines starting with "A" and containing hex payloads are considered.
-    """
+    """Parse arduino line."""
     if not line.startswith("A"):
         return None
 
@@ -90,12 +83,7 @@ def _parse_arduino_line(line: str) -> Optional[tuple[int, int, float, float, flo
 
 
 def parse_arduino_log(txt_path: Path) -> pd.DataFrame:
-    """
-    Parse a raw Arduino log file into a standardized IMU DataFrame.
-
-    Multiple packets with the same timestamp (acc/gyro/mag) are merged into a
-    single row so that each timestamp appears only once in the output.
-    """
+    """Parse arduino log."""
     # timestamp_ms -> row dict with standardized columns
     by_timestamp: Dict[int, dict] = {}
 
@@ -196,6 +184,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    """Run the command-line interface."""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 

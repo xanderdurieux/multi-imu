@@ -1,14 +1,4 @@
-"""
-Per-recording statistics utilities.
-
-Computes timing/statistics for processed IMU CSV streams (DataFrames) and writes
-the results to ``recording_stats.json`` in the recording folder.
-
-Key metrics:
-- sampling rate and inter-sample interval distribution
-- jitter / variability (IQR, outlier rate)
-- gap / packet-loss estimate (heuristic from median interval)
-"""
+"""Stats helpers for parse raw sensor logs and split recordings into sections."""
 
 from __future__ import annotations
 
@@ -30,6 +20,7 @@ from common.paths import (
 
 
 def _interval_summary(interval_ms: pd.Series) -> dict[str, Any]:
+    """Return interval summary."""
     s = pd.to_numeric(interval_ms, errors="coerce").dropna()
     if s.empty:
         return {"median_ms": None, "std_ms": None}
@@ -42,6 +33,7 @@ def _interval_summary(interval_ms: pd.Series) -> dict[str, Any]:
 def _estimate_missing_samples(
     interval_ms: pd.Series, expected_ms: float, *, gap_factor: float = 1.5
 ) -> dict[str, Any]:
+    """Estimate missing samples."""
     s = pd.to_numeric(interval_ms, errors="coerce").dropna()
     if s.empty or not np.isfinite(expected_ms) or expected_ms <= 0:
         return {"gap_count": 0, "missing_samples": 0, "threshold_ms": None}
@@ -111,6 +103,7 @@ def compute_stream_timing_stats(df: pd.DataFrame, *, timestamp_col: str = "times
 
 @dataclass(frozen=True)
 class StreamTimingStats:
+    """Data container for stream timing stats."""
     present: bool
     num_samples: int | None
     duration_s: float | None
@@ -125,6 +118,7 @@ class StreamTimingStats:
 
 @dataclass(frozen=True)
 class RecordingQualitySummary:
+    """Data container for recording quality summary."""
     recording_name: str
     session_name: str
     sporsa: StreamTimingStats
@@ -136,6 +130,7 @@ class RecordingQualitySummary:
 
 
 def _round_or_none(value: float | int | None, digits: int = 3) -> float | int | None:
+    """Return round or none."""
     if value is None:
         return None
     if isinstance(value, int):
@@ -146,6 +141,7 @@ def _round_or_none(value: float | int | None, digits: int = 3) -> float | int | 
 
 
 def _stream_missing_stats() -> StreamTimingStats:
+    """Return stream missing stats."""
     return StreamTimingStats(
         present=False,
         num_samples=None,
@@ -229,11 +225,13 @@ def compute_stream_timing_summary(
 
 
 def _session_name_from_recording(recording_name: str) -> str:
+    """Return session name from recording."""
     session_name = recording_name.rpartition("_r")[0]
     return session_name if session_name else recording_name
 
 
 def _load_segment_count(recording_name: str, sensor: str) -> int | None:
+    """Load segment count."""
     path = recording_stage_dir(recording_name, "parsed") / "calibration_segments.json"
     if not path.exists():
         return None
@@ -251,6 +249,7 @@ def _classify_quality(
     sporsa_segments: int | None,
     arduino_segments: int | None,
 ) -> tuple[str, str]:
+    """Return classify quality."""
     if not sporsa.present:
         return "limited", "missing_sporsa_stream"
 
@@ -345,6 +344,7 @@ def write_recording_stats(recording_name: str, stage: str = "parsed") -> Path:
 # ---------------------------------------------------------------------------
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         prog="python -m parser.stats",
         description="Compute per-recording stats and write to recording_stats.json.",
@@ -363,6 +363,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     args = _build_arg_parser().parse_args(argv)
 
     if not args.recording_name:

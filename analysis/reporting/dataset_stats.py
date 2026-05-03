@@ -47,6 +47,7 @@ _QUALITY_COLORS: dict[str, str] = {
 
 
 def _class_color(label: str) -> str:
+    """Return class color."""
     return _CLASS_FAMILIES.get(label, "#90A4AE")
 
 

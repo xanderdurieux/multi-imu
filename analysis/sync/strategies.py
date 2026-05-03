@@ -1,17 +1,4 @@
-"""Sync-strategy estimators.
-
-Every estimator returns ``(SyncModel, meta)`` and shares one signature:
-
-    estimate_<method>(ref_df, tgt_df, *, recording_name,
-                      reference_sensor="sporsa", target_sensor="arduino",
-                      config=None) -> (SyncModel, meta)
-
-Tier hierarchy (strongest to weakest):
-    1. multi_anchor        — first+last calibration anchors, affine fit
-  2. one_anchor_adaptive — opening anchor + causal windowed refinement
-  3. one_anchor_prior    — opening anchor + fixed drift prior (ppm)
-  4. signal_only         — coarse xcorr + non-causal windowed refinement
-"""
+"""Strategies helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -44,6 +31,7 @@ from .xcorr import (
 
 
 def _target_origin_seconds(tgt_df: pd.DataFrame) -> float:
+    """Return target origin seconds."""
     return float(tgt_df["timestamp"].iloc[0]) / 1000.0
 
 
@@ -52,6 +40,7 @@ def _build_signal_pair(
     tgt_df: pd.DataFrame,
     config: SyncConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build signal pair."""
     ref_ts, ref_sig = build_resampled_activity_signal(
         ref_df,
         sample_rate_hz=config.resample_rate_hz,
@@ -70,6 +59,7 @@ def _calibration_meta(
     *,
     fit_r2: float | None = None,
 ) -> dict[str, Any]:
+    """Return calibration meta."""
     sorted_anchors = sorted(anchors, key=lambda a: a.tgt_ms)
     opening = sorted_anchors[0] if sorted_anchors else None
     closing = sorted_anchors[-1] if sorted_anchors else None
@@ -97,6 +87,7 @@ def _window_stats(
     fit_r2: float,
     scores: np.ndarray,
 ) -> dict[str, Any]:
+    """Return window stats."""
     return {
         "accepted_windows": int(win_stats["accepted_windows"]),
         "rejected_windows": int(win_stats["rejected_windows"]),
@@ -107,6 +98,7 @@ def _window_stats(
 
 
 def _shared_hyperparameters(config: SyncConfig) -> dict[str, Any]:
+    """Return shared hyperparameters."""
     return {
         "resample_rate_hz": float(config.resample_rate_hz),
         "signal_mode": config.signal_mode,
@@ -119,6 +111,7 @@ def _shared_hyperparameters(config: SyncConfig) -> dict[str, Any]:
 
 
 def _window_hyperparameters(config: SyncConfig) -> dict[str, Any]:
+    """Return window hyperparameters."""
     w = config.window_refinement
     return {
         "window_seconds": float(w.window_seconds),

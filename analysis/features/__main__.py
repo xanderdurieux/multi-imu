@@ -1,12 +1,4 @@
-"""CLI entry point for the feature extraction stage.
-
-Usage::
-
-    python -m features <section_name>
-    python -m features <section_name> --window-s 2.0 --hop-s 1.0
-    python -m features --recording 2026-02-26_r1
-    python -m features --recording 2026-02-26_r1 --force
-"""
+"""Command-line entry point for features."""
 
 from __future__ import annotations
 
@@ -22,6 +14,7 @@ from .pipeline import (
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     argv = list(argv if argv is not None else sys.argv[1:])
 

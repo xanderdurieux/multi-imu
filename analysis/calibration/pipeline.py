@@ -36,6 +36,7 @@ _NO_PROTOCOL_FALLBACK_MS = 5_000.0  # first 5 s used as pseudo-static window whe
 
 
 def _build_opening_sequence(seg) -> OpeningSequence:
+    """Build opening sequence."""
     peak_ts = list(seg.peak_ms) if seg.peak_ms else []
     pre_end_ms = seg.start_ms + seg.static_pre_ms if seg.static_pre_ms > 0 else seg.start_ms
     post_start_ms = seg.end_ms - seg.static_post_ms if seg.static_post_ms > 0 else seg.end_ms
@@ -56,14 +57,7 @@ def calibrate_section(
     output_subdir: str = "calibrated",
     static_calibration_path: Path | None = None,
 ) -> SectionCalibration:
-    """Calibrate both sensors for one section and write outputs.
-
-    Flow:
-    1. Detect opening routine from parser-stage calibration segments.
-    2. Estimate intrinsics (gyro bias; acc from static cal if available).
-    3. Estimate gravity-only alignment from the post-tap static window.
-    4. Apply calibration and write CSVs + calibration.json.
-    """
+    """Calibrate section."""
     cal_dir = section_dir / output_subdir
     cal_json_path = cal_dir / "calibration.json"
 

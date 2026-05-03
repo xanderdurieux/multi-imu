@@ -59,11 +59,7 @@ def plot_calibration_segments_from_detection(
     *,
     sensor: str,
 ) -> None:
-    """Draw *segments* on *df* and save to *out_path*.
-
-    Two stacked panels share the time axis: **|acc|** on top, **smoothed |acc−g|**
-    below. Segment shading and peak markers are drawn on both.
-    """
+    """Plot calibration segments from detection."""
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
     ts_s = (ts_ms - ts_ms[0]) / 1000.0 if ts_ms.size > 0 else np.array([])
@@ -74,6 +70,7 @@ def plot_calibration_segments_from_detection(
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(16, 6.5), sharex=True)
 
     def _draw_segment_overlays(ax: Axes, *, legend_labels: bool) -> None:
+        """Draw segment overlays."""
         colors = plt.cm.tab10.colors
         t0_ms = ts_ms[0] if ts_ms.size > 0 else 0.0
         for i, seg in enumerate(seg_list):
@@ -102,6 +99,7 @@ def plot_calibration_segments_from_detection(
     _draw_segment_overlays(ax_bot, legend_labels=False)
 
     def _dedupe_legend(ax: Axes, **kw: object) -> None:
+        """Return dedupe legend."""
         handles, labels = ax.get_legend_handles_labels()
         seen: dict[str, object] = {}
         for h, lab in zip(handles, labels):

@@ -1,10 +1,4 @@
-"""Static Arduino IMU calibration from six axis-aligned stationary recordings.
-
-Each raw log should be ~stationary with the board in one of six approximate
-orientations so gravity lies primarily along +X, -X, +Y, -Y, +Z, or -Z. Means
-are taken over the full recording after an optional time trim at the edges to
-ignore placement transients.
-"""
+"""Imu static helpers for estimate device-level arduino imu calibration values."""
 
 from __future__ import annotations
 
@@ -64,6 +58,7 @@ def _trim_by_time(df: pd.DataFrame, trim_fraction: float) -> pd.DataFrame:
 
 
 def _dominant_face(acc_mean: np.ndarray) -> str:
+    """Return dominant face."""
     axis_index = int(np.argmax(np.abs(acc_mean)))
     sign = "+" if acc_mean[axis_index] >= 0 else "-"
     return f"{AXES[axis_index]}{sign}"
@@ -118,6 +113,7 @@ def summarize_stationary_recording(
 
 
 def _weighted_mean(values: list[tuple[float, int]]) -> float:
+    """Return weighted mean."""
     if not values:
         raise ValueError("Need at least one value to compute a weighted mean.")
     samples = np.array([value for value, _ in values], dtype=float)
@@ -130,6 +126,7 @@ def _estimate_accelerometer_axis(
     axis: str,
     warnings: list[str],
 ) -> tuple[float, float]:
+    """Estimate accelerometer axis."""
     positive = [s for s in summaries if s["dominant_face"] == f"{axis}+"]
     negative = [s for s in summaries if s["dominant_face"] == f"{axis}-"]
     zero_faces = [s for s in summaries if s["dominant_face"][0] != axis]
@@ -170,15 +167,7 @@ def _estimate_accelerometer_axis(
 
 
 def _estimate_mag_hard_iron(mag_means: list[np.ndarray]) -> np.ndarray:
-    """Estimate magnetometer hard-iron bias from multiple orientations via sphere fitting.
-
-    Given n measurements m_i = R_i * B_earth + b_hi (where b_hi is the hard-iron
-    bias), all corrected measurements should lie on a sphere. We find the sphere
-    centre b_hi using the algebraic least-squares method (Coope 1993).
-
-    Requires at least 4 measurements covering diverse orientations; 6-face
-    recordings from the static calibration provide 6 well-distributed points.
-    """
+    """Estimate mag hard iron."""
     M = np.array(mag_means, dtype=float)
     n = len(M)
     if n < 4:
@@ -252,11 +241,7 @@ def write_parsed_csvs(
     *,
     trim_fraction: float = 0.05,
 ) -> dict[str, Path]:
-    """Parse each raw log and write ``calib_<orientation>.csv`` under ``parsed_dir``.
-
-    Orientation is inferred from mean acceleration (same trim as calibration).
-    Unclassified faces use ``calib_unknown_<raw_stem>.csv``.
-    """
+    """Write parsed csvs."""
 
     parsed_dir.mkdir(parents=True, exist_ok=True)
     mapping: dict[str, Path] = {}

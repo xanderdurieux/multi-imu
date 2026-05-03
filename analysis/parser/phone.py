@@ -30,11 +30,7 @@ _SENSOR_COLS = ("ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz")
 
 
 def _load_sensor_csv(path: Path) -> pd.DataFrame:
-    """Load a phyphox sensor CSV (columns: time, seconds_elapsed, z, y, x).
-
-    Returns a DataFrame with columns [ts_ms, x, y, z] sorted by ts_ms.
-    Returns an empty DataFrame when the file is absent or unreadable.
-    """
+    """Load sensor csv."""
     if not path.exists():
         return pd.DataFrame(columns=["ts_ms", "x", "y", "z"])
     try:
@@ -51,12 +47,7 @@ def _merge_sensors(
     gyro: pd.DataFrame,
     mag: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Merge three sensor DataFrames onto a common timestamp grid.
-
-    Uses the TotalAcceleration timeline as the primary grid and joins gyroscope
-    and magnetometer by nearest timestamp within _MERGE_TOLERANCE_MS.
-    Falls back to gyroscope then magnetometer if accel is absent.
-    """
+    """Return merge sensors."""
     if not accel.empty:
         base = accel.rename(columns={"x": "ax", "y": "ay", "z": "az"})
     elif not gyro.empty:
@@ -84,11 +75,7 @@ def _merge_sensors(
 
 
 def _resample_to_target(merged: pd.DataFrame) -> pd.DataFrame:
-    """Linearly interpolate *merged* onto a uniform _TARGET_INTERVAL_MS grid.
-
-    Only columns present in *merged* are interpolated; missing sensor columns
-    (e.g. no magnetometer) remain absent so the caller can detect them.
-    """
+    """Return resample to target."""
     ts = merged["ts_ms"].to_numpy(dtype=float)
     t_new = np.arange(ts[0], ts[-1], _TARGET_INTERVAL_MS)
     out: dict[str, np.ndarray] = {"ts_ms": t_new}
@@ -100,19 +87,7 @@ def _resample_to_target(merged: pd.DataFrame) -> pd.DataFrame:
 
 
 def parse_phone_recording(folder: Path) -> pd.DataFrame:
-    """Parse a phyphox phone recording folder into a standardized IMU DataFrame.
-
-    Expected files inside *folder*:
-        TotalAcceleration.csv  — m/s² including gravity, columns: time (ns), seconds_elapsed, z, y, x
-        Gyroscope.csv          — rad/s, same column layout
-        Magnetometer.csv       — µT,   same column layout
-
-    Returns a DataFrame conforming to CSV_COLUMNS with:
-        timestamp  — ms (Unix epoch)
-        ax/ay/az   — m/s²  (total acceleration, phone native axes)
-        gx/gy/gz   — deg/s (phone native axes)
-        mx/my/mz   — µT    (phone native axes)
-    """
+    """Parse phone recording."""
     accel = _load_sensor_csv(folder / "TotalAcceleration.csv")
     gyro = _load_sensor_csv(folder / "Gyroscope.csv")
     mag = _load_sensor_csv(folder / "Magnetometer.csv")
@@ -139,12 +114,7 @@ def parse_phone_recording(folder: Path) -> pd.DataFrame:
 
 
 def parse_phone_gps(folder: Path) -> pd.DataFrame:
-    """Parse Location.csv from a phyphox recording folder into standard GPS format.
-
-    Returns a DataFrame with columns: latitude, longitude, elevation_m, time_utc,
-    speed_m_s — compatible with :func:`parser.gps.write_gps_csv` and
-    :func:`parser.gps.parse_gps_csv`.
-    """
+    """Parse phone gps."""
     path = folder / "Location.csv"
     _empty = pd.DataFrame(
         columns=["latitude", "longitude", "elevation_m", "time_utc", "speed_m_s"]
@@ -176,6 +146,7 @@ def parse_phone_gps(folder: Path) -> pd.DataFrame:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         prog="python -m parser.phone",
         description="Convert a phyphox phone recording folder to processed IMU CSV.",
@@ -186,6 +157,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    """Run the command-line interface."""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
     df = parse_phone_recording(args.source_folder)

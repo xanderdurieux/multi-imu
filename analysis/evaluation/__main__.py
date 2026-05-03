@@ -1,25 +1,4 @@
-"""CLI entry point for the evaluation package.
-
-Two modes:
-
-* **Single run** (default) — one ``label_col`` × one ``min_quality``::
-
-    python -m evaluation [--features data/exports/features_fused.csv]
-                         [--output outputs/evaluation]
-                         [--seed 42]
-                         [--quality marginal]
-                         [--label scenario_label_activity]
-                         [--group section_id]
-                         [--exclude-non-riding]
-                         [--no-permutation]
-
-* **Sweep** — cross-product of label schemes × quality filters::
-
-    python -m evaluation --sweep [--qualities marginal good]
-                                 [--label auto|<col>]
-                                 [--primary-quality marginal]
-                                 [--no-permutation]
-"""
+"""Command-line entry point for evaluation."""
 
 from __future__ import annotations
 
@@ -34,6 +13,7 @@ from evaluation.sweep import DEFAULT_LABEL_COLS, DEFAULT_QUALITIES, run_evaluati
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     parser = argparse.ArgumentParser(
         prog="python -m evaluation",
         description="Train and evaluate classification models on feature tables.",
@@ -131,6 +111,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command-line interface."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 

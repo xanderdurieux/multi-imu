@@ -1,26 +1,4 @@
-"""Calibration estimation and application for a single IMU stream.
-
-Conventions
------------
-- World frame: Z points up, X forward, Y left.
-- Gravity in world frame: [0, 0, -g]; accelerometer at rest measures [0, 0, +g].
-- All timestamps in milliseconds.
-
-Recording protocol
-------------------
-Each section begins with: ~5 s static → taps (sync anchors) → ~5 s static.
-
-Calibration outputs per sensor
--------------------------------
-- ``intrinsics``: gyro bias (always); acc bias/scale when a static hardware
-  calibration reference is provided.
-- ``alignment``: body-to-world rotation from the post-tap static window; only 
-  aligns gravity (roll + pitch), yaw is undefined.
-
-The rotation matrix is valid only at the alignment window and is used solely
-to initialise the orientation filter.  Do not use per-axis world-frame columns
-as time series without real-time orientation from the ``orientation`` stage.
-"""
+"""Core helpers for estimate and apply section-level imu calibration."""
 
 from __future__ import annotations
 
@@ -47,6 +25,7 @@ _G = 9.81
 
 @dataclass
 class OpeningSequence:
+    """Detected opening calibration routine."""
     tap_times_ms: list[float]
     pre_static_start_ms: float
     pre_static_end_ms: float
@@ -55,10 +34,12 @@ class OpeningSequence:
     n_taps: int
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready dictionary."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "OpeningSequence":
+        """Create an instance from a dictionary."""
         return cls(
             tap_times_ms=[float(v) for v in d.get("tap_times_ms", [])],
             pre_static_start_ms=float(d.get("pre_static_start_ms", 0.0)),
@@ -71,6 +52,7 @@ class OpeningSequence:
 
 @dataclass
 class SensorIntrinsics:
+    """Bias and scale values for one sensor."""
     gyro_bias: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     acc_bias: list[float] | None = None
     acc_scale: list[float] | None = None
@@ -79,6 +61,7 @@ class SensorIntrinsics:
     quality_tags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready dictionary."""
         return {
             "gyro_bias": self.gyro_bias,
             "acc_bias": self.acc_bias,
@@ -90,6 +73,7 @@ class SensorIntrinsics:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "SensorIntrinsics":
+        """Create an instance from a dictionary."""
         return cls(
             gyro_bias=list(d.get("gyro_bias", [0.0, 0.0, 0.0])),
             acc_bias=list(d["acc_bias"]) if d.get("acc_bias") is not None else None,
@@ -102,6 +86,7 @@ class SensorIntrinsics:
 
 @dataclass
 class SensorAlignment:
+    """Body-to-world alignment for one sensor."""
     rotation_matrix: list[list[float]] = field(
         default_factory=lambda: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
     )
@@ -113,10 +98,12 @@ class SensorAlignment:
     gravity_residual_ms2: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready dictionary."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "SensorAlignment":
+        """Create an instance from a dictionary."""
         return cls(
             rotation_matrix=list(d.get("rotation_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])),
             gravity_estimate=list(d.get("gravity_estimate", [0.0, 0.0, _G])),
@@ -130,6 +117,7 @@ class SensorAlignment:
 
 @dataclass
 class SectionCalibration:
+    """Calibration result for one section."""
     protocol_detected: bool = False
     opening_sequence: dict[str, OpeningSequence] = field(default_factory=dict)
     closing_sequence: dict[str, OpeningSequence] = field(default_factory=dict)
@@ -141,6 +129,7 @@ class SectionCalibration:
     provenance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready dictionary."""
         return {
             "schema_version": 2,
             "protocol_detected": self.protocol_detected,
@@ -154,6 +143,7 @@ class SectionCalibration:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "SectionCalibration":
+        """Create an instance from a dictionary."""
         raw_opening = d.get("opening_sequence") or {}
         opening = {s: OpeningSequence.from_dict(p) for s, p in raw_opening.items() if p}
         raw_closing = d.get("closing_sequence") or {}
@@ -227,7 +217,7 @@ def _gyro_bias_from_ranges(
 
 
 def _gravity_alignment_rotation(g_body: np.ndarray) -> np.ndarray:
-    """R such that R @ g_body ≈ [0, 0, g] (Z-up world frame)."""
+    """Return a rotation that maps gravity to Z-up."""
     g_norm = np.linalg.norm(g_body)
     if g_norm < 1e-6:
         return np.eye(3)
@@ -290,13 +280,7 @@ def estimate_sensor_intrinsics(
     *,
     static_cal: dict[str, Any] | None = None,
 ) -> SensorIntrinsics:
-    """Estimate gyro bias and optionally acc bias/scale from static windows.
-
-    Dynamic gyro bias (from opening window) is always applied; it tracks
-    session-level temperature drift that a static hardware cal cannot capture.
-    Accelerometer bias/scale are carried from the static hardware calibration
-    reference when provided — they are stable across sessions.
-    """
+    """Estimate sensor intrinsics."""
     quality_tags: list[str] = []
 
     gyro_bias = _gyro_bias_from_ranges(df, static_ranges)
@@ -392,12 +376,7 @@ def apply_calibration(
     intrinsics: SensorIntrinsics,
     alignment: SensorAlignment,
 ) -> pd.DataFrame:
-    """Apply bias correction and world-frame rotation to a raw IMU DataFrame.
-
-    Steps: subtract gyro bias → subtract acc bias, apply acc scale → rotate
-    both to world frame. World-frame columns (_world suffix) are valid only at
-    the alignment window; use the orientation stage for time-varying rotation.
-    """
+    """Apply calibration."""
     out = df.copy()
     R = np.array(alignment.rotation_matrix, dtype=float)
     gyro_bias = np.array(intrinsics.gyro_bias, dtype=float)

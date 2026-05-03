@@ -1,8 +1,4 @@
-"""Window-level quality scoring.
-
-Combines per-sensor validity, alignment confidence, calibration quality,
-and cross-sensor finite-rate into a single numeric score + tier label.
-"""
+"""Quality helpers for extract labelled sliding-window features from section signals."""
 
 from __future__ import annotations
 
@@ -27,13 +23,7 @@ def quality_features(
     yaw_conf_arduino: float,
     cross_valid_ratio: float,
 ) -> dict[str, Any]:
-    """Multi-IMU quality score with a dedicated cross-sensor usability term.
-
-    Dual-stream (both IMUs have samples in the window): weighted sum of bike
-    validity, rider validity, alignment, calibration, and cross-row finite rate.
-
-    Single-stream: cross term omitted; ``quality_cross`` stored as 1.0 (N/A).
-    """
+    """Return quality features."""
     q_bike = float(np.clip(valid_ratio_sporsa, 0.0, 1.0)) if np.isfinite(valid_ratio_sporsa) else 0.0
     q_rider = float(np.clip(valid_ratio_arduino, 0.0, 1.0)) if np.isfinite(valid_ratio_arduino) else 0.0
     q_cal = CAL_QUALITY_SCORES.get(calibration_quality, 0.5)

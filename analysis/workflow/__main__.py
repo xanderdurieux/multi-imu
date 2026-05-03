@@ -1,12 +1,4 @@
-"""Workflow entrypoint: run the full pipeline from a config file.
-
-Usage::
-
-    python -m workflow configs/workflow.thesis.json
-    python -m workflow configs/workflow.thesis.json --force
-    python -m workflow configs/workflow.thesis.json --stage calibration orientation
-    python -m workflow configs/workflow.thesis.json --list-stages
-"""
+"""Command-line entry point for workflow."""
 
 from __future__ import annotations
 
@@ -50,6 +42,7 @@ def _configure_logging(log_to_file: bool) -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     argv = list(argv if argv is not None else sys.argv[1:])
 
     stage_names = known_stages()

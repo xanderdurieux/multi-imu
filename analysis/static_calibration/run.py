@@ -91,6 +91,7 @@ def run_calibration_pipeline(
 
 
 def main() -> None:
+    """Run the command-line interface."""
     result = run_calibration_pipeline()
     cal = result["calibration"]
     print(f"Wrote {result['calibration_json']}")

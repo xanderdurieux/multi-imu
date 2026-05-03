@@ -1,9 +1,4 @@
-"""Orientation stage plots for one section.
-
-Generates:
-- ``{sensor}_orientation.png``  per-sensor Euler angle comparison across all methods run
-- ``orientation_overlay.png``   selected method, both sensors overlaid
-"""
+"""Plot orientation helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -39,6 +34,7 @@ _METHOD_PALETTE = [
 
 
 def _resolve_orientation_dir(target: str | Path) -> Path:
+    """Resolve orientation dir."""
     base = resolve_data_dir(target)
     if base.name == "orientation":
         return base
@@ -49,7 +45,7 @@ def _resolve_orientation_dir(target: str | Path) -> Path:
 
 
 def _prepare_wrapped_angle(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Filter invalid rows and insert NaN breaks at ±180° wraparounds."""
+    """Insert gaps where wrapped angles jump."""
     x_plot, y_plot = filter_valid_plot_xy(x, y)
     if x_plot.size < 2:
         return x_plot, y_plot
@@ -216,6 +212,7 @@ def plot_orientation_stage(target: str | Path) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
     argv = list(argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(prog="python -m visualization.plot_orientation")

@@ -16,6 +16,7 @@ GPS_COLUMNS = ("latitude", "longitude", "elevation_m", "time_utc")
 
 
 def _strip_xml_tag(tag: str) -> str:
+    """Return strip xml tag."""
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
@@ -78,6 +79,7 @@ _NMEA_RMC_RE = re.compile(
 
 
 def _nmea_latlon_to_deg(dm: str, hemi: str) -> float:
+    """Return nmea latlon to deg."""
     dm = (dm or "").strip()
     if not dm or dm == "0":
         return float("nan")
@@ -94,11 +96,7 @@ def _nmea_latlon_to_deg(dm: str, hemi: str) -> float:
 
 
 def parse_nmea(path: Path | str) -> pd.DataFrame:
-    """
-    Extract positions from ``$GPRMC`` / ``$GNRMC`` sentences (status A) in a text file.
-
-    Each valid RMC line yields one row. Other sentence types are ignored.
-    """
+    """Parse nmea."""
     path = Path(path)
     rows: list[dict[str, object]] = []
 
@@ -128,14 +126,12 @@ def parse_nmea(path: Path | str) -> pd.DataFrame:
 
 
 def _normalize_column_name(name: str) -> str:
+    """Normalize column name."""
     return name.strip().lower().replace(" ", "_")
 
 
 def _csv_first_line_is_wrapped_record(path: Path) -> bool:
-    """
-    True when each physical line is one CSV field whose text is itself a comma-separated row
-    (e.g. exports that quote the entire inner CSV line).
-    """
+    """Return csv first line is wrapped record."""
     with path.open("r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\r\n")
@@ -180,13 +176,7 @@ def parse_gps_csv(
     lat_column: str | None = None,
     lon_column: str | None = None,
 ) -> pd.DataFrame:
-    """
-    Load latitude/longitude from a CSV. If *lat_column* / *lon_column* are omitted,
-    columns are matched by common names (``latitude`` / ``lat`` / ``y``, etc.).
-
-    Also supports session exports where each line is a single quoted string containing
-    the real comma-separated row (double-encoded CSV).
-    """
+    """Parse gps csv."""
     path = Path(path)
     if _csv_first_line_is_wrapped_record(path):
         df = _read_wrapped_inner_csv(path)
@@ -198,6 +188,7 @@ def parse_gps_csv(
     norm = {_normalize_column_name(c): c for c in df.columns}
 
     def resolve_lat() -> str | None:
+        """Resolve lat."""
         if lat_column:
             return lat_column if lat_column in df.columns else None
         for key in ("latitude", "lat", "y", "gps_lat"):
@@ -206,6 +197,7 @@ def parse_gps_csv(
         return None
 
     def resolve_lon() -> str | None:
+        """Resolve lon."""
         if lon_column:
             return lon_column if lon_column in df.columns else None
         for key in ("longitude", "lon", "lng", "long", "x", "gps_lon", "gps_lng"):
@@ -260,11 +252,7 @@ def parse_gps_csv(
 
 
 def write_gps_csv(df: pd.DataFrame, path: Path | str) -> None:
-    """Write a standard GPS DataFrame to *path* in a format readable by :func:`load_gps`.
-
-    ``time_utc`` is serialised as ISO 8601 strings so ``pd.to_datetime`` can
-    round-trip it without ambiguity.
-    """
+    """Write gps csv."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     out = df.copy()
@@ -275,13 +263,7 @@ def write_gps_csv(df: pd.DataFrame, path: Path | str) -> None:
 
 
 def load_gps(path: Path | str) -> pd.DataFrame:
-    """
-    Load GPS points from a file. Format is chosen from the suffix:
-
-    - ``.gpx`` — GPX track points
-    - ``.csv`` — CSV with lat/lon columns (auto-detected)
-    - ``.nmea``, ``.txt`` — NMEA with RMC sentences (``.txt`` treated as NMEA)
-    """
+    """Load gps."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)

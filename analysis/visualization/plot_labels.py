@@ -1,20 +1,4 @@
-"""Overlay labels on sensor data or feature windows.
-
-CLI usage::
-
-    # Synced recording stage
-    python -m visualization.plot_labels 2026-02-26_r1/synced
-
-    # Section with sensor data
-    python -m visualization.plot_labels 2026-02-26_r1s1
-
-    # Section features stage
-    python -m visualization.plot_labels 2026-02-26_r1s1 --stage features
-
-    # Explicit output path
-    python -m visualization.plot_labels 2026-02-26_r1s1 -o /tmp/out.png
-    
-"""
+"""Plot labels helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
@@ -98,6 +82,7 @@ def _draw_spans(
 
 
 def _label_patches(colors: dict[str, tuple]) -> list[mpatches.Patch]:
+    """Return label patches."""
     return [
         mpatches.Patch(color=color, alpha=0.6, label=name)
         for name, color in colors.items()
@@ -137,10 +122,7 @@ def plot_labels_sensor(
     output_path: Path | None = None,
     title: str = "",
 ) -> Path | None:
-    """Plot acc/gyro norms for all sensors with label spans overlaid.
-
-    Returns the saved PNG path, or None if no sensor data was found.
-    """
+    """Plot labels sensor."""
     sensor_dfs = _load_sensor_dfs(stage_dir)
     if not sensor_dfs:
         log.warning("No IMU sensor CSVs found in %s", stage_dir)
@@ -202,6 +184,7 @@ def plot_labels_sensor(
 # ---------------------------------------------------------------------------
 
 def _resolve_features_csv(target_dir: Path) -> Path | None:
+    """Resolve features csv."""
     if (target_dir / "features.csv").exists():
         return target_dir / "features.csv"
     nested = target_dir / "features" / "features.csv"
@@ -211,6 +194,7 @@ def _resolve_features_csv(target_dir: Path) -> Path | None:
 
 
 def _select_feature_cols(df: pd.DataFrame, top_n: int) -> list[str]:
+    """Select feature cols."""
     numeric = df.select_dtypes(include=["number"]).columns.tolist()
     candidates = [c for c in numeric if c not in _EXCLUDE_FEATURE_COLS]
     prefixed = [c for c in candidates if c.startswith(_FEATURE_PREFIXES)]
@@ -229,10 +213,7 @@ def plot_labels_features(
     output_path: Path | None = None,
     title: str = "",
 ) -> Path | None:
-    """Plot top feature series for a section with label spans overlaid.
-
-    Returns the saved PNG path, or None if no features data was found.
-    """
+    """Plot labels features."""
     feat_csv = _resolve_features_csv(section_dir)
     if feat_csv is None:
         log.warning("No features.csv found under %s", section_dir)
@@ -307,10 +288,7 @@ def plot_labels_calibrated(
     output_path: Path | None = None,
     title: str = "",
 ) -> Path | None:
-    """Plot acc/gyro norms for the calibrated sensor data with label spans overlaid.
-
-    Returns the saved PNG path, or None if no calibrated data was found.
-    """
+    """Plot labels calibrated."""
     cal_dir = section_dir / "calibrated"
     if not cal_dir.is_dir():
         log.warning("No calibrated directory found under %s", section_dir)
@@ -341,10 +319,7 @@ def plot_labels_orientation(
     output_path: Path | None = None,
     title: str = "",
 ) -> Path | None:
-    """Plot orientation angles (yaw/pitch/roll) for both sensors with label spans overlaid.
-
-    Returns the saved PNG path, or None if no orientation data was found.
-    """
+    """Plot labels orientation."""
     orient_dir = section_dir / "orientation"
     if not orient_dir.is_dir():
         log.warning("No orientation directory found under %s", section_dir)
@@ -424,10 +399,7 @@ def plot_labels_derived(
     output_path: Path | None = None,
     title: str = "",
 ) -> Path | None:
-    """Plot derived signals (acc norm, gyro norm, jerk, …) with label spans overlaid.
-
-    Returns the saved PNG path, or None if no derived data was found.
-    """
+    """Plot labels derived."""
     derived_dir = section_dir / "derived"
     if not derived_dir.is_dir():
         log.warning("No derived directory found under %s", section_dir)
@@ -548,25 +520,7 @@ def plot_labels(
     top_n: int = _FEATURES_TOP_N,
     output_path: Path | None = None,
 ) -> Path | None:
-    """Overlay labels on sensor data or features for *target*.
-
-    Parameters
-    ----------
-    target:
-        A recording stage reference (``<recording>/<stage>``), a section
-        directory name, or an absolute path to either.
-    stage:
-        ``"calibrated"`` — acc/gyro norm overlay for calibrated sensor data.
-        ``"orientation"`` — yaw/pitch/roll overlay for orientation estimates.
-        ``"derived"``     — derived signal overlay (acc norm, gyro norm, jerk, …).
-        ``"sensor"``      — acc/gyro norm overlay on the target directory directly.
-        ``"features"``    — feature series overlay.
-        ``"auto"`` (default) — calibrated if that dir exists, else sensor, else features.
-    top_n:
-        Number of top-variance features to show in features mode.
-    output_path:
-        Explicit output PNG path; auto-derived when *None*.
-    """
+    """Plot labels."""
     target_dir = resolve_data_dir(target)
     labels_path = _infer_labels_path(target_dir)
     labels = load_labels(labels_path)
@@ -610,6 +564,7 @@ def plot_labels(
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command-line interface."""
     import sys
 
     argv = list(argv if argv is not None else sys.argv[1:])

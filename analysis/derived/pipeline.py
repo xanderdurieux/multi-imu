@@ -19,28 +19,7 @@ def process_section_derived(
     sample_rate_hz: float = 100.0,
     force: bool = False,
 ) -> bool:
-    """Compute derived signals for one section.
-
-    Reads ``<section_dir>/calibrated/sporsa.csv`` and ``<section_dir>/calibrated/arduino.csv``,
-    computes per-sensor and cross-sensor derived signals, and writes:
-
-    - ``<section_dir>/derived/sporsa_signals.csv``
-    - ``<section_dir>/derived/arduino_signals.csv``
-    - ``<section_dir>/derived/cross_sensor_signals.csv``
-
-    Parameters
-    ----------
-    section_dir:
-        Path to the section directory (e.g. ``data/sections/2026-02-26_r1s1``).
-    sample_rate_hz:
-        Nominal sampling rate in Hz used for filter design and window sizing.
-    force:
-        If True, overwrite existing outputs.
-
-    Returns
-    -------
-    True if successful, False if skipped or failed.
-    """
+    """Process section derived."""
     cal_dir = section_dir / "calibrated"
     if not cal_dir.exists():
         log.warning("Calibrated directory not found for %s — skipping.", section_dir.name)
@@ -135,21 +114,7 @@ def process_recording_derived(
     sample_rate_hz: float = 100.0,
     force: bool = False,
 ) -> list[bool]:
-    """Compute derived signals for all sections of a recording.
-
-    Parameters
-    ----------
-    recording_name:
-        Recording name (e.g. ``2026-02-26_r1``).
-    sample_rate_hz:
-        Nominal sampling rate in Hz.
-    force:
-        If True, overwrite existing outputs.
-
-    Returns
-    -------
-    List of booleans indicating success per section (same order as sections).
-    """
+    """Process recording derived."""
     section_dirs = iter_sections_for_recording(recording_name)
     if not section_dirs:
         log.warning("No sections found for recording '%s'.", recording_name)

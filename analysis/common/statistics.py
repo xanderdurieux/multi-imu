@@ -1,10 +1,4 @@
-"""NaN-safe scalar statistics over 1-D arrays.
-
-All helpers return ``float('nan')`` when the input has no finite values, and
-ignore NaNs otherwise. Kept purely scalar for use inside feature-extraction
-loops; for vectorised aggregates use ``numpy``'s ``nanmean`` / ``nanstd``
-directly.
-"""
+"""NaN-safe scalar statistics."""
 
 from __future__ import annotations
 
@@ -15,6 +9,7 @@ _EPSILON = 1e-9
 
 
 def safe_mean(arr: np.ndarray) -> float:
+    """Return NaN-safe mean."""
     arr = np.asarray(arr, dtype=float)
     if arr.size == 0 or not np.isfinite(arr).any():
         return float("nan")
@@ -22,6 +17,7 @@ def safe_mean(arr: np.ndarray) -> float:
 
 
 def safe_std(arr: np.ndarray) -> float:
+    """Return NaN-safe std."""
     arr = np.asarray(arr, dtype=float)
     if arr.size == 0 or not np.isfinite(arr).any():
         return float("nan")
@@ -30,6 +26,7 @@ def safe_std(arr: np.ndarray) -> float:
 
 
 def safe_min(arr: np.ndarray) -> float:
+    """Return NaN-safe min."""
     arr = np.asarray(arr, dtype=float)
     if arr.size == 0 or not np.isfinite(arr).any():
         return float("nan")
@@ -37,6 +34,7 @@ def safe_min(arr: np.ndarray) -> float:
 
 
 def safe_max(arr: np.ndarray) -> float:
+    """Return NaN-safe max."""
     arr = np.asarray(arr, dtype=float)
     if arr.size == 0 or not np.isfinite(arr).any():
         return float("nan")
@@ -44,6 +42,7 @@ def safe_max(arr: np.ndarray) -> float:
 
 
 def safe_iqr(arr: np.ndarray) -> float:
+    """Return NaN-safe iqr."""
     clean = np.asarray(arr, dtype=float)
     clean = clean[np.isfinite(clean)]
     if clean.size < 2:
@@ -53,6 +52,7 @@ def safe_iqr(arr: np.ndarray) -> float:
 
 
 def safe_skew(arr: np.ndarray) -> float:
+    """Return NaN-safe skew."""
     clean = np.asarray(arr, dtype=float)
     clean = clean[np.isfinite(clean)]
     if clean.size < 3:
@@ -65,7 +65,7 @@ def safe_skew(arr: np.ndarray) -> float:
 
 
 def safe_kurtosis(arr: np.ndarray) -> float:
-    """Excess kurtosis (Fisher definition, normal → 0)."""
+    """Return NaN-safe excess kurtosis."""
     clean = np.asarray(arr, dtype=float)
     clean = clean[np.isfinite(clean)]
     if clean.size < 4:

@@ -1,12 +1,4 @@
-"""Stream I/O, activity-signal construction, and post-fit correlation scoring.
-
-This module owns every signal-level operation used by the sync stage:
-
-- Stream loading and uniform-grid resampling (`load_stream`, `resample_stream`)
-- 1-D activity-signal construction from an IMU frame (`build_activity_signal`)
-- Single-call pipeline used by strategies (`build_resampled_activity_signal`)
-- Post-fit Pearson correlation of acc_norm (`compute_sync_correlations`)
-"""
+"""Signals helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -97,6 +89,7 @@ def resample_stream(
 
 
 def _norm_diff(signal: np.ndarray) -> np.ndarray:
+    """Return norm diff."""
     return zscore_finite(first_difference(signal))
 
 

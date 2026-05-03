@@ -1,9 +1,4 @@
-"""`SyncModel` dataclass and linear clock-transform helpers.
-
-The model is affine on seconds: ``t_ref = t_tgt + offset + drift*(t_tgt - t0)``.
-Timestamps in the pipeline live in milliseconds; the wrappers below convert at
-the boundary so the math stays in seconds.
-"""
+"""Model helpers for align arduino timestamps to the sporsa reference clock."""
 
 from __future__ import annotations
 
@@ -29,6 +24,7 @@ def target_to_reference_seconds(
     drift_seconds_per_second: float,
     target_origin_seconds: float,
 ) -> np.ndarray:
+    """Return target to reference seconds."""
     t_tgt = np.asarray(target_seconds, dtype=float)
     return (
         t_tgt
@@ -44,6 +40,7 @@ def reference_to_target_seconds(
     drift_seconds_per_second: float,
     target_origin_seconds: float,
 ) -> np.ndarray:
+    """Return reference to target seconds."""
     t_ref = np.asarray(reference_seconds, dtype=float)
     a = float(drift_seconds_per_second)
     denom = 1.0 + a

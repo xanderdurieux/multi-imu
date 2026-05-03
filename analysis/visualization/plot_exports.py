@@ -1,14 +1,4 @@
-"""Backward-compatible re-export of the split plot_exports_* modules.
-
-The original monolithic file was split into three focused siblings:
-
-- ``plot_exports_features``   — feature EDA (label distributions, PCA, violins)
-- ``plot_exports_calibration`` — per-section calibration audits
-- ``plot_exports_sync``       — per-recording / per-session sync audits
-- ``plot_exports_orientation`` — per-recording / per-session orientation audits
-
-Shared helpers live in ``_exports_common``.
-"""
+"""Plot exports helpers for plot pipeline diagnostics and dataset summaries."""
 
 from __future__ import annotations
 
