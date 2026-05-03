@@ -52,8 +52,19 @@ class WorkflowConfig:
     force: bool = False
     skip_exports: bool = False
     evaluation_seed: int = 42
-    evaluation_label_col: str = "scenario_label_activity"
+    evaluation_label_col: str = "auto"
     evaluation_exclude_non_riding: bool = False
+    # Sweep over the cross-product of {evaluation_label_col} × {quality_levels}.
+    # Empty list = use the run's primary quality only (no sweep on that axis).
+    evaluation_quality_levels: list[str] = field(
+        default_factory=lambda: ["poor", "marginal", "good"]
+    )
+    # Models to compute permutation importance for (per-feature-set).  Limit
+    # to one tree-ensemble model by default — running it for every model
+    # roughly triples evaluation runtime.
+    evaluation_permutation_models: list[str] = field(
+        default_factory=lambda: ["random_forest"]
+    )
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
 
@@ -106,6 +117,8 @@ class WorkflowConfig:
             "scenario_label_coarse",
             "scenario_label_binary",
             "scenario_label_riding",
+            "scenario_label_cornering",
+            "scenario_label_head_motion",
         }
         if self.evaluation_label_col not in valid_eval_label_cols:
             errors.append(
@@ -114,6 +127,26 @@ class WorkflowConfig:
             )
         if not isinstance(self.evaluation_exclude_non_riding, bool):
             errors.append("evaluation_exclude_non_riding must be a boolean")
+        valid_qualities = {"poor", "marginal", "good"}
+        if not isinstance(self.evaluation_quality_levels, list):
+            errors.append("evaluation_quality_levels must be a list of quality labels")
+        else:
+            bad = [q for q in self.evaluation_quality_levels if q not in valid_qualities]
+            if bad:
+                errors.append(
+                    f"evaluation_quality_levels contains invalid entries {bad}; "
+                    f"valid: {sorted(valid_qualities)}"
+                )
+        valid_models = {"random_forest", "hist_gradient_boosting", "logistic_regression"}
+        if not isinstance(self.evaluation_permutation_models, list):
+            errors.append("evaluation_permutation_models must be a list of model names")
+        else:
+            bad = [m for m in self.evaluation_permutation_models if m not in valid_models]
+            if bad:
+                errors.append(
+                    f"evaluation_permutation_models contains invalid entries {bad}; "
+                    f"valid: {sorted(valid_models)}"
+                )
         return errors
 
 

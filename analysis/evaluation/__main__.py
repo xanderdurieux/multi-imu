@@ -1,6 +1,8 @@
 """CLI entry point for the evaluation package.
 
-Usage::
+Two modes:
+
+* **Single run** (default) — one ``label_col`` × one ``min_quality``::
 
     python -m evaluation [--features data/exports/features_fused.csv]
                          [--output outputs/evaluation]
@@ -9,6 +11,14 @@ Usage::
                          [--label scenario_label_activity]
                          [--group section_id]
                          [--exclude-non-riding]
+                         [--no-permutation]
+
+* **Sweep** — cross-product of label schemes × quality filters::
+
+    python -m evaluation --sweep [--qualities marginal good]
+                                 [--label auto|<col>]
+                                 [--primary-quality marginal]
+                                 [--no-permutation]
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from pathlib import Path
 
 from common.paths import evaluation_root, exports_root
 from evaluation.experiments import run_evaluation
+from evaluation.sweep import DEFAULT_LABEL_COLS, DEFAULT_QUALITIES, run_evaluation_sweep
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -51,14 +62,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default="marginal",
         dest="min_quality",
         choices=["poor", "marginal", "good"],
-        help="Minimum quality label filter (default: marginal).",
+        help="Minimum quality label filter for single-run mode (default: marginal).",
     )
     parser.add_argument(
         "--label",
         metavar="COL",
         default="scenario_label_activity",
         dest="label_col",
-        help="Target label column (default: scenario_label_activity).",
+        help=(
+            "Target label column. In sweep mode, pass 'auto' to evaluate every "
+            "label scheme (default: scenario_label_activity)."
+        ),
     )
     parser.add_argument(
         "--group",
@@ -72,6 +86,39 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Drop windows with scenario_label_binary=non_riding before evaluation.",
+    )
+    parser.add_argument(
+        "--no-permutation",
+        dest="permutation",
+        action="store_false",
+        default=True,
+        help="Skip permutation importance (faster but loses the model-agnostic ranking).",
+    )
+    parser.add_argument(
+        "--permutation-models",
+        nargs="+",
+        default=["random_forest"],
+        choices=["random_forest", "hist_gradient_boosting", "logistic_regression"],
+        help="Models to compute permutation importance for (default: random_forest).",
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        default=False,
+        help="Run a sweep across the label_col × min_quality grid.",
+    )
+    parser.add_argument(
+        "--qualities",
+        nargs="+",
+        default=list(DEFAULT_QUALITIES),
+        choices=["poor", "marginal", "good"],
+        help=f"Quality filters to sweep (default: {list(DEFAULT_QUALITIES)}).",
+    )
+    parser.add_argument(
+        "--primary-quality",
+        default="marginal",
+        choices=["poor", "marginal", "good"],
+        help="Quality filter to compute permutation importance for (default: marginal).",
     )
     parser.add_argument(
         "--verbose",
@@ -93,6 +140,29 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
+        if args.sweep:
+            label_cols = (
+                list(DEFAULT_LABEL_COLS)
+                if args.label_col == "auto"
+                else [args.label_col]
+            )
+            sweep_summary = run_evaluation_sweep(
+                features_path=Path(args.features),
+                output_dir=Path(args.output),
+                label_cols=label_cols,
+                qualities=args.qualities,
+                primary_quality=args.primary_quality,
+                seed=args.seed,
+                exclude_non_riding=args.exclude_non_riding,
+                no_plots=False,
+                permutation_models=tuple(args.permutation_models),
+            )
+            print(
+                f"Sweep complete. {sweep_summary['n_runs_ok']}/{sweep_summary['n_runs']} "
+                "run(s) succeeded."
+            )
+            return 0
+
         summary = run_evaluation(
             features_path=Path(args.features),
             output_dir=Path(args.output),
@@ -101,12 +171,14 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             min_quality=args.min_quality,
             exclude_non_riding=args.exclude_non_riding,
+            compute_permutation_importance=args.permutation,
+            permutation_models=tuple(args.permutation_models),
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Evaluation complete.")
+    print("Evaluation complete.")
     print(f"  Windows evaluated : {summary['n_windows']}")
     print(f"  Classes           : {', '.join(summary['classes'])}")
     if summary.get("results"):

@@ -15,6 +15,53 @@ from common.paths import load_label_config_data
 
 
 @dataclass(frozen=True)
+class SetBasedBinaryScheme:
+    """A 2-class objective resolved from the multi-label overlap set.
+
+    Two patterns are supported through the same dataclass:
+
+    * **literal** — both classes are explicit token lists
+      (``positive_labels`` and ``negative_labels``); other tokens are
+      ignored.  ``on_overlap`` decides which class wins when both lists
+      hit (``"negative"`` is the safety default used by the riding scheme).
+    * **qualified-positive** — only ``positive_labels`` is explicit; the
+      negative class is "any window that satisfies ``qualifier_labels`` but
+      doesn't hit a positive token".  Used for cornering / head-motion
+      objectives where the negative class is "riding without the event".
+    """
+
+    name: str
+    positive_value: str
+    negative_value: str
+    unlabeled_value: str
+    positive_labels: frozenset[str]
+    negative_labels: frozenset[str] = frozenset()
+    qualifier_labels: frozenset[str] = frozenset()
+    on_overlap: str = "positive"  # "positive" | "negative"
+
+    def resolve(self, tokens: set[str]) -> str:
+        pos_hit = bool(tokens & self.positive_labels)
+        neg_hit = bool(tokens & self.negative_labels)
+
+        # Literal mode: both class lists are explicit.
+        if self.negative_labels:
+            if pos_hit and neg_hit:
+                return self.negative_value if self.on_overlap == "negative" else self.positive_value
+            if neg_hit:
+                return self.negative_value
+            if pos_hit:
+                return self.positive_value
+            return self.unlabeled_value
+
+        # Qualified-positive mode: positive vs (qualifier without positive).
+        if pos_hit:
+            return self.positive_value
+        if self.qualifier_labels and (tokens & self.qualifier_labels):
+            return self.negative_value
+        return self.unlabeled_value
+
+
+@dataclass(frozen=True)
 class LabelConfig:
     """Resolved scenario-label priority and derived-label mappings."""
 
@@ -27,16 +74,18 @@ class LabelConfig:
     binary_normal_value: str = "normal"
     binary_incident_value: str = "incident"
     binary_non_riding_value: str = "non_riding"
-    riding_value: str = "riding"
-    # scenario_label_riding is annotation-driven, not derived from the
-    # priority-collapsed dominant label. Only literal labels listed in these
-    # sets contribute; every other label is ignored for this objective.
-    riding_riding_labels: frozenset[str] = frozenset({"riding"})
-    riding_non_riding_labels: frozenset[str] = frozenset({"non_riding"})
+    set_based_schemes: tuple[SetBasedBinaryScheme, ...] = ()
 
     @property
     def priority_rank(self) -> dict[str, int]:
         return {label: idx for idx, label in enumerate(self.label_priority)}
+
+    def set_based_scheme(self, name: str) -> SetBasedBinaryScheme | None:
+        return next((s for s in self.set_based_schemes if s.name == name), None)
+
+    @property
+    def set_based_scheme_names(self) -> tuple[str, ...]:
+        return tuple(s.name for s in self.set_based_schemes)
 
     def map_label(self, scheme: str, fine_label: str) -> str:
         """Map a fine scenario label to *scheme* using the configured rules."""
@@ -52,16 +101,12 @@ class LabelConfig:
                 return self.binary_incident_value
             return self.binary_normal_value
 
-        if scheme == "scenario_label_riding":
-            # Strict, annotation-driven: only the configured literal sets
-            # contribute. Anything else (cornering, accelerating, …) is
-            # unlabeled for this objective. Multi-label resolution from the
-            # full overlap set lives in :meth:`map_label_set`.
-            if label in self.riding_non_riding_labels:
-                return self.binary_non_riding_value
-            if label in self.riding_riding_labels:
-                return self.riding_value
-            return self.unlabeled_values.get("scenario_label_riding", "unlabeled")
+        sb = self.set_based_scheme(scheme)
+        if sb is not None:
+            # Single-label fallback for set-based objectives: pretend the
+            # one fine label is the entire overlap set.  Matches the
+            # legacy behaviour of `to_riding_label` etc.
+            return sb.resolve({label})
 
         return self.derived_maps.get(scheme, {}).get(
             label,
@@ -71,35 +116,29 @@ class LabelConfig:
     def map_label_set(self, scheme: str, fine_labels) -> str:
         """Resolve *scheme* from the full set of labels overlapping a window.
 
-        This is the multi-label-friendly entry point — the window's annotation
-        is treated as a *set* of independent overlapping labels, not collapsed
-        to a single "dominant" label. The per-objective rules decide which
-        members of the set count.
+        Multi-label-friendly entry point — the window's annotation is treated
+        as a *set* of independent overlapping labels, not collapsed to a
+        single "dominant" token.  The per-objective rules in
+        :class:`SetBasedBinaryScheme` decide which members count.
 
-        Currently implemented for ``scenario_label_riding`` only. Other schemes
-        fall back to the configured priority order via :meth:`map_label`,
-        applied to the highest-priority token in the set.
+        Schemes not registered as set-based fall back to single-label
+        semantics on the priority-max token via :meth:`map_label`.
         """
         tokens = {
             str(t).strip()
             for t in (fine_labels or ())
             if str(t).strip() and str(t).strip().lower() not in {"nan", "none", "unlabeled"}
         }
+
+        sb = self.set_based_scheme(scheme)
+        if sb is not None:
+            if not tokens:
+                return sb.unlabeled_value
+            return sb.resolve(tokens)
+
         if not tokens:
             return self.unlabeled_values.get(scheme, "unlabeled")
 
-        if scheme == "scenario_label_riding":
-            # Both classes present in the same window → return non_riding so
-            # we never silently call a window "riding" while it overlaps an
-            # explicit non_riding span. True multi-label support (returning
-            # both) belongs in a future labels[] column.
-            if tokens & self.riding_non_riding_labels:
-                return self.binary_non_riding_value
-            if tokens & self.riding_riding_labels:
-                return self.riding_value
-            return self.unlabeled_values.get("scenario_label_riding", "unlabeled")
-
-        # Fall back to single-label semantics on the priority-max token.
         ranked = sorted(tokens, key=lambda t: self.priority_rank.get(t, -1), reverse=True)
         return self.map_label(scheme, ranked[0])
 
@@ -121,6 +160,50 @@ def _string_map(value: Any, *, field_name: str) -> dict[str, str]:
         for key, mapped in value.items()
         if str(key).strip() and str(mapped).strip()
     }
+
+
+def _build_set_based_scheme(name: str, block: dict[str, Any]) -> SetBasedBinaryScheme:
+    if not isinstance(block, dict):
+        raise ValueError(f"label config: set_based_binary_schemes.{name!r} must be an object.")
+
+    pos_labels = frozenset(
+        _string_list(block.get("positive_labels"), field_name=f"{name}.positive_labels")
+    )
+    neg_labels = frozenset(
+        str(s).strip() for s in (block.get("negative_labels") or []) if str(s).strip()
+    )
+    qual_labels = frozenset(
+        str(s).strip() for s in (block.get("qualifier_labels") or []) if str(s).strip()
+    )
+
+    if not neg_labels and not qual_labels:
+        raise ValueError(
+            f"label config: {name!r} needs either 'negative_labels' (literal mode) "
+            "or 'qualifier_labels' (qualified-positive mode)."
+        )
+    overlap = pos_labels & neg_labels
+    if overlap:
+        raise ValueError(
+            f"label config: {name!r} positive/negative label sets overlap: "
+            + ", ".join(sorted(overlap))
+        )
+
+    on_overlap = str(block.get("on_overlap", "positive")).strip().lower()
+    if on_overlap not in {"positive", "negative"}:
+        raise ValueError(
+            f"label config: {name!r} on_overlap must be 'positive' or 'negative'."
+        )
+
+    return SetBasedBinaryScheme(
+        name=name,
+        positive_value=str(block.get("positive_value", "positive")).strip() or "positive",
+        negative_value=str(block.get("negative_value", "negative")).strip() or "negative",
+        unlabeled_value=str(block.get("unlabeled_value", "unlabeled")).strip() or "unlabeled",
+        positive_labels=pos_labels,
+        negative_labels=neg_labels,
+        qualifier_labels=qual_labels,
+        on_overlap=on_overlap,
+    )
 
 
 def _build(payload: dict[str, Any]) -> LabelConfig:
@@ -156,43 +239,21 @@ def _build(payload: dict[str, Any]) -> LabelConfig:
         _string_list(binary.get("non_riding_labels"), field_name="scenario_label_binary.non_riding_labels")
     )
 
-    riding_block = derived.get("scenario_label_riding")
-    if isinstance(riding_block, dict):
-        unlabeled_values["scenario_label_riding"] = (
-            str(riding_block.get("unlabeled_value", "unlabeled")).strip() or "unlabeled"
-        )
-        riding_value = str(riding_block.get("riding_value", "riding")).strip() or "riding"
-
-        riding_riding_labels = frozenset(
-            _string_list(
-                riding_block.get("riding_labels", ["riding"]),
-                field_name="scenario_label_riding.riding_labels",
-            )
-        )
-        riding_non_riding_labels = frozenset(
-            _string_list(
-                riding_block.get("non_riding_labels", ["non_riding"]),
-                field_name="scenario_label_riding.non_riding_labels",
-            )
-        )
-        riding_overlap = riding_riding_labels & riding_non_riding_labels
-        if riding_overlap:
-            raise ValueError(
-                "label config: scenario_label_riding riding/non_riding label sets overlap: "
-                + ", ".join(sorted(riding_overlap))
-            )
-    else:
-        unlabeled_values["scenario_label_riding"] = "unlabeled"
-        riding_value = "riding"
-        riding_riding_labels = frozenset({"riding"})
-        riding_non_riding_labels = frozenset({"non_riding"})
-
     overlap = incident_labels & non_riding_labels
     if overlap:
         raise ValueError(
             "label config: binary incident/non-riding label sets overlap: "
             + ", ".join(sorted(overlap))
         )
+
+    sb_block = payload.get("set_based_binary_schemes") or {}
+    if not isinstance(sb_block, dict):
+        raise ValueError("label config: 'set_based_binary_schemes' must be an object if present.")
+    set_based: list[SetBasedBinaryScheme] = []
+    for name, block in sb_block.items():
+        scheme = _build_set_based_scheme(str(name).strip(), block)
+        unlabeled_values[scheme.name] = scheme.unlabeled_value
+        set_based.append(scheme)
 
     return LabelConfig(
         label_priority=priority,
@@ -204,9 +265,7 @@ def _build(payload: dict[str, Any]) -> LabelConfig:
         binary_normal_value=str(binary.get("normal_value", "normal")).strip() or "normal",
         binary_incident_value=str(binary.get("incident_value", "incident")).strip() or "incident",
         binary_non_riding_value=str(binary.get("non_riding_value", "non_riding")).strip() or "non_riding",
-        riding_value=riding_value,
-        riding_riding_labels=riding_riding_labels,
-        riding_non_riding_labels=riding_non_riding_labels,
+        set_based_schemes=tuple(set_based),
     )
 
 

@@ -174,28 +174,29 @@ def to_binary_label(fine_label: str, config: LabelConfig | None = None) -> str:
     return (config or default_label_config()).map_label("scenario_label_binary", fine_label)
 
 
-def to_riding_label(fine_label: str, config: LabelConfig | None = None) -> str:
-    """Map a single fine-grained label to a 2-class non_riding/riding scheme.
-
-    Strict: only labels in the configured ``scenario_label_riding`` literal
-    sets contribute. Use :func:`to_riding_label_from_set` when the full set
-    of overlapping labels is available — that's the preferred path because
-    it correctly handles a window that overlaps both an explicit ``riding``
-    and a sub-event token like ``cornering``.
-    """
-    return (config or default_label_config()).map_label("scenario_label_riding", fine_label)
-
-
-def to_riding_label_from_set(
+def to_set_based_label(
+    scheme: str,
     fine_labels,
     config: LabelConfig | None = None,
 ) -> str:
-    """Resolve scenario_label_riding from the multi-label set of overlaps.
+    """Resolve any registered set-based binary scheme from a label set.
 
     Accepts any iterable of label strings (e.g. the output of
     :func:`label_feature_set` or a pipe-split ``scenario_labels`` cell).
+    Schemes are configured under ``set_based_binary_schemes`` in
+    ``labels.default.json``.
     """
-    return (config or default_label_config()).map_label_set("scenario_label_riding", fine_labels)
+    return (config or default_label_config()).map_label_set(scheme, fine_labels)
+
+
+def to_riding_label(fine_label: str, config: LabelConfig | None = None) -> str:
+    """Single-label fallback for ``scenario_label_riding``.
+
+    Prefer :func:`to_set_based_label` with the full overlap set when
+    available — a window straddling both ``riding`` and ``non_riding`` only
+    resolves correctly under the multi-label rules.
+    """
+    return (config or default_label_config()).map_label("scenario_label_riding", fine_label)
 
 
 def non_riding_labels(config: LabelConfig | None = None) -> frozenset[str]:

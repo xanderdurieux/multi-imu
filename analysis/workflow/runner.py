@@ -34,6 +34,8 @@ _EVALUATION_LABEL_COLS = [
     "scenario_label_coarse",
     "scenario_label_binary",
     "scenario_label_riding",
+    "scenario_label_cornering",
+    "scenario_label_head_motion",
 ]
 
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
@@ -261,36 +263,47 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             result["skipped"] += 1
 
     elif stage == "evaluation":
-        from evaluation.experiments import run_evaluation
+        from evaluation.sweep import run_evaluation_sweep
         fused = exports_root() / "features_fused.csv"
         out = evaluation_root()
         if fused.exists():
+            # Resolve the label-col axis: "auto" → all schemes in _EVALUATION_LABEL_COLS;
+            # the user pinned one scheme and the sweep collapses on that axis.
             if cfg.evaluation_label_col == "auto":
-                eval_runs = _EVALUATION_LABEL_COLS
+                label_cols = _EVALUATION_LABEL_COLS
             else:
-                eval_runs = [cfg.evaluation_label_col]
+                label_cols = [cfg.evaluation_label_col]
 
-            for label_col in eval_runs:
-                run_out = out / label_col
-                try:
-                    log.info(
-                        "Running evaluation for label_col=%s -> %s",
-                        label_col,
-                        project_relative_path(run_out),
-                    )
-                    run_evaluation(
-                        fused,
-                        output_dir=run_out,
-                        label_col=label_col,
-                        seed=cfg.evaluation_seed,
-                        min_quality=cfg.min_quality_label,
-                        exclude_non_riding=cfg.evaluation_exclude_non_riding,
-                        no_plots=cfg.no_plots,
-                    )
-                    result["ok"] += 1
-                except Exception as exc:
-                    log.error("evaluation failed for label_col=%s: %s", label_col, exc)
-                    result["failed"] += 1
+            # Ensure the per-stage primary quality is always present so the
+            # canonical (primary) configuration always produces permutation
+            # importance even when the user shrinks the quality axis.
+            qualities = list(cfg.evaluation_quality_levels)
+            if cfg.min_quality_label not in qualities:
+                qualities = [cfg.min_quality_label] + qualities
+
+            try:
+                log.info(
+                    "Running evaluation sweep: label_cols=%s × qualities=%s -> %s",
+                    label_cols, qualities, project_relative_path(out),
+                )
+                sweep_summary = run_evaluation_sweep(
+                    fused,
+                    output_dir=out,
+                    label_cols=label_cols,
+                    qualities=qualities,
+                    primary_quality=cfg.min_quality_label,
+                    seed=cfg.evaluation_seed,
+                    exclude_non_riding=cfg.evaluation_exclude_non_riding,
+                    no_plots=cfg.no_plots,
+                    permutation_models=tuple(cfg.evaluation_permutation_models),
+                )
+                result["ok"] += int(sweep_summary.get("n_runs_ok", 0))
+                result["failed"] += int(
+                    sweep_summary.get("n_runs", 0) - sweep_summary.get("n_runs_ok", 0)
+                )
+            except Exception as exc:
+                log.error("evaluation sweep failed: %s", exc)
+                result["failed"] += 1
         else:
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1

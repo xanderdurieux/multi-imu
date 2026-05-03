@@ -28,14 +28,14 @@ import pandas as pd
 from scipy.signal import find_peaks, welch
 
 from .cross_sensor import cross_sensor_features
-from .label_config import LabelConfig
+from .label_config import LabelConfig, default_label_config
 from .labels import (
     label_feature,
     label_feature_set,
     to_activity_label,
     to_binary_label,
     to_coarse_label,
-    to_riding_label_from_set,
+    to_set_based_label,
 )
 from .orientation_features import orientation_cross_features, orientation_features
 from .quality import quality_features
@@ -54,6 +54,11 @@ _SPECTRAL_SIGNALS = ("acc_norm", "gyro_norm", "acc_hf", "gyro_hf")
 _SENSOR_PREFIX = {"sporsa": "bike", "arduino": "rider"}
 _PEAK_SIGNALS = ("acc_deviation", "acc_hf", "jerk_norm", "gyro_norm", "alpha_norm", "energy_acc")
 _BANDS = ((0.5, 2.0), (2.0, 8.0), (8.0, 20.0))
+
+try:
+    _np_trapz = np.trapezoid  # NumPy 2.0+
+except AttributeError:
+    _np_trapz = np.trapz  # type: ignore[attr-defined]
 
 
 def _peak_features(prefix: str, arr: np.ndarray) -> dict[str, float]:
@@ -84,7 +89,7 @@ def _bandpower_features(prefix: str, arr: np.ndarray, sample_rate_hz: float) -> 
     for lo, hi in _BANDS:
         m = (freqs >= lo) & (freqs < hi)
         key = f"{prefix}_bandpower_{str(lo).replace('.', 'p')}_{str(hi).replace('.', 'p')}"
-        out[key] = float(np.trapz(pxx[m], freqs[m])) if np.any(m) else 0.0
+        out[key] = float(_np_trapz(pxx[m], freqs[m])) if np.any(m) else 0.0
     return out
 
 
@@ -200,27 +205,30 @@ def extract_window_features(
     feats.update(cross_sensor_features(window_cross))
 
     # ------------------------------------------------------------------
-    # 7. Labels - five parallel representations of the same annotation.
+    # 7. Labels - parallel representations of the same annotation.
     #
-    #   scenario_labels         pipe-delimited set of all overlapping labels
-    #                           on this window (multi-label source-of-truth;
-    #                           per-objective resolvers select from it)
-    #   scenario_label          priority-collapsed dominant fine label
-    #                           (legacy single-label inspection target)
-    #   scenario_label_activity 6-class dual-IMU taxonomy - default training target
-    #   scenario_label_coarse   4-class taxonomy          - legacy/reporting target
-    #   scenario_label_binary   incident / normal         - binary safety target
-    #   scenario_label_riding   non_riding / riding       - resolved from the
-    #                           SET above, ignoring priority and ignoring fine
-    #                           sub-event labels (cornering, accelerating, …)
+    #   scenario_labels      pipe-delimited set of all overlapping labels on
+    #                        this window (multi-label source-of-truth;
+    #                        per-objective resolvers select from it)
+    #   scenario_label       priority-collapsed dominant fine label
+    #                        (legacy single-label inspection target)
+    #   scenario_label_activity / _coarse / _binary
+    #                        single-label derived schemes resolved from the
+    #                        priority-dominant token
+    #   set-based binary schemes (configured under set_based_binary_schemes
+    #                        in labels.default.json — riding, cornering,
+    #                        head_motion, ...) resolved from the FULL
+    #                        overlap set, ignoring priority.
     # ------------------------------------------------------------------
+    cfg = label_config or default_label_config()
     label_set = label_feature_set(labels_df, window_start_ms, window_end_ms)
-    fine = label_feature(labels_df, window_start_ms, window_end_ms, config=label_config)
+    fine = label_feature(labels_df, window_start_ms, window_end_ms, config=cfg)
     feats["scenario_labels"] = "|".join(label_set) if label_set else "unlabeled"
     feats["scenario_label"] = fine
-    feats["scenario_label_activity"] = to_activity_label(fine, config=label_config)
-    feats["scenario_label_coarse"] = to_coarse_label(fine, config=label_config)
-    feats["scenario_label_binary"] = to_binary_label(fine, config=label_config)
-    feats["scenario_label_riding"] = to_riding_label_from_set(label_set, config=label_config)
+    feats["scenario_label_activity"] = to_activity_label(fine, config=cfg)
+    feats["scenario_label_coarse"] = to_coarse_label(fine, config=cfg)
+    feats["scenario_label_binary"] = to_binary_label(fine, config=cfg)
+    for scheme in cfg.set_based_scheme_names:
+        feats[scheme] = to_set_based_label(scheme, label_set, config=cfg)
 
     return feats

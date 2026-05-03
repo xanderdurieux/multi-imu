@@ -30,19 +30,22 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from common.paths import project_relative_path, read_csv, write_csv
+from features.label_config import default_label_config
 from features.labels import (
     to_activity_label,
     to_binary_label,
     to_coarse_label,
-    to_riding_label,
-    to_riding_label_from_set,
+    to_set_based_label,
 )
 
+# Single-label fallback mappers when *label_col* is missing and the scheme is
+# resolved from the priority-collapsed ``scenario_label`` only.  Set-based
+# schemes (registered in labels.default.json) are derived from the pipe-split
+# ``scenario_labels`` column instead — see :func:`run_evaluation`.
 _DERIVED_LABEL_MAPPERS: dict[str, Any] = {
     "scenario_label_activity": to_activity_label,
     "scenario_label_coarse": to_coarse_label,
     "scenario_label_binary": to_binary_label,
-    "scenario_label_riding": to_riding_label,
 }
 
 log = logging.getLogger(__name__)
@@ -63,6 +66,8 @@ _META_COLS = {
     "scenario_label_coarse",
     "scenario_label_binary",
     "scenario_label_riding",
+    "scenario_label_cornering",
+    "scenario_label_head_motion",
     # Quality summary (section- and window-level)
     "overall_quality_label",
     "overall_quality_score",
@@ -297,6 +302,9 @@ def _export_misclassified(
         "scenario_label_activity",
         "scenario_label_coarse",
         "scenario_label_binary",
+        "scenario_label_riding",
+        "scenario_label_cornering",
+        "scenario_label_head_motion",
         label_col,
         "overall_quality_label",
         "overall_quality_score",
@@ -476,6 +484,9 @@ def run_evaluation(
     feature_sets: dict[str, list[str]] | None = None,
     exclude_non_riding: bool = False,
     no_plots: bool = False,
+    compute_permutation_importance: bool = True,
+    permutation_n_repeats: int = 5,
+    permutation_models: tuple[str, ...] = ("random_forest",),
 ) -> dict:
     """Train and evaluate models on feature table.
 
@@ -500,6 +511,17 @@ def run_evaluation(
         evaluating any target label scheme.
     no_plots:
         If ``True``, skip thesis figure generation.
+    compute_permutation_importance:
+        Run model-agnostic permutation importance on each held-out fold and
+        write per-feature + per-sensor-group rankings.  Disable to skip the
+        only expensive analysis (multiplies runtime by roughly 2×).
+    permutation_n_repeats:
+        Permutations per feature per fold.  Default 5 is the sklearn default.
+    permutation_models:
+        Models to run permutation importance for.  Default is
+        ``("random_forest",)`` — keeping it to one tree-ensemble model gives
+        a defensible thesis figure without re-running the analysis for every
+        model.
 
     Returns
     -------
@@ -530,31 +552,38 @@ def run_evaluation(
         df = df[df["overall_quality_label"].isin(valid)].copy()
         log.info("Quality filter: %d → %d rows", before, len(df))
 
-    # Derive missing coarse/activity/binary labels on the fly so existing
-    # feature tables (written before a new taxonomy was added) stay usable
-    # without a full re-extraction.
-    if label_col not in df.columns and label_col in _DERIVED_LABEL_MAPPERS:
-        # scenario_label_riding is set-based: prefer the multi-label
-        # `scenario_labels` column over the priority-collapsed single
-        # `scenario_label`, since the riding objective specifically requires
-        # the literal annotation set (not the dominant token).
-        if label_col == "scenario_label_riding" and "scenario_labels" in df.columns:
+    # Derive missing label columns on the fly so older feature tables stay
+    # usable without a full re-extraction.
+    if label_col not in df.columns:
+        cfg_labels = default_label_config()
+        if label_col in cfg_labels.set_based_scheme_names:
+            if "scenario_labels" not in df.columns:
+                raise ValueError(
+                    f"Cannot derive {label_col!r}: column 'scenario_labels' missing "
+                    "(set-based schemes require the pipe-delimited overlap set)."
+                )
             df[label_col] = (
                 df["scenario_labels"]
                 .fillna("unlabeled")
                 .astype(str)
-                .map(lambda s: to_riding_label_from_set(
-                    [t for t in s.split("|") if t.strip()]
-                ))
+                .map(
+                    lambda s: to_set_based_label(
+                        label_col,
+                        [t for t in s.split("|") if t.strip()],
+                        config=cfg_labels,
+                    )
+                )
             )
             log.info("Derived %s from scenario_labels (multi-label set)", label_col)
-        else:
+        elif label_col in _DERIVED_LABEL_MAPPERS:
             if "scenario_label" not in df.columns:
                 raise ValueError(
                     f"Cannot derive {label_col!r}: source column 'scenario_label' missing."
                 )
             mapper = _DERIVED_LABEL_MAPPERS[label_col]
-            df[label_col] = df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
+            df[label_col] = (
+                df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
+            )
             log.info("Derived %s from scenario_label", label_col)
 
     if exclude_non_riding:
@@ -700,6 +729,19 @@ def run_evaluation(
             cm_df.to_csv(cm_path, index=True)
             log.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
 
+            # Confusion analysis: hardest classes + dominant confusion targets +
+            # top-N off-diagonal pairs.  Cheap (pure NumPy on the matrix);
+            # written next to the matrix it derives from.
+            try:
+                from evaluation.confusion_analysis import write_confusion_analysis
+                write_confusion_analysis(
+                    cm_df,
+                    output_dir / model_name,
+                    config_name=fs_name,
+                )
+            except Exception as exc:
+                log.warning("Confusion analysis failed for %s: %s", key, exc)
+
             # Write per-class report (OOF-based)
             per_class_path = output_dir / model_name /f"per_class_report_{fs_name}.json"
             per_class_path.write_text(
@@ -707,15 +749,25 @@ def run_evaluation(
             )
 
             # Binary-only block: full metrics + misclassified-window export.
-            # Triggered whenever the target has exactly 2 classes (e.g.
-            # scenario_label_riding). Picks the non-non_riding class as the
-            # positive class so PR-AUC/recall reflect "detect riding".
+            # Triggered when the target has exactly 2 classes.  For configured
+            # set-based schemes, positive/negative come from labels.default.json
+            # so PR-AUC reflects "detect cornering" etc., not alphabetical order.
             if len(classes) == 2:
-                negative_class = next(
-                    (c for c in classes if str(c).lower() == "non_riding"),
-                    classes[0],
-                )
-                positive_class = next(c for c in classes if c != negative_class)
+                cfg_eval = default_label_config()
+                sb = cfg_eval.set_based_scheme(label_col)
+                if (
+                    sb is not None
+                    and sb.positive_value in classes
+                    and sb.negative_value in classes
+                ):
+                    positive_class = sb.positive_value
+                    negative_class = sb.negative_value
+                else:
+                    negative_class = next(
+                        (c for c in classes if str(c).lower() == "non_riding"),
+                        classes[0],
+                    )
+                    positive_class = next(c for c in classes if c != negative_class)
 
                 proba_pos: np.ndarray | None = None
                 proba_full = result.get("oof_proba")
@@ -817,6 +869,79 @@ def run_evaluation(
         log.info("Wrote metrics table to %s", project_relative_path(metrics_path))
 
     # ------------------------------------------------------------------
+    # 5b. IMU contribution: paired feature-set comparison
+    # ------------------------------------------------------------------
+    # Operates on in-memory `all_results` so it shares the exact GroupKFold
+    # splits used during CV — the paired Wilcoxon test is only valid when
+    # the same fold indices are used for every feature set.
+    imu_summary_path: Path | None = None
+    if all_results:
+        try:
+            from evaluation.imu_contribution import write_imu_contribution
+            imu_summary_path, _ = write_imu_contribution(
+                all_results,
+                classes=classes,
+                output_dir=output_dir,
+            )
+        except Exception as exc:
+            log.warning("IMU contribution analysis failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # 5c. Permutation feature importance (model-agnostic)
+    # ------------------------------------------------------------------
+    # Only run for the models listed in `permutation_models` to bound runtime.
+    # Output goes alongside the existing impurity-based feature_importance_*.csv
+    # so the user can compare the two rankings.
+    if compute_permutation_importance and all_results:
+        try:
+            from evaluation.permutation_importance import (
+                compute_permutation_importance_grouped,
+                write_permutation_importance,
+            )
+        except Exception as exc:
+            log.warning("Could not import permutation importance helpers: %s", exc)
+        else:
+            for fs_name, feat_cols in active_sets.items():
+                # Re-derive X for this fs: same logic as the CV loop above so
+                # we operate on the same column set (after dropping all-NaN
+                # columns, which `_select_feature_cols` already handled).
+                sub = df[feat_cols].apply(pd.to_numeric, errors="coerce")
+                drop = [c for c in feat_cols if sub[c].isna().all()]
+                cols = [c for c in feat_cols if c not in drop]
+                if not cols:
+                    continue
+                X = sub[cols].to_numpy(dtype=float)
+
+                for model_name in permutation_models:
+                    if f"{fs_name}__{model_name}" not in all_results:
+                        continue
+                    log.info(
+                        "Permutation importance: %s / %s (n_features=%d, n_repeats=%d) ...",
+                        fs_name, model_name, len(cols), permutation_n_repeats,
+                    )
+                    try:
+                        perm_df = compute_permutation_importance_grouped(
+                            X, y_all,
+                            groups=groups_all if groups_all is not None else np.arange(len(y_all)),
+                            model=_build_model(model_name, seed),
+                            feature_names=cols,
+                            n_splits=min(5, len(np.unique(groups_all)) if groups_all is not None else len(y_all)),
+                            n_repeats=permutation_n_repeats,
+                            scoring="f1_macro",
+                            seed=seed,
+                        )
+                        write_permutation_importance(
+                            perm_df,
+                            output_dir / model_name,
+                            config_name=fs_name,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Permutation importance failed for %s/%s: %s",
+                            fs_name, model_name, exc,
+                        )
+
+    # ------------------------------------------------------------------
     # 6. Build evaluation summary
     # ------------------------------------------------------------------
     # Rank by macro-F1 (more informative than accuracy for imbalanced classes).
@@ -871,6 +996,75 @@ def run_evaluation(
                 )
         except Exception as exc:
             log.warning("Evaluation figure generation failed: %s", exc)
+
+        # IMU contribution plot — requires imu_contribution.csv from §5b.
+        if imu_summary_path is not None and imu_summary_path.exists():
+            try:
+                from evaluation.plots import plot_imu_contribution
+                imu_df = pd.read_csv(imu_summary_path)
+                for metric in ("macro_f1", "accuracy"):
+                    plot_imu_contribution(
+                        imu_df,
+                        output_dir / "figures" / f"imu_contribution_{metric}.png",
+                        metric=metric,
+                    )
+            except Exception as exc:
+                log.warning("IMU contribution plot failed: %s", exc)
+
+        # Permutation importance plots — one bar chart per (model, fs) and
+        # one sensor-group totals chart per (model, fs).  Reads the CSVs we
+        # wrote in §5c to stay decoupled from the in-memory result dict.
+        if compute_permutation_importance:
+            try:
+                from evaluation.plots import (
+                    plot_permutation_importance,
+                    plot_sensor_group_contribution,
+                )
+            except Exception as exc:
+                log.warning("Could not import permutation-importance plot helpers: %s", exc)
+            else:
+                for model_name in permutation_models:
+                    model_dir = output_dir / model_name
+                    fig_dir = model_dir / "figures"
+                    fig_dir.mkdir(parents=True, exist_ok=True)
+                    for fi_path in sorted(model_dir.glob("permutation_importance_*.csv")):
+                        if fi_path.stem.startswith("permutation_importance_by_group_"):
+                            continue
+                        fs_name = fi_path.stem.removeprefix("permutation_importance_")
+                        try:
+                            perm_df = pd.read_csv(fi_path)
+                            plot_permutation_importance(
+                                perm_df,
+                                fig_dir / f"{fi_path.stem}.png",
+                                title=(
+                                    f"Permutation importance — "
+                                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                                    f"{_FS_DISPLAY.get(fs_name, fs_name)}"
+                                ),
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "Permutation importance plot failed for %s: %s",
+                                fi_path.name, exc,
+                            )
+                    for grp_path in sorted(model_dir.glob("permutation_importance_by_group_*.csv")):
+                        fs_name = grp_path.stem.removeprefix("permutation_importance_by_group_")
+                        try:
+                            grp_df = pd.read_csv(grp_path)
+                            plot_sensor_group_contribution(
+                                grp_df,
+                                fig_dir / f"{grp_path.stem}.png",
+                                title=(
+                                    f"Sensor-group contribution — "
+                                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                                    f"{_FS_DISPLAY.get(fs_name, fs_name)}"
+                                ),
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "Sensor-group plot failed for %s: %s",
+                                grp_path.name, exc,
+                            )
 
     return summary
 

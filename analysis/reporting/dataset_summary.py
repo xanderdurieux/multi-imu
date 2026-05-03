@@ -44,7 +44,14 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, write_csv
-from features.labels import non_riding_labels, to_activity_label, to_binary_label, to_coarse_label
+from features.label_config import default_label_config
+from features.labels import (
+    non_riding_labels,
+    to_activity_label,
+    to_binary_label,
+    to_coarse_label,
+    to_set_based_label,
+)
 
 log = logging.getLogger(__name__)
 
@@ -115,14 +122,26 @@ def _to_binary(label: str) -> str:
 
 
 def _ensure_derived_label_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Add the activity / coarse / binary label columns if absent.
+    """Add derived label columns if absent.
 
-    The columns are written during feature extraction if the dataset was
-    (re-)extracted after the labelling redesign.  For existing CSVs that
-    pre-date that change we derive them here on the fly so this module
-    works regardless of re-extraction state.
+    Single-label schemes map from ``scenario_label``; set-based schemes
+    (riding / cornering / head_motion, …) map from ``scenario_labels``.
     """
     df = df.copy()
+    cfg = default_label_config()
+
+    if "scenario_labels" in df.columns:
+        pipe = df["scenario_labels"].fillna("unlabeled").astype(str)
+
+        def _tokens(cell: str) -> list[str]:
+            return [t for t in str(cell).split("|") if t.strip()]
+
+        for scheme in cfg.set_based_scheme_names:
+            if scheme not in df.columns:
+                df[scheme] = pipe.map(
+                    lambda s, sch=scheme: to_set_based_label(sch, _tokens(s), config=cfg)
+                )
+
     if "scenario_label" not in df.columns:
         return df
     fine = df["scenario_label"].fillna("unlabeled").astype(str)

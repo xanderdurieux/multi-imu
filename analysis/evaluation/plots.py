@@ -610,6 +610,351 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
+# Permutation feature importance + sensor-group contribution
+# ---------------------------------------------------------------------------
+
+# Sensor-group → color (used for both per-feature bars and the group totals).
+_SENSOR_GROUP_COLORS: dict[str, str] = {
+    "bike": "#3498db",
+    "rider": "#e74c3c",
+    "cross": "#2ecc71",
+    "other": "#95a5a6",
+}
+
+
+def plot_permutation_importance(
+    perm_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    top_n: int = 25,
+    title: str = "Permutation importance",
+) -> Path | None:
+    """Top-N permutation importance bar chart with std-across-folds error bars.
+
+    Bars are colored by sensor group so the bike/rider/cross balance is
+    visible at a glance; the std (across CV folds) shows how stable each
+    feature's contribution is.
+    """
+    if perm_df.empty:
+        log.warning("Empty permutation importance DataFrame; skipping plot")
+        return None
+
+    df = perm_df.head(top_n).copy()
+    # Reverse so the most important feature ends up at the top of the figure.
+    df = df.iloc[::-1].reset_index(drop=True)
+
+    colors = [
+        _SENSOR_GROUP_COLORS.get(g, _SENSOR_GROUP_COLORS["other"])
+        for g in df["sensor_group"]
+    ]
+
+    fig, ax = plt.subplots(figsize=(8.5, max(4.0, 0.36 * len(df) + 1.0)))
+    ax.barh(
+        df["feature"],
+        df["perm_importance_mean"],
+        xerr=df["perm_importance_std"].fillna(0).clip(lower=0),
+        color=colors,
+        edgecolor="white",
+        linewidth=0.3,
+        error_kw={"elinewidth": 0.8, "capsize": 2.0, "ecolor": "#444"},
+    )
+    ax.set_xlabel("Permutation importance (Δ macro-F1)")
+    ax.set_title(title)
+    ax.axvline(0, color="#333", lw=0.6)
+    ax.grid(axis="x", alpha=0.3, lw=0.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, color=_SENSOR_GROUP_COLORS[g], label=g)
+        for g in ("bike", "rider", "cross", "other")
+        if g in set(df["sensor_group"])
+    ]
+    if handles:
+        ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.85)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.debug("Wrote permutation importance → %s", project_relative_path(output_path))
+    return output_path
+
+
+def plot_sensor_group_contribution(
+    grouped_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    title: str = "Sensor-group contribution",
+) -> Path | None:
+    """Bar chart of summed permutation importance per sensor group.
+
+    Mirrors :func:`evaluation.permutation_importance.aggregate_by_sensor_group`.
+    """
+    if grouped_df.empty:
+        return None
+
+    df = grouped_df.copy().sort_values("total_importance", ascending=False)
+
+    fig, ax = plt.subplots(figsize=(6.5, 3.6))
+    colors = [
+        _SENSOR_GROUP_COLORS.get(g, _SENSOR_GROUP_COLORS["other"])
+        for g in df["sensor_group"]
+    ]
+    bars = ax.bar(
+        df["sensor_group"],
+        df["total_importance"],
+        color=colors,
+        edgecolor="white",
+    )
+    for bar, n_feat in zip(bars, df["n_features"]):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"n={int(n_feat)}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+    ax.set_ylabel("Σ permutation importance")
+    ax.set_title(title)
+    ax.axhline(0, color="#333", lw=0.6)
+    ax.grid(axis="y", alpha=0.3, lw=0.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.debug("Wrote sensor-group contribution → %s", project_relative_path(output_path))
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# IMU contribution (paired feature-set deltas)
+# ---------------------------------------------------------------------------
+
+
+def plot_imu_contribution(
+    contribution_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    metric: str = "macro_f1",
+    title: str | None = None,
+) -> Path | None:
+    """Grouped bar chart of paired Δ for the chosen metric.
+
+    For each ``(better, baseline)`` pair, one bar per model.  Bars marked with
+    ``*`` (p < 0.05) or ``**`` (p < 0.01) when the one-sided Wilcoxon test is
+    significant.  Error bars = ± fold std.
+    """
+    if contribution_df.empty:
+        return None
+
+    df = contribution_df[contribution_df["metric"] == metric].copy()
+    if df.empty:
+        return None
+
+    df["pair"] = df["better"] + "\nvs\n" + df["baseline"]
+    pairs = df["pair"].drop_duplicates().tolist()
+    models = df["model"].drop_duplicates().tolist()
+
+    x = np.arange(len(pairs))
+    width = min(0.24, 0.78 / max(len(models), 1))
+    offsets = np.linspace(-(len(models) - 1) / 2, (len(models) - 1) / 2, len(models)) * width
+
+    fig, ax = plt.subplots(figsize=(max(6.5, 1.4 * len(pairs) + 2.5), 4.2))
+
+    for model, offset in zip(models, offsets):
+        sub = df[df["model"] == model].set_index("pair").reindex(pairs)
+        means = sub["delta_mean"].astype(float).values
+        stds = sub["delta_std"].astype(float).fillna(0).values
+        pvals = sub["wilcoxon_p_one_sided"].values
+
+        color = _MODEL_COLORS.get(model, "#7f8c8d")
+        ax.bar(
+            x + offset, means, width,
+            yerr=stds,
+            color=color,
+            edgecolor="white",
+            error_kw={"elinewidth": 1.0, "capsize": 2.5, "ecolor": "#444"},
+            label=_MODEL_DISPLAY.get(model, model),
+            alpha=0.9,
+        )
+
+        for xi, mean, p in zip(x + offset, means, pvals):
+            star = ""
+            if p is not None and not pd.isna(p):
+                if float(p) < 0.01:
+                    star = "**"
+                elif float(p) < 0.05:
+                    star = "*"
+            label_y = mean + (max(stds) if len(stds) else 0) + 0.005
+            txt = f"{mean:+.3f}{star}"
+            ax.text(xi, label_y, txt, ha="center", va="bottom", fontsize=6.5)
+
+    ax.axhline(0, color="#333", lw=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(pairs, fontsize=8)
+    ax.set_ylabel(f"Δ {metric}")
+    ax.set_title(title or f"IMU contribution — paired Δ {metric}")
+    ax.grid(axis="y", alpha=0.3, lw=0.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(loc="best", fontsize=8, framealpha=0.85)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.debug("Wrote IMU contribution plot → %s", project_relative_path(output_path))
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Sweep figures (label_col × min_quality)
+# ---------------------------------------------------------------------------
+
+
+def plot_sweep_heatmap(
+    sweep_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    metric: str = "macro_f1",
+    feature_set: str = "fused",
+    model: str | None = None,
+) -> Path | None:
+    """Heatmap of *metric* across (label_col × min_quality) for one (fs, model).
+
+    If ``model`` is ``None``, the best-mean model per (label, quality) cell is
+    selected automatically.
+    """
+    if sweep_df.empty:
+        return None
+
+    df = sweep_df[sweep_df["feature_set"] == feature_set].copy()
+    if model is not None:
+        df = df[df["model"] == model]
+    if df.empty:
+        return None
+
+    if model is None:
+        # Pick best model per cell (max metric).
+        df = (
+            df.sort_values(metric, ascending=False)
+            .groupby(["label_col", "min_quality"], as_index=False)
+            .first()
+        )
+
+    pivot = df.pivot_table(
+        index="label_col",
+        columns="min_quality",
+        values=metric,
+        aggfunc="max",
+    )
+    if pivot.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(max(5.5, 0.9 * pivot.shape[1] + 3.5),
+                                     max(3.5, 0.55 * pivot.shape[0] + 1.5)))
+    im = ax.imshow(pivot.values, cmap="viridis", aspect="auto", vmin=0, vmax=1)
+
+    ax.set_xticks(range(pivot.shape[1]))
+    ax.set_xticklabels(pivot.columns, fontsize=9)
+    ax.set_yticks(range(pivot.shape[0]))
+    ax.set_yticklabels(pivot.index, fontsize=9)
+    ax.set_xlabel("Min quality filter")
+    ax.set_ylabel("Label scheme")
+
+    for i in range(pivot.shape[0]):
+        for j in range(pivot.shape[1]):
+            v = pivot.values[i, j]
+            if pd.isna(v):
+                continue
+            ax.text(
+                j, i, f"{v:.3f}",
+                ha="center", va="center",
+                fontsize=8,
+                color="white" if v > 0.55 else "black",
+            )
+
+    plt.colorbar(im, ax=ax, shrink=0.8, label=metric)
+    title_model = "best model" if model is None else _MODEL_DISPLAY.get(model, model)
+    ax.set_title(f"{metric} sweep — {feature_set} ({title_model})", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Wrote sweep heatmap → %s", project_relative_path(output_path))
+    return output_path
+
+
+def plot_sweep_label_quality_grid(
+    sweep_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    metric: str = "macro_f1",
+) -> Path | None:
+    """One sub-heatmap per feature set, side by side.
+
+    Lets the reader compare how each feature set responds to relaxing or
+    tightening the quality filter on every label scheme in a single figure.
+    """
+    if sweep_df.empty:
+        return None
+
+    feature_sets = [fs for fs in _FS_ORDER if fs in sweep_df["feature_set"].unique()]
+    if not feature_sets:
+        return None
+
+    fig, axes = plt.subplots(
+        1, len(feature_sets),
+        figsize=(max(6.0, 3.0 * len(feature_sets) + 1.5), 3.6),
+        sharey=True,
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+
+    last_im = None
+    for ax, fs in zip(axes_flat, feature_sets):
+        sub = sweep_df[sweep_df["feature_set"] == fs]
+        # Take best model per (label_col, min_quality) cell.
+        sub = (
+            sub.sort_values(metric, ascending=False)
+            .groupby(["label_col", "min_quality"], as_index=False)
+            .first()
+        )
+        pivot = sub.pivot_table(
+            index="label_col", columns="min_quality", values=metric, aggfunc="max"
+        )
+        if pivot.empty:
+            ax.set_visible(False)
+            continue
+        last_im = ax.imshow(pivot.values, cmap="viridis", aspect="auto", vmin=0, vmax=1)
+        ax.set_xticks(range(pivot.shape[1]))
+        ax.set_xticklabels(pivot.columns, fontsize=8)
+        ax.set_yticks(range(pivot.shape[0]))
+        ax.set_yticklabels(pivot.index, fontsize=8)
+        ax.set_title(_FS_DISPLAY.get(fs, fs), fontsize=10)
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                v = pivot.values[i, j]
+                if pd.isna(v):
+                    continue
+                ax.text(
+                    j, i, f"{v:.2f}",
+                    ha="center", va="center",
+                    fontsize=7,
+                    color="white" if v > 0.55 else "black",
+                )
+
+    if last_im is not None:
+        fig.colorbar(last_im, ax=axes_flat.tolist(), shrink=0.85, label=metric)
+    fig.suptitle(f"{metric} across label scheme × quality filter", fontsize=11)
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Wrote sweep grid → %s", project_relative_path(output_path))
+    return output_path
+
+
+# ---------------------------------------------------------------------------
 # Misclassified-window overlay (binary objectives)
 # ---------------------------------------------------------------------------
 
