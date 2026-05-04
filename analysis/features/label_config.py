@@ -105,6 +105,11 @@ class LabelConfig:
                 return self.binary_incident_value
             return self.binary_normal_value
 
+        if scheme == "scenario_label_riding":
+            if label in self.binary_non_riding_labels:
+                return self.binary_non_riding_value
+            return "riding"
+
         sb = self.set_based_scheme(scheme)
         if sb is not None:
             # Single-label fallback for set-based objectives: pretend the

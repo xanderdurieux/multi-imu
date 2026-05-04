@@ -31,7 +31,48 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from common.paths import project_relative_path, read_csv, write_csv
 from features.label_config import default_label_config
-from features.labels import ensure_resolved_labels
+from features.labels import (
+    resolve_label_from_tokens,
+    to_activity_label,
+    to_binary_label,
+    to_coarse_label,
+    to_riding_label,
+    to_set_based_label,
+)
+
+_DERIVED_LABEL_MAPPERS: dict[str, Any] = {
+    "scenario_label_activity": to_activity_label,
+    "scenario_label_coarse": to_coarse_label,
+    "scenario_label_binary": to_binary_label,
+    "scenario_label_riding": to_riding_label,
+    "scenario_label_cornering": None,
+    "scenario_label_head_motion": None,
+}
+
+
+def _label_tokens(raw: str) -> set[str]:
+    """Return normalized label tokens from a pipe-delimited overlap string."""
+    return {token.strip() for token in str(raw or "").split("|") if token.strip()}
+
+
+def _derive_cornering_label(raw: str) -> str:
+    """Return a cornering vs non-cornering label from an overlap set."""
+    tokens = _label_tokens(raw)
+    if not tokens:
+        return "unlabeled"
+    if "cornering" in tokens:
+        return "cornering"
+    return "non_cornering"
+
+
+def _derive_head_motion_label(raw: str) -> str:
+    """Return a head-motion vs non-head-motion label from an overlap set."""
+    tokens = _label_tokens(raw)
+    if not tokens:
+        return "unlabeled"
+    if tokens & {"head_movement", "shoulder_check"}:
+        return "head_motion"
+    return "non_head_motion"
 
 log = logging.getLogger(__name__)
 
@@ -502,6 +543,87 @@ def run_evaluation(
         before = len(df)
         df = df[df["overall_quality_label"].isin(valid)].copy()
         log.info("Quality filter: %d → %d rows", before, len(df))
+
+    # Derive label columns on the fly from the full overlap set (`scenario_labels`)
+    # when available. This ensures the evaluation stage can adapt target
+    # selection (including ignored fine labels and set-based schemes) without
+    # requiring the features stage to be re-run.
+    cfg_labels = default_label_config()
+    if "scenario_labels" in df.columns:
+        # Prefer deriving from the multi-label overlap set whenever possible.
+        if label_col in cfg_labels.set_based_scheme_names:
+            df[label_col] = (
+                df["scenario_labels"]
+                .fillna("unlabeled")
+                .astype(str)
+                .map(
+                    lambda s: to_set_based_label(
+                        label_col,
+                        [t for t in s.split("|") if t.strip()],
+                        config=cfg_labels,
+                    )
+                )
+            )
+            log.info("Derived %s from scenario_labels (multi-label set)", label_col)
+        elif label_col in _DERIVED_LABEL_MAPPERS:
+            token_series = df["scenario_labels"].fillna("unlabeled").astype(str)
+            if label_col == "scenario_label_activity":
+                df[label_col] = token_series.map(
+                    lambda s: to_activity_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            elif label_col == "scenario_label_coarse":
+                df[label_col] = token_series.map(
+                    lambda s: to_coarse_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            elif label_col == "scenario_label_binary":
+                df[label_col] = token_series.map(
+                    lambda s: to_binary_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            elif label_col == "scenario_label_riding":
+                df[label_col] = token_series.map(
+                    lambda s: to_riding_label(
+                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                        config=cfg_labels,
+                    )
+                )
+            elif label_col == "scenario_label_cornering":
+                df[label_col] = token_series.map(_derive_cornering_label)
+            elif label_col == "scenario_label_head_motion":
+                df[label_col] = token_series.map(_derive_head_motion_label)
+            log.info("Derived %s from scenario_labels (multi-label set)", label_col)
+        else:
+            # If the requested label_col is not a known derived scheme and it
+            # already exists in the frame, keep it; otherwise it will be
+            # handled by the existing presence check below.
+            pass
+    else:
+        # Fallback: derive from a pre-collapsed `scenario_label` when the
+        # multi-label set is not present (legacy feature tables).
+        if label_col not in df.columns:
+            if label_col in cfg_labels.set_based_scheme_names:
+                raise ValueError(
+                    f"Cannot derive {label_col!r}: column 'scenario_labels' missing "
+                    "(set-based schemes require the pipe-delimited overlap set)."
+                )
+            elif label_col in _DERIVED_LABEL_MAPPERS:
+                if "scenario_label" in df.columns:
+                    mapper = _DERIVED_LABEL_MAPPERS[label_col]
+                    df[label_col] = (
+                        df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
+                    )
+                    log.info("Derived %s from scenario_label", label_col)
+                else:
+                    # Will be caught by the presence check below.
+                    pass
 
     if exclude_non_riding:
         binary_col = "scenario_label_binary"
