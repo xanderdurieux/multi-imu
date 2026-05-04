@@ -44,6 +44,7 @@ _EXCLUDE_FEATURE_COLS = frozenset({
     "section_id",
     "label",
     "scenario_label",
+    "scenario_labels",
     "overall_quality_score",
     "overall_quality_label",
 })

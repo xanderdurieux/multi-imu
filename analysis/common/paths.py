@@ -337,9 +337,9 @@ def section_labels_csv(sec_dir: Path | str) -> Path:
     return Path(sec_dir) / "labels" / "labels.csv"
 
 
-def static_calibration_json() -> Path:
-    """Return the static calibration json."""
-    return calibrations_root() / "arduino_imu_calibration.json"
+def static_calibration_json(sensor: str) -> Path:
+    """Return the per-sensor static calibration JSON path."""
+    return calibrations_root() / sensor / "imu_calibration.json"
 
 
 _EVALUATION_LABEL_DIR_PRIORITY = (

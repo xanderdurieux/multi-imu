@@ -58,11 +58,6 @@ def main(argv: list[str] | None = None) -> None:
         help="Nominal sampling rate in Hz (default: 100).",
     )
     parser.add_argument(
-        "--label-config",
-        default=None,
-        help="Optional label taxonomy JSON override merged over data/_configs/labels.default.json.",
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite existing feature outputs.",
@@ -74,7 +69,6 @@ def main(argv: list[str] | None = None) -> None:
         hop_s=args.hop_s,
         min_samples=args.min_samples,
         sample_rate_hz=args.sample_rate_hz,
-        label_config_path=args.label_config,
         force=args.force,
     )
 

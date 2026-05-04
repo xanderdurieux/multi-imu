@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -23,25 +24,60 @@ def plot_calibration_quality_overview(df: pd.DataFrame, output_dir: Path) -> Pat
     out_path = output_dir / "cal_quality_overview.png"
     if df.empty or "section_id" not in df.columns:
         return None
-    sections = df["section_id"].tolist()
-    n = len(sections)
-    if n == 0:
+
+    quality_specs: list[tuple[str, str]] = []
+    if "calibration_quality" in df.columns:
+        quality_specs.append(("calibration_quality", "overall"))
+    for sensor in SENSORS:
+        intr_col = f"{sensor}_intrinsics_quality"
+        legacy_col = f"{sensor}_quality"
+        if intr_col in df.columns:
+            quality_specs.append((intr_col, f"{sensor} intrinsics"))
+        elif legacy_col in df.columns:
+            quality_specs.append((legacy_col, sensor))
+    if not quality_specs:
         return None
+
+    sections = df["section_id"].astype(str).tolist()
+    n = len(sections)
     x = np.arange(n)
-    width = 0.35
+    width = 0.8 / len(quality_specs)
     fig, ax = plt.subplots(figsize=(max(8, n * 0.55 + 2), 4))
-    for i, sensor in enumerate(SENSORS):
-        col = f"{sensor}_quality"
-        if col not in df.columns:
-            continue
-        qualities = df[col].fillna("").tolist()
+
+    for idx, (col, label) in enumerate(quality_specs):
+        qualities = df[col].fillna("").astype(str).tolist()
         colors = [QUALITY_COLORS.get(q, "#95a5a6") for q in qualities]
-        offset = (i - 0.5) * width
-        ax.bar(x + offset, [1] * n, width, color=colors, edgecolor="white", linewidth=0.5)
+        offset = (idx - (len(quality_specs) - 1) / 2) * width
+        hatch = "" if idx == 0 else "/" * idx
+        ax.bar(
+            x + offset,
+            [1] * n,
+            width * 0.92,
+            color=colors,
+            edgecolor="white",
+            linewidth=0.5,
+            hatch=hatch,
+        )
+
     ax.set_xticks(x)
     ax.set_xticklabels([short_section(s) for s in sections], rotation=45, ha="right", fontsize=7)
     ax.set_yticks([])
     ax.set_title("Calibration quality per section")
+
+    quality_handles = [
+        mpatches.Patch(color=QUALITY_COLORS.get(q, "#95a5a6"), label=q)
+        for q in ("good", "marginal", "poor")
+    ]
+    source_handles = [
+        mpatches.Patch(
+            facecolor="white",
+            edgecolor="black",
+            hatch="" if idx == 0 else "/" * idx,
+            label=label,
+        )
+        for idx, (_, label) in enumerate(quality_specs)
+    ]
+    ax.legend(handles=quality_handles + source_handles, fontsize=8, ncol=2, framealpha=0.85)
     fig.tight_layout()
     return save_figure(fig, out_path, dpi=DPI)
 

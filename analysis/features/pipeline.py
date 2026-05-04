@@ -22,7 +22,6 @@ from common.paths import (
 from labels.parser import load_labels
 from labels.section_transfer import transfer_labels_to_sections
 from .extraction import extract_window_features
-from .label_config import default_label_config, load_label_config
 from .lag_features import add_lag_features
 
 log = logging.getLogger(__name__)
@@ -116,7 +115,6 @@ def extract_features_for_section(
     hop_s: float = 0.5,
     min_samples: int = 10,
     sample_rate_hz: float = _SAMPLE_RATE_HZ_DEFAULT,
-    label_config_path: Path | str | None = None,
     event_aligned: bool = True,
     n_lags: int = 0,
     force: bool = False,
@@ -202,11 +200,6 @@ def extract_features_for_section(
         for col in ("start_ms", "end_ms"):
             if col in labels_df.columns:
                 labels_df[col] = pd.to_numeric(labels_df[col], errors="coerce")
-    label_config = (
-        load_label_config(label_config_path)
-        if label_config_path is not None
-        else default_label_config()
-    )
 
     # ------------------------------------------------------------------
     # Load calibration quality metadata.
@@ -345,7 +338,6 @@ def extract_features_for_section(
                 yaw_conf_sporsa=yaw_conf_sporsa,
                 yaw_conf_arduino=yaw_conf_arduino,
                 labels_df=labels_df if not labels_df.empty else None,
-                label_config=label_config,
                 quality_metadata=quality_meta,
             )
             feat_dict["window_type"] = "sliding"
@@ -466,7 +458,6 @@ def extract_features_for_section(
                         yaw_conf_sporsa=yaw_conf_sporsa,
                         yaw_conf_arduino=yaw_conf_arduino,
                         labels_df=labels_df if not labels_df.empty else None,
-                        label_config=label_config,
                         quality_metadata=quality_meta,
                     )
                     feat_dict["window_type"] = "event_aligned"
@@ -541,8 +532,16 @@ def extract_features_for_section(
         quality_counts = features_df["quality_tier"].value_counts().to_dict() if "quality_tier" in features_df.columns else {}
         stats["quality_tier_counts"] = quality_counts
 
-        scenario_counts = features_df["scenario_label"].value_counts().to_dict() if "scenario_label" in features_df.columns else {}
-        stats["scenario_label_counts"] = scenario_counts
+        # Per-token counts from the raw multi-label set. A window appears
+        # under each of its tokens, so the counts sum to >= n_windows.
+        if "scenario_labels" in features_df.columns:
+            token_counts: dict[str, int] = {}
+            for cell in features_df["scenario_labels"].fillna("unlabeled").astype(str):
+                for tok in cell.split("|"):
+                    tok = tok.strip()
+                    if tok:
+                        token_counts[tok] = token_counts.get(tok, 0) + 1
+            stats["scenario_label_token_counts"] = token_counts
 
         if "overall_quality_score" in features_df.columns:
             stats["mean_quality_score"] = round(float(features_df["overall_quality_score"].mean()), 4)

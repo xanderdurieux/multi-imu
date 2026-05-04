@@ -9,16 +9,7 @@ import pandas as pd
 from scipy.signal import find_peaks, peak_widths, welch
 
 from .cross_sensor import cross_sensor_features
-from .label_config import LabelConfig, default_label_config
-from .labels import (
-    label_feature,
-    label_feature_set,
-    resolve_label_from_tokens,
-    to_activity_label,
-    to_binary_label,
-    to_coarse_label,
-    to_set_based_label,
-)
+from .labels import label_feature_set
 from .orientation_features import orientation_cross_features, orientation_features
 from .quality import quality_features
 from .spectral import spectral_features
@@ -104,7 +95,6 @@ def extract_window_features(
     yaw_conf_sporsa: float = 1.0,
     yaw_conf_arduino: float = 1.0,
     labels_df: pd.DataFrame | None = None,
-    label_config: LabelConfig | None = None,
     quality_metadata: dict[str, float | str | int | bool] | None = None,
 ) -> dict[str, float | str | int]:
     """Return extract window features."""
@@ -216,32 +206,17 @@ def extract_window_features(
     feats.update(cross_sensor_features(window_cross))
 
     # ------------------------------------------------------------------
-    # 7. Labels - parallel representations of the same annotation.
+    # 7. Labels — raw multi-label overlap set only.
     #
-    #   scenario_labels      pipe-delimited set of all overlapping labels on
-    #                        this window (multi-label source-of-truth;
-    #                        per-objective resolvers select from it)
-    #   scenario_label       priority-collapsed dominant fine label
-    #                        (legacy single-label inspection target)
-    #   scenario_label_activity / _coarse / _binary
-    #                        single-label derived schemes resolved from the
-    #                        priority-dominant token
-    #   set-based binary schemes (configured under set_based_binary_schemes
-    #                        in labels.default.json — riding, cornering,
-    #                        head_motion, ...) resolved from the FULL
-    #                        overlap set, ignoring priority.
+    # ``scenario_labels`` is the pipe-delimited set of every annotation that
+    # overlaps the window. It is the only label representation persisted in
+    # features.csv; downstream consumers (evaluation, reporting, viz) call
+    # ``features.labels.ensure_resolved_labels`` to materialize the dominant
+    # fine label and per-scheme targets they need. Keeping the raw set on
+    # disk means new label schemes (or fixes to priority/taxonomy) require
+    # only re-running evaluation, not re-extracting features.
     # ------------------------------------------------------------------
-    cfg = label_config or default_label_config()
     label_set = label_feature_set(labels_df, window_start_ms, window_end_ms)
-    fine = label_feature(labels_df, window_start_ms, window_end_ms, config=cfg)
     feats["scenario_labels"] = "|".join(label_set) if label_set else "unlabeled"
-    if fine == "unlabeled" and label_set:
-        fine = resolve_label_from_tokens(label_set, config=cfg)
-    feats["scenario_label"] = fine
-    feats["scenario_label_activity"] = to_activity_label(fine, config=cfg)
-    feats["scenario_label_coarse"] = to_coarse_label(fine, config=cfg)
-    feats["scenario_label_binary"] = to_binary_label(fine, config=cfg)
-    for scheme in cfg.set_based_scheme_names:
-        feats[scheme] = to_set_based_label(scheme, label_set, config=cfg)
 
     return feats

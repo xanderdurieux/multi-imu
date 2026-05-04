@@ -82,9 +82,7 @@ def _static_windows(cal: dict[str, Any], sensor: str) -> list[tuple[float, float
 
 def _load_static_mag_calibration(sensor: str) -> MagCalibration | None:
     """Load static mag calibration."""
-    if sensor != "arduino":
-        return None
-    cal_path = static_calibration_json()
+    cal_path = static_calibration_json(sensor)
     if not cal_path.exists():
         return None
     try:

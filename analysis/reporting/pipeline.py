@@ -20,6 +20,7 @@ from common.paths import (
     resolve_evaluation_dir,
     sections_root,
 )
+from features.labels import ensure_resolved_labels
 
 log = logging.getLogger(__name__)
 
@@ -216,6 +217,7 @@ def run_report(
 
     log.info("Loading features from %s", project_relative_path(features_path))
     df = read_csv(features_path)
+    df = ensure_resolved_labels(df)
     log.info("Loaded %d rows, %d columns", len(df), len(df.columns))
 
     classes = (

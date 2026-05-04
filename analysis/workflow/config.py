@@ -42,7 +42,6 @@ class WorkflowConfig:
     # Feature options
     labels_path: str = ""
     label_set: str = "v1"
-    label_config_path: str = ""
     window_s: float = 2.0
     hop_s: float = 1.0
     event_aligned: bool = True       # add event-centred windows for labelled events
@@ -62,12 +61,14 @@ class WorkflowConfig:
         default_factory= lambda: ["good"]
     )
 
-    # Models to compute permutation importance for (per-feature-set).  Limit
-    # to one tree-ensemble model by default — running it for every model
-    # roughly triples evaluation runtime.
+    # Classifiers to train in CV ("auto" = all three registered models).
+    evaluation_models: list[str] = field(default_factory=lambda: ["auto"])
+
+    # Models to compute permutation importance for (per-feature-set).
+    # "auto" = all three; limit to one tree-ensemble to save runtime.
     evaluation_permutation_models: list[str] = field(
         default_factory=lambda: ["hist_gradient_boosting"]
-    ) # "random_forest"|"hist_gradient_boosting"|"logistic_regression"
+    )
 
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
@@ -144,15 +145,30 @@ class WorkflowConfig:
                     f"valid: {sorted(valid_qualities)}"
                 )
         valid_models = {"random_forest", "hist_gradient_boosting", "logistic_regression"}
-        if not isinstance(self.evaluation_permutation_models, list):
-            errors.append("evaluation_permutation_models must be a list of model names")
-        else:
-            bad = [m for m in self.evaluation_permutation_models if m not in valid_models]
+        valid_or_auto = valid_models | {"auto"}
+
+        def _check_model_list(name: str, lst: Any) -> None:
+            if not isinstance(lst, list):
+                errors.append(f"{name} must be a list of model names")
+                return
+            if not lst:
+                errors.append(f"{name} must be a non-empty list")
+                return
+            bad = [m for m in lst if m not in valid_or_auto]
             if bad:
                 errors.append(
-                    f"evaluation_permutation_models contains invalid entries {bad}; "
-                    f"valid: {sorted(valid_models)}"
+                    f"{name} contains invalid entries {bad}; "
+                    f"valid: {sorted(valid_or_auto)}"
                 )
+                return
+            if "auto" in lst and len(lst) != 1:
+                errors.append(
+                    f'{name}: when using "auto", it must be the only list entry '
+                    "(use explicit model names for subsets)"
+                )
+
+        _check_model_list("evaluation_models", self.evaluation_models)
+        _check_model_list("evaluation_permutation_models", self.evaluation_permutation_models)
         return errors
 
 

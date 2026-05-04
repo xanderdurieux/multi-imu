@@ -226,7 +226,7 @@ def parse_gps_csv(
     # Optional elevation / time / speed if present
     for _csv_name, variants, target in (
         ("elevation", ("elevation_m", "elevation", "ele", "alt", "altitude", "altitude_m", "alt_m"), "elevation_m"),
-        ("time", ("time_utc", "time", "timestamp", "datetime"), "time_utc"),
+        ("time", ("time_utc", "time", "timestamp", "timestamp_absolute", "timestamp_utc", "datetime"), "time_utc"),
         ("speed", ("speed", "velocity", "ground_speed", "speed_m_s"), "speed_m_s"),
     ):
         col = None

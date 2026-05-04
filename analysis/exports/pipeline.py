@@ -34,7 +34,7 @@ _METADATA_COLS = {
     "window_start_ms",
     "window_end_ms",
     "window_duration_s",
-    "scenario_label",
+    "scenario_labels",
     "overall_quality_label",
     "quality_tier",
     "calibration_quality",
@@ -305,9 +305,17 @@ def export_feature_tables(
         df_for_manifest = df
 
     n_sections = df_for_manifest["section_id"].nunique() if "section_id" in df_for_manifest.columns else 0
-    label_dist = {}
-    if "scenario_label" in df_for_manifest.columns:
-        label_dist = df_for_manifest["scenario_label"].fillna("unlabeled").value_counts().to_dict()
+    # Per-token counts from the raw multi-label set: a window contributes to
+    # each of its tokens, so the totals sum to >= n_windows. Resolved targets
+    # (scenario_label_activity / _coarse / _binary / set-based) are derived
+    # downstream by the evaluation stage from `scenario_labels`.
+    label_dist: dict[str, int] = {}
+    if "scenario_labels" in df_for_manifest.columns:
+        for cell in df_for_manifest["scenario_labels"].fillna("unlabeled").astype(str):
+            for tok in cell.split("|"):
+                tok = tok.strip()
+                if tok:
+                    label_dist[tok] = label_dist.get(tok, 0) + 1
 
     manifest = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),

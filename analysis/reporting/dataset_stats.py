@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path
+from features.labels import ensure_resolved_labels
 
 log = logging.getLogger(__name__)
 
@@ -57,8 +58,9 @@ def _class_color(label: str) -> str:
 
 def plot_class_distribution(df: pd.DataFrame, output_path: Path) -> Path:
     """Horizontal bar chart showing window count per scenario class, sorted by count."""
+    df = ensure_resolved_labels(df)
     if "scenario_label" not in df.columns:
-        log.warning("No 'scenario_label' column; skipping class distribution plot")
+        log.warning("No 'scenario_labels' column; skipping class distribution plot")
         return output_path
 
     counts = df["scenario_label"].value_counts().sort_values()
@@ -155,6 +157,7 @@ def plot_quality_breakdown(df: pd.DataFrame, output_path: Path) -> Path:
 
 def plot_session_timeline(df: pd.DataFrame, output_path: Path) -> Path:
     """Horizontal timeline: each window as a thin rectangle coloured by scenario_label."""
+    df = ensure_resolved_labels(df)
     required = {"section_id", "window_start_ms", "window_end_ms", "scenario_label"}
     if not required.issubset(df.columns):
         log.warning("Missing columns for session timeline; skipping")
@@ -226,6 +229,7 @@ def plot_session_timeline(df: pd.DataFrame, output_path: Path) -> Path:
 
 def plot_recording_summary_table(df: pd.DataFrame, output_path: Path) -> Path:
     """Render a per-recording statistics table as a matplotlib figure."""
+    df = ensure_resolved_labels(df)
     if "section_id" not in df.columns:
         log.warning("Missing 'section_id' column; skipping recording summary table")
         return output_path
@@ -292,6 +296,7 @@ def plot_recording_summary_table(df: pd.DataFrame, output_path: Path) -> Path:
 
 def generate_dataset_tables(df: pd.DataFrame, output_dir: Path) -> None:
     """Write CSV summary tables to output_dir/tables/."""
+    df = ensure_resolved_labels(df)
     tables_dir = output_dir / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
 

@@ -199,7 +199,6 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     window_s=cfg.window_s,
                     hop_s=cfg.hop_s,
                     label_set=cfg.label_set,
-                    label_config_path=cfg.label_config_path or None,
                     event_aligned=cfg.event_aligned,
                     n_lags=cfg.lag_features_n_lags,
                     force=cfg.force,
@@ -267,6 +266,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             result["skipped"] += 1
 
     elif stage == "evaluation":
+        from evaluation.experiments import resolve_evaluation_models
         from evaluation.sweep import run_evaluation_sweep
         fused = exports_root() / "features_fused.csv"
         out = evaluation_root()
@@ -286,9 +286,16 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 qualities = [cfg.min_quality_label] + qualities
 
             try:
+                eval_models = resolve_evaluation_models(cfg.evaluation_models)
+                perm_models = resolve_evaluation_models(cfg.evaluation_permutation_models)
                 log.info(
-                    "Running evaluation sweep: label_cols=%s × qualities=%s -> %s",
-                    label_cols, qualities, project_relative_path(out),
+                    "Running evaluation sweep: label_cols=%s × qualities=%s "
+                    "models=%s permutation=%s -> %s",
+                    label_cols,
+                    qualities,
+                    eval_models,
+                    perm_models,
+                    project_relative_path(out),
                 )
                 sweep_summary = run_evaluation_sweep(
                     fused,
@@ -299,7 +306,8 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     seed=cfg.evaluation_seed,
                     exclude_non_riding=cfg.evaluation_exclude_non_riding,
                     no_plots=cfg.no_plots,
-                    permutation_models=tuple(cfg.evaluation_permutation_models),
+                    evaluation_models=eval_models,
+                    permutation_models=perm_models,
                 )
                 result["ok"] += int(sweep_summary.get("n_runs_ok", 0))
                 result["failed"] += int(

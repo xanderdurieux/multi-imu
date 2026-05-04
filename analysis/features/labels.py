@@ -195,3 +195,67 @@ def to_riding_label(fine_label: str, config: LabelConfig | None = None) -> str:
 def non_riding_labels(config: LabelConfig | None = None) -> frozenset[str]:
     """Return the configured fine labels treated as non-riding."""
     return (config or default_label_config()).binary_non_riding_labels
+
+
+def ensure_resolved_labels(
+    df: pd.DataFrame,
+    *,
+    config: LabelConfig | None = None,
+    overwrite: bool = False,
+) -> pd.DataFrame:
+    """Materialize resolved label columns from ``scenario_labels`` (the multi-label set).
+
+    Feature CSVs only persist the raw pipe-delimited overlap set
+    (``scenario_labels``) — every consumer that wants a single-label target
+    (``scenario_label``, ``scenario_label_activity``/``_coarse``/``_binary``,
+    or any configured set-based scheme) calls this helper to derive the
+    columns it needs.
+
+    Parameters
+    ----------
+    df:
+        DataFrame produced by the features stage. Must contain the
+        ``scenario_labels`` column; otherwise the frame is returned unchanged.
+    config:
+        Label config used for priority ranking and taxonomy mapping. Defaults
+        to :func:`default_label_config`.
+    overwrite:
+        If False (default), columns already present in ``df`` are left alone.
+        Set to True to recompute every derived column from ``scenario_labels``.
+
+    Returns
+    -------
+    A copy of ``df`` with the resolved columns added.
+    """
+    if "scenario_labels" not in df.columns:
+        return df
+
+    cfg = config or default_label_config()
+    out = df.copy()
+    pipe = out["scenario_labels"].fillna("unlabeled").astype(str)
+    token_lists = pipe.map(lambda s: [t for t in s.split("|") if t.strip()])
+
+    fine_series = token_lists.map(lambda toks: resolve_label_from_tokens(toks, config=cfg))
+
+    if overwrite or "scenario_label" not in out.columns:
+        out["scenario_label"] = fine_series
+    if overwrite or "scenario_label_activity" not in out.columns:
+        out["scenario_label_activity"] = fine_series.map(
+            lambda lbl: to_activity_label(lbl, config=cfg)
+        )
+    if overwrite or "scenario_label_coarse" not in out.columns:
+        out["scenario_label_coarse"] = fine_series.map(
+            lambda lbl: to_coarse_label(lbl, config=cfg)
+        )
+    if overwrite or "scenario_label_binary" not in out.columns:
+        out["scenario_label_binary"] = fine_series.map(
+            lambda lbl: to_binary_label(lbl, config=cfg)
+        )
+
+    for scheme in cfg.set_based_scheme_names:
+        if overwrite or scheme not in out.columns:
+            out[scheme] = token_lists.map(
+                lambda toks, sch=scheme: to_set_based_label(sch, toks, config=cfg)
+            )
+
+    return out

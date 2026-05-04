@@ -1,4 +1,4 @@
-"""Imu static helpers for estimate device-level arduino imu calibration values."""
+"""IMU static helpers to estimate per-sensor static calibration values."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pandas as pd
 
 from common.paths import data_root, write_csv
 from parser.arduino import parse_arduino_log
+from parser.sporsa import parse_sporsa_log
 
 GRAVITY = 9.81
 AXES = ("x", "y", "z")
@@ -32,12 +33,24 @@ def calibration_data_dir() -> Path:
     return data_root() / "_calibrations"
 
 
-def default_calibration_raw_logs() -> list[Path]:
-    """Default raw Arduino ``*.txt`` logs: ``<calibration_data_dir>/raw``, else that root."""
+def calibration_sensor_dir(sensor: str) -> Path:
+    """Return per-sensor static-calibration directory."""
+    return calibration_data_dir() / sensor
 
-    root = calibration_data_dir()
-    logs = sorted((root / "raw").glob("*.txt"))
-    return logs if logs else sorted(root.glob("*.txt"))
+
+def default_calibration_raw_logs(sensor: str) -> list[Path]:
+    """Default raw logs from ``<calibration_data_dir>/<sensor>/raw``."""
+    root = calibration_sensor_dir(sensor)
+    return sorted((root / "raw").glob("*.txt"))
+
+
+def _parse_sensor_log(path: Path, sensor: str) -> pd.DataFrame:
+    """Parse a sensor raw log into canonical IMU columns."""
+    if sensor == "arduino":
+        return parse_arduino_log(path)
+    if sensor == "sporsa":
+        return parse_sporsa_log(path)
+    raise ValueError(f"Unsupported sensor for static calibration: {sensor!r}")
 
 
 def _trim_by_time(df: pd.DataFrame, trim_fraction: float) -> pd.DataFrame:
@@ -239,6 +252,7 @@ def write_parsed_csvs(
     log_paths: list[Path],
     parsed_dir: Path,
     *,
+    sensor: str,
     trim_fraction: float = 0.05,
 ) -> dict[str, Path]:
     """Write parsed csvs."""
@@ -246,14 +260,15 @@ def write_parsed_csvs(
     parsed_dir.mkdir(parents=True, exist_ok=True)
     mapping: dict[str, Path] = {}
     for log_number, path in enumerate(sorted(Path(p) for p in log_paths)):
-        df = parse_arduino_log(path)
+        df = _parse_sensor_log(path, sensor)
+
         work = _trim_by_time(df, trim_fraction)
         acc = work[["ax", "ay", "az"]].dropna()
         if acc.empty:
             raise ValueError(f"{path}: cannot infer face: no accelerometer samples.")
         face = _dominant_face(acc.mean().to_numpy(dtype=float))
-        label = _FACE_TO_PARSED_STEM.get(face)
-        stem = f"log{log_number}({label if label else "unknown"})"
+        label = _FACE_TO_PARSED_STEM.get(face) or "unknown"
+        stem = f"log{log_number}({label})"
         out = parsed_dir / f"{stem}.csv"
         write_csv(df, out)
         mapping[stem] = out

@@ -202,11 +202,19 @@ def plot_model_comparison(
     feature_sets = [fs for fs in _FS_ORDER if fs in present_fs] + sorted(
         fs for fs in present_fs if fs not in _FS_ORDER
     )
-    models = list(dict.fromkeys(metrics_df["model"].tolist()))  # preserve insertion order
+    registry_order = list(_MODEL_COLORS.keys())
+    raw_models = metrics_df["model"].unique().tolist()
+    models = sorted(
+        raw_models,
+        key=lambda m: (registry_order.index(m) if m in registry_order else len(registry_order), m),
+    )
     n_models = len(models)
+    if n_models == 0:
+        log.warning("No models in metrics table; skipping model comparison plot")
+        return output_path
 
     x = np.arange(len(feature_sets))
-    width = 0.20
+    width = min(0.22, 0.78 / max(n_models, 1))
     offsets = np.linspace(-(n_models - 1) / 2, (n_models - 1) / 2, n_models) * width
 
     has_std = "accuracy_std" in metrics_df.columns and "macro_f1_std" in metrics_df.columns
@@ -221,24 +229,26 @@ def plot_model_comparison(
         ],
     ):
         for model, offset in zip(models, offsets):
-            vals, errs = [], []
+            vals: list[float] = []
+            errs: list[float] = []
             for fs in feature_sets:
                 row = metrics_df[
                     (metrics_df["feature_set"] == fs) & (metrics_df["model"] == model)
                 ]
                 if row.empty:
-                    vals.append(0.0)
-                    errs.append(0.0)
+                    vals.append(float("nan"))
+                    errs.append(float("nan"))
                 else:
                     vals.append(float(row[metric_col].iloc[0]))
                     errs.append(float(row[std_col].iloc[0]) if has_std else 0.0)
 
             color = _MODEL_COLORS.get(model, "#7f8c8d")
+            yerr_plot = np.asarray(errs, dtype=float) if has_std else None
             bars = ax.bar(
                 x + offset,
                 vals,
                 width,
-                yerr=errs if has_std else None,
+                yerr=yerr_plot,
                 error_kw={"elinewidth": 1.0, "capsize": 2.5, "ecolor": "#555"},
                 label=_MODEL_DISPLAY.get(model, model),
                 color=color,
@@ -246,11 +256,15 @@ def plot_model_comparison(
                 edgecolor="white",
             )
 
+            err_cap = float(np.nanmax(errs)) if has_std and errs else 0.0
             for bar, v in zip(bars, vals):
-                if v > 0:
+                if np.isfinite(v) and v > 0:
+                    h = bar.get_height()
+                    if not np.isfinite(h):
+                        continue
                     ax.text(
                         bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + (max(errs) if has_std else 0) + 0.012,
+                        h + err_cap + 0.012,
                         f"{v:.2f}",
                         ha="center",
                         va="bottom",
@@ -823,6 +837,7 @@ def plot_sweep_label_quality_grid(
 
     feature_sets = [fs for fs in _FS_ORDER if fs in sweep_df["feature_set"].unique()]
     if not feature_sets:
+        log.debug("Sweep grid: no known feature sets in sweep metrics; skipping")
         return None
 
     fig, axes = plt.subplots(
@@ -866,8 +881,12 @@ def plot_sweep_label_quality_grid(
                     color="white" if v > 0.55 else "black",
                 )
 
-    if last_im is not None:
-        fig.colorbar(last_im, ax=axes_flat.tolist(), shrink=0.85, label=metric)
+    if last_im is None:
+        plt.close(fig)
+        log.debug("Sweep grid: no plottable cells; skipping %s", output_path.name)
+        return None
+
+    fig.colorbar(last_im, ax=axes_flat.tolist(), shrink=0.85, label=metric)
     fig.suptitle(f"{metric} across label scheme × quality filter", fontsize=11)
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)

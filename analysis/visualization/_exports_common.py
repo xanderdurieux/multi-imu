@@ -23,7 +23,15 @@ META_COLS = frozenset({
     "window_start_ms",
     "window_end_ms",
     "window_duration_s",
+    # Raw multi-label set persisted by features.csv. Resolved label columns
+    # (scenario_label, scenario_label_activity / _coarse / _binary, set-based
+    # schemes) are derived on demand by ensure_resolved_labels and are also
+    # excluded from feature columns by virtue of being non-numeric.
+    "scenario_labels",
     "scenario_label",
+    "scenario_label_activity",
+    "scenario_label_coarse",
+    "scenario_label_binary",
     "overall_quality_label",
     "overall_quality_score",
     "quality_tier",

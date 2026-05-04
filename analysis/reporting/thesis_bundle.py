@@ -21,6 +21,7 @@ from common.paths import (
     sections_root,
     write_csv,
 )
+from features.labels import ensure_resolved_labels
 
 log = logging.getLogger(__name__)
 
@@ -529,6 +530,7 @@ def run_thesis_bundle(
 
     log.info("Loading features from %s", project_relative_path(features_path))
     features_df = read_csv(features_path)
+    features_df = ensure_resolved_labels(features_df)
     log.info("Loaded %d rows, %d columns", len(features_df), len(features_df.columns))
 
     # ------------------------------------------------------------------

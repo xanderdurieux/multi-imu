@@ -16,6 +16,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from common.paths import project_relative_path
+from features.labels import ensure_resolved_labels
 from visualization._exports_common import (
     DPI,
     META_COLS,
@@ -417,6 +418,7 @@ def plot_section_overview(df: pd.DataFrame, output_dir: Path) -> Path | None:
 
 def run_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     """Run all feature-EDA figure generation on the aggregated feature DataFrame."""
+    df = ensure_resolved_labels(df)
     output_dir = Path(output_dir)
     figures_dir = output_dir / "figures" / "features"
     figures_dir.mkdir(parents=True, exist_ok=True)

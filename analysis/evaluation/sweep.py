@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, write_csv
-from evaluation.experiments import run_evaluation
+from evaluation.experiments import resolve_evaluation_models, run_evaluation
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ def run_evaluation_sweep(
     seed: int = 42,
     exclude_non_riding: bool = False,
     no_plots: bool = False,
+    evaluation_models: tuple[str, ...] | None = None,
     permutation_models: tuple[str, ...] = ("random_forest",),
 ) -> dict[str, Any]:
     """Run evaluation across label and quality settings."""
@@ -46,6 +47,11 @@ def run_evaluation_sweep(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "figures").mkdir(exist_ok=True)
+
+    cv_models = resolve_evaluation_models(
+        list(evaluation_models) if evaluation_models is not None else ["auto"]
+    )
+    perm_models = resolve_evaluation_models(permutation_models)
 
     if primary_quality not in qualities:
         # Honour the user's choice but warn — without a primary run, no
@@ -75,7 +81,8 @@ def run_evaluation_sweep(
                     exclude_non_riding=exclude_non_riding,
                     no_plots=no_plots,
                     compute_permutation_importance=(quality == primary_quality),
-                    permutation_models=permutation_models,
+                    evaluation_models=cv_models,
+                    permutation_models=perm_models,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 # FileNotFoundError comes from a missing features file (fatal
@@ -187,7 +194,8 @@ def run_evaluation_sweep(
         "label_cols": label_cols,
         "qualities": qualities,
         "primary_quality": primary_quality,
-        "permutation_models": list(permutation_models),
+        "evaluation_models": list(cv_models),
+        "permutation_models": list(perm_models),
         "exclude_non_riding": exclude_non_riding,
         "n_runs": len(runs_meta),
         "n_runs_ok": int(sum(1 for r in runs_meta if r.get("ok"))),

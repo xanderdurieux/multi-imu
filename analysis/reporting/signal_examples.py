@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, sections_root
+from features.labels import ensure_resolved_labels
 from visualization._utils import (
     AXIS_COLORS as _AXIS_COLORS,
     NORM_COLOR as _NORM_COLOR,
@@ -411,6 +412,7 @@ def generate_all_signal_examples(
     scenarios: list[str] | None = None,
 ) -> list[Path]:
     """Generate all signal examples."""
+    df = ensure_resolved_labels(df)
     required = {"scenario_label", "section_id", "window_start_ms", "window_end_ms"}
     if not required.issubset(df.columns):
         log.warning("Missing required columns for signal examples; skipping")

@@ -31,7 +31,6 @@ from .core import (
 log = logging.getLogger(__name__)
 
 _SENSORS = ("sporsa", "arduino")
-_ARDUINO_SENSOR = "arduino"
 _NO_PROTOCOL_FALLBACK_MS = 5_000.0  # first 5 s used as pseudo-static window when no protocol
 
 
@@ -67,20 +66,9 @@ def calibrate_section(
 
     cal_dir.mkdir(parents=True, exist_ok=True)
 
-    static_cal: dict[str, Any] | None = None
-    resolved_static = static_calibration_path
-    if resolved_static is None:
-        from common.paths import calibrations_root
-        default = calibrations_root() / "arduino_imu_calibration.json"
-        if default.exists():
-            resolved_static = default
-
-    if resolved_static and resolved_static.exists():
-        try:
-            from static_calibration.imu_static import load_calibration
-            static_cal = load_calibration(resolved_static)
-        except Exception as exc:
-            log.warning("Could not load static calibration: %s", exc)
+    static_cal_by_sensor: dict[str, dict[str, Any]] = {}
+    from common.paths import static_calibration_json
+    from static_calibration.imu_static import load_calibration
 
     all_intrinsics: dict[str, SensorIntrinsics] = {}
     all_alignment: dict[str, SensorAlignment] = {}
@@ -99,7 +87,15 @@ def calibrate_section(
             continue
 
         df = read_csv(csv_path).dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-        sensor_static_cal = static_cal if sensor == _ARDUINO_SENSOR else None
+        resolved_static = static_calibration_path or static_calibration_json(sensor)
+        sensor_static_cal: dict[str, Any] | None = None
+        if resolved_static.exists():
+            if sensor not in static_cal_by_sensor:
+                try:
+                    static_cal_by_sensor[sensor] = load_calibration(resolved_static)
+                except Exception as exc:
+                    log.warning("Could not load static calibration for %s: %s", sensor, exc)
+            sensor_static_cal = static_cal_by_sensor.get(sensor)
 
         try:
             opening_seg, closing_seg = _cal_sensor(

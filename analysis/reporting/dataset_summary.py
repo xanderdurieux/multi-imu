@@ -15,13 +15,9 @@ import numpy as np
 import pandas as pd
 
 from common.paths import project_relative_path, read_csv, write_csv
-from features.label_config import default_label_config
 from features.labels import (
+    ensure_resolved_labels,
     non_riding_labels,
-    to_activity_label,
-    to_binary_label,
-    to_coarse_label,
-    to_set_based_label,
 )
 
 log = logging.getLogger(__name__)
@@ -75,55 +71,6 @@ _FUNNEL_EXCLUDED = "#EF9A9A"
 def _class_color(label: str) -> str:
     """Return class color."""
     return _SCHEME_COLORS.get(label, "#90A4AE")
-
-
-# ---------------------------------------------------------------------------
-# Derived label helpers
-# ---------------------------------------------------------------------------
-
-def _to_coarse(label: str) -> str:
-    """Convert coarse."""
-    return to_coarse_label(label)
-
-
-def _to_activity(label: str) -> str:
-    """Convert activity."""
-    return to_activity_label(label)
-
-
-def _to_binary(label: str) -> str:
-    """Convert binary."""
-    return to_binary_label(label)
-
-
-def _ensure_derived_label_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Return ensure derived label cols."""
-    df = df.copy()
-    cfg = default_label_config()
-
-    if "scenario_labels" in df.columns:
-        pipe = df["scenario_labels"].fillna("unlabeled").astype(str)
-
-        def _tokens(cell: str) -> list[str]:
-            """Return tokens."""
-            return [t for t in str(cell).split("|") if t.strip()]
-
-        for scheme in cfg.set_based_scheme_names:
-            if scheme not in df.columns:
-                df[scheme] = pipe.map(
-                    lambda s, sch=scheme: to_set_based_label(sch, _tokens(s), config=cfg)
-                )
-
-    if "scenario_label" not in df.columns:
-        return df
-    fine = df["scenario_label"].fillna("unlabeled").astype(str)
-    if "scenario_label_activity" not in df.columns:
-        df["scenario_label_activity"] = fine.map(_to_activity)
-    if "scenario_label_coarse" not in df.columns:
-        df["scenario_label_coarse"] = fine.map(_to_coarse)
-    if "scenario_label_binary" not in df.columns:
-        df["scenario_label_binary"] = fine.map(_to_binary)
-    return df
 
 
 # ---------------------------------------------------------------------------
@@ -484,8 +431,10 @@ def run_dataset_summary(
     df_raw = read_csv(features_path)
     log.info("Loaded %d rows, %d columns", len(df_raw), len(df_raw.columns))
 
-    # Ensure derived label columns are present (back-compat with pre-redesign CSVs)
-    df = _ensure_derived_label_cols(df_raw)
+    # Materialize resolved label columns from the raw multi-label set.
+    # features.csv only persists `scenario_labels`; consumers that need a
+    # single-label view derive it via ensure_resolved_labels.
+    df = ensure_resolved_labels(df_raw)
 
     # ------------------------------------------------------------------
     # 1. Section inventory

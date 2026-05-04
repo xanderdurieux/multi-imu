@@ -210,21 +210,38 @@ def _cluster_is_near_recording_gap(
 
 
 def _filter_valid_clusters(
-    clusters: list[list[float]], params: CalSegParams, ts_ms: np.ndarray
+    clusters: list[list[float]],
+    params: CalSegParams,
+    ts_ms: np.ndarray,
+    dynamic_smooth: np.ndarray,
 ) -> list[list[float]]:
     """Keep clusters with valid peak count and burst span."""
     valid: list[list[float]] = []
     for cluster in clusters:
-        n_peaks = len(cluster)
-        span_ms = cluster[-1] - cluster[0]
+        working = list(cluster)
+        n_peaks = len(working)
 
-        # Reject clusters that are too long or have too many peaks.
-        if n_peaks > params.peak_max_count or span_ms > params.burst_max_span_ms:
+        # If there are too many peaks in one burst, keep only the strongest
+        # ones (by dynamic amplitude) rather than dropping the whole segment.
+        # This avoids missing true calibration bursts with a few extra ring-down peaks.
+        if n_peaks > params.peak_max_count:
+            scored: list[tuple[float, float]] = []
+            for p_ms in working:
+                i = min(int(np.searchsorted(ts_ms, p_ms)), len(dynamic_smooth) - 1)
+                score = float(dynamic_smooth[i]) if np.isfinite(dynamic_smooth[i]) else float("-inf")
+                scored.append((p_ms, score))
+            scored.sort(key=lambda item: item[1], reverse=True)
+            strongest = [p_ms for p_ms, _score in scored[: params.peak_max_count]]
+            working = sorted(strongest)
+            n_peaks = len(working)
+
+        span_ms = working[-1] - working[0]
+        if span_ms > params.burst_max_span_ms:
             continue
 
         # Relax the minimum peak count for clusters that are near a recording gap.
         min_count = params.peak_min_count
-        if (_cluster_is_near_recording_gap(cluster, ts_ms, nearby_window_ms=params.static_gap_max_ms, min_gap_ms=params.recording_gap_min_ms)):
+        if (_cluster_is_near_recording_gap(working, ts_ms, nearby_window_ms=params.static_gap_max_ms, min_gap_ms=params.recording_gap_min_ms)):
             min_count = max(2, params.peak_min_count - 2)
 
         # Reject clusters that have too few peaks.
@@ -232,7 +249,7 @@ def _filter_valid_clusters(
             continue
 
         # Pass clusters that are valid.
-        valid.append(cluster)
+        valid.append(working)
     return valid
 
 
@@ -436,7 +453,7 @@ def find_calibration_segments(
         return []
 
     all_clusters = _cluster_peaks(peak_ms, params)
-    clusters = _filter_valid_clusters(all_clusters, params, ts_ms)
+    clusters = _filter_valid_clusters(all_clusters, params, ts_ms, dynamic_smooth)
     if not clusters:
         return []
 
