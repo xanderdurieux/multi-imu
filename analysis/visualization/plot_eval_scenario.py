@@ -1,4 +1,4 @@
-"""Thesis-ready evaluation figures: confusion matrices, feature importance, model comparison."""
+"""Evaluation figures for scenario classification and label-grid runs."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import logging
 from pathlib import Path
 
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -16,7 +15,6 @@ import pandas as pd
 
 from common.paths import (
     parse_section_folder_name,
-    project_relative_path,
     read_csv,
     recording_labels_csv,
     section_dir,
@@ -24,65 +22,31 @@ from common.paths import (
 )
 from common.signals import vector_norm
 from labels.parser import load_labels
+from visualization._eval_common import (
+    _DPI,
+    _FEATURE_SET_COLORS,
+    _FS_DISPLAY,
+    _FS_ORDER,
+    _GROUP_COLORS,
+    _MODEL_COLORS,
+    _MODEL_DISPLAY,
+    _display_path,
+    _group_color,
+    _ordered_feature_sets,
+    plot_imu_contribution,
+    plot_permutation_importance,
+    plot_sensor_group_contribution,
+)
 from visualization._utils import filter_valid_plot_xy
 from visualization.plot_labels import _label_colors, _label_patches
 
 log = logging.getLogger(__name__)
 
-_DPI = 150
-
-_MODEL_DISPLAY: dict[str, str] = {
-    "random_forest": "Random Forest",
-    "hist_gradient_boosting": "Hist. Gradient Boosting",
-    "logistic_regression": "Logistic Regression",
-}
-
-_MODEL_COLORS: dict[str, str] = {
-    "random_forest": "#3498db",
-    "hist_gradient_boosting": "#2ecc71",
-    "logistic_regression": "#e74c3c",
-}
-
-_FEATURE_SET_COLORS: dict[str, str] = {
-    "bike": "#3498db",
-    "rider": "#e74c3c",
-    "fused_no_cross": "#f39c12",
-    "fused": "#2ecc71",
-}
-
-# Matches _FS_DISPLAY in experiments.py — kept local to avoid cross-module import.
-_FS_DISPLAY: dict[str, str] = {
-    "bike": "Bike only",
-    "rider": "Rider only",
-    "fused_no_cross": "Fused\n(no cross)",
-    "fused": "Fused",
-}
-
-# Canonical x-axis order for comparison figures (simple → complex).
-_FS_ORDER: list[str] = ["bike", "rider", "fused_no_cross", "fused"]
-
-# Color coding for feature groups in importance plots
-_GROUP_COLORS: dict[str, str] = {
-    "bike_": "#3498db",
-    "rider_": "#e74c3c",
-    "cross_": "#2ecc71",
-    "events_": "#f39c12",
-    "spectral_": "#9b59b6",
-    "orientation_": "#1abc9c",
-}
-
-
-def _group_color(feature: str) -> str:
-    """Return group color."""
-    for prefix, color in _GROUP_COLORS.items():
-        if feature.startswith(prefix):
-            return color
-    return "#95a5a6"
-
 
 # ---------------------------------------------------------------------------
 # Confusion matrix
 # ---------------------------------------------------------------------------
+
 
 def plot_confusion_matrix(
     cm_df: pd.DataFrame,
@@ -91,7 +55,7 @@ def plot_confusion_matrix(
     title: str = "Confusion Matrix",
     normalize: bool = True,
 ) -> Path:
-    """Plot confusion matrix."""
+    """Plot a row-normalized confusion matrix."""
     classes = cm_df.index.tolist()
     cm = cm_df.values.astype(float)
 
@@ -130,13 +94,14 @@ def plot_confusion_matrix(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.debug("Wrote confusion matrix → %s", project_relative_path(output_path))
+    log.debug("Wrote confusion matrix → %s", _display_path(output_path))
     return output_path
 
 
 # ---------------------------------------------------------------------------
 # Feature importance
 # ---------------------------------------------------------------------------
+
 
 def plot_feature_importance(
     fi_df: pd.DataFrame,
@@ -145,13 +110,12 @@ def plot_feature_importance(
     top_n: int = 20,
     title: str = "Feature importance",
 ) -> Path:
-    """Plot feature importance."""
+    """Plot top-N feature importances as a horizontal bar chart."""
     fi_df = fi_df.copy().sort_values("importance", ascending=False).head(top_n)
     if fi_df.empty:
         log.warning("No feature importance data to plot; skipping")
         return output_path
 
-    # Reverse so most important is at the top
     features = fi_df["feature"].tolist()[::-1]
     importances = fi_df["importance"].tolist()[::-1]
     colors = [_group_color(f) for f in features]
@@ -159,16 +123,18 @@ def plot_feature_importance(
     fig, ax = plt.subplots(figsize=(8, max(4, 0.38 * len(features) + 1.2)))
 
     ax.barh(features, importances, color=colors, edgecolor="white", linewidth=0.3)
-
     ax.set_xlabel("Importance")
     ax.set_title(title)
     ax.grid(axis="x", alpha=0.3, lw=0.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Legend for feature groups present in this chart
     handles = [
-        plt.Rectangle((0, 0), 1, 1, color=color, label=prefix.rstrip("_").replace("_", " ").capitalize())
+        plt.Rectangle(
+            (0, 0), 1, 1,
+            color=color,
+            label=prefix.rstrip("_").replace("_", " ").capitalize(),
+        )
         for prefix, color in _GROUP_COLORS.items()
         if any(f.startswith(prefix) for f in features)
     ]
@@ -178,7 +144,7 @@ def plot_feature_importance(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.debug("Wrote feature importance → %s", project_relative_path(output_path))
+    log.debug("Wrote feature importance → %s", _display_path(output_path))
     return output_path
 
 
@@ -186,18 +152,18 @@ def plot_feature_importance(
 # Model comparison
 # ---------------------------------------------------------------------------
 
+
 def plot_model_comparison(
     metrics_df: pd.DataFrame,
     output_path: Path,
     *,
     title: str = "Model comparison",
 ) -> Path:
-    """Plot model comparison."""
+    """Side-by-side accuracy and macro-F1 bars grouped by feature set."""
     if metrics_df.empty:
         log.warning("Empty metrics DataFrame; skipping model comparison plot")
         return output_path
 
-    # Sort feature sets in canonical ablation order; unknowns go last.
     present_fs = metrics_df["feature_set"].unique().tolist()
     feature_sets = [fs for fs in _FS_ORDER if fs in present_fs] + sorted(
         fs for fs in present_fs if fs not in _FS_ORDER
@@ -295,8 +261,13 @@ def plot_model_comparison(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.info("Wrote model comparison → %s", project_relative_path(output_path))
+    log.info("Wrote model comparison → %s", _display_path(output_path))
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Per-class F1
+# ---------------------------------------------------------------------------
 
 
 def plot_per_class_f1(
@@ -308,7 +279,7 @@ def plot_per_class_f1(
     feature_set: str = "fused",
     title: str = "",
 ) -> Path | None:
-    """Plot per class f1."""
+    """Bar chart of per-class F1 for each model at a given feature set."""
     models = [m for m in _MODEL_DISPLAY if f"{feature_set}__{m}" in all_results]
     if not models:
         log.debug("No results for feature set '%s'; skipping per-class F1 plot", feature_set)
@@ -350,7 +321,7 @@ def plot_per_class_f1(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.info("Wrote per-class F1 → %s", project_relative_path(output_path))
+    log.info("Wrote per-class F1 → %s", _display_path(output_path))
     return output_path
 
 
@@ -362,7 +333,7 @@ def plot_per_class_f1_feature_set_comparison(
     feature_sets: tuple[str, ...] = ("bike", "rider", "fused"),
     title: str = "Per-class F1-score by feature set",
 ) -> Path | None:
-    """Plot per-class F1 with feature sets grouped side by side for each model."""
+    """Per-class F1 with feature sets side by side for each model."""
     models = [
         model_name
         for model_name in _MODEL_DISPLAY
@@ -440,10 +411,7 @@ def plot_per_class_f1_feature_set_comparison(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.info(
-        "Wrote per-class F1 feature-set comparison → %s",
-        project_relative_path(output_path),
-    )
+    log.info("Wrote per-class F1 feature-set comparison → %s", _display_path(output_path))
     return output_path
 
 
@@ -451,15 +419,15 @@ def plot_per_class_f1_feature_set_comparison(
 # Batch generation from saved artefacts
 # ---------------------------------------------------------------------------
 
+
 def generate_evaluation_figures(output_dir: Path) -> list[Path]:
-    """Generate evaluation figures."""
+    """Generate all scenario evaluation figures from saved CSV/JSON artefacts."""
     output_dir = Path(output_dir)
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     generated: list[Path] = []
 
-    # ---- model comparison (cross-model, top-level figures/) ----
     metrics_path = output_dir / "metrics_table.csv"
     if metrics_path.exists():
         try:
@@ -472,10 +440,9 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
     else:
         log.warning(
             "metrics_table.csv not found in %s — skipping model comparison",
-            project_relative_path(output_dir),
+            _display_path(output_dir),
         )
 
-    # ---- per-model figures: confusion matrices and feature importances ----
     all_results_disk: dict[str, dict] = {}
     model_dirs = sorted(d for d in output_dir.iterdir() if d.is_dir() and d.name != "figures")
 
@@ -498,17 +465,22 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to plot confusion matrix %s: %s", cm_path.name, exc)
 
-        for fi_path in sorted(model_dir.glob("feature_importance_*.csv")):
+        fi_path = model_dir / "feature_importance.csv"
+        if fi_path.exists():
             try:
-                fi_df = pd.read_csv(fi_path)
-                _, _, fs_name = fi_path.stem.partition("feature_importance_")
-                human = (
-                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
-                    f"{fs_name.replace('_', ' ').title()}"
-                )
-                out = model_figures_dir / f"{fi_path.stem}.png"
-                plot_feature_importance(fi_df, out, title=f"Feature importance — {human}")
-                generated.append(out)
+                fi_all = pd.read_csv(fi_path)
+                for fs_name, fi_df in fi_all.groupby("feature_set", sort=False):
+                    human = (
+                        f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                        f"{fs_name.replace('_', ' ').title()}"
+                    )
+                    out = model_figures_dir / f"feature_importance_{fs_name}.png"
+                    plot_feature_importance(
+                        fi_df.drop(columns=["feature_set"]),
+                        out,
+                        title=f"Feature importance — {human}",
+                    )
+                    generated.append(out)
             except Exception as exc:
                 log.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
 
@@ -520,7 +492,6 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to load per-class report %s: %s", pc_path.name, exc)
 
-    # ---- per-class F1 (cross-model, top-level figures/, grouped by feature set) ----
     if all_results_disk:
         _aggregate_keys = {"accuracy", "macro avg", "weighted avg"}
         classes_set: set[str] = set()
@@ -560,223 +531,35 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
     log.info(
         "Evaluation figures: %d written to %s",
         len(generated),
-        project_relative_path(output_dir),
+        _display_path(output_dir),
     )
     return generated
 
 
 # ---------------------------------------------------------------------------
-# Permutation feature importance + sensor-group contribution
-# ---------------------------------------------------------------------------
-
-# Sensor-group → color (used for both per-feature bars and the group totals).
-_SENSOR_GROUP_COLORS: dict[str, str] = {
-    "bike": "#3498db",
-    "rider": "#e74c3c",
-    "cross": "#2ecc71",
-    "other": "#95a5a6",
-}
-
-
-def plot_permutation_importance(
-    perm_df: pd.DataFrame,
-    output_path: Path,
-    *,
-    top_n: int = 25,
-    title: str = "Permutation importance",
-) -> Path | None:
-    """Plot permutation importance."""
-    if perm_df.empty:
-        log.warning("Empty permutation importance DataFrame; skipping plot")
-        return None
-
-    df = perm_df.head(top_n).copy()
-    # Reverse so the most important feature ends up at the top of the figure.
-    df = df.iloc[::-1].reset_index(drop=True)
-
-    colors = [
-        _SENSOR_GROUP_COLORS.get(g, _SENSOR_GROUP_COLORS["other"])
-        for g in df["sensor_group"]
-    ]
-
-    fig, ax = plt.subplots(figsize=(8.5, max(4.0, 0.36 * len(df) + 1.0)))
-    ax.barh(
-        df["feature"],
-        df["perm_importance_mean"],
-        xerr=df["perm_importance_std"].fillna(0).clip(lower=0),
-        color=colors,
-        edgecolor="white",
-        linewidth=0.3,
-        error_kw={"elinewidth": 0.8, "capsize": 2.0, "ecolor": "#444"},
-    )
-    ax.set_xlabel("Permutation importance (Δ macro-F1)")
-    ax.set_title(title)
-    ax.axvline(0, color="#333", lw=0.6)
-    ax.grid(axis="x", alpha=0.3, lw=0.5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    handles = [
-        plt.Rectangle((0, 0), 1, 1, color=_SENSOR_GROUP_COLORS[g], label=g)
-        for g in ("bike", "rider", "cross", "other")
-        if g in set(df["sensor_group"])
-    ]
-    if handles:
-        ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.85)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.debug("Wrote permutation importance → %s", project_relative_path(output_path))
-    return output_path
-
-
-def plot_sensor_group_contribution(
-    grouped_df: pd.DataFrame,
-    output_path: Path,
-    *,
-    title: str = "Sensor-group contribution",
-) -> Path | None:
-    """Plot sensor group contribution."""
-    if grouped_df.empty:
-        return None
-
-    df = grouped_df.copy().sort_values("total_importance", ascending=False)
-
-    fig, ax = plt.subplots(figsize=(6.5, 3.6))
-    colors = [
-        _SENSOR_GROUP_COLORS.get(g, _SENSOR_GROUP_COLORS["other"])
-        for g in df["sensor_group"]
-    ]
-    bars = ax.bar(
-        df["sensor_group"],
-        df["total_importance"],
-        color=colors,
-        edgecolor="white",
-    )
-    for bar, n_feat in zip(bars, df["n_features"]):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height(),
-            f"n={int(n_feat)}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
-    ax.set_ylabel("Σ permutation importance")
-    ax.set_title(title)
-    ax.axhline(0, color="#333", lw=0.6)
-    ax.grid(axis="y", alpha=0.3, lw=0.5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.debug("Wrote sensor-group contribution → %s", project_relative_path(output_path))
-    return output_path
-
-
-# ---------------------------------------------------------------------------
-# IMU contribution (paired feature-set deltas)
+# Label-grid figures (label_col × min_quality)
 # ---------------------------------------------------------------------------
 
 
-def plot_imu_contribution(
-    contribution_df: pd.DataFrame,
-    output_path: Path,
-    *,
-    metric: str = "macro_f1",
-    title: str | None = None,
-) -> Path | None:
-    """Plot imu contribution."""
-    if contribution_df.empty:
-        return None
-
-    df = contribution_df[contribution_df["metric"] == metric].copy()
-    if df.empty:
-        return None
-
-    df["pair"] = df["better"] + "\nvs\n" + df["baseline"]
-    pairs = df["pair"].drop_duplicates().tolist()
-    models = df["model"].drop_duplicates().tolist()
-
-    x = np.arange(len(pairs))
-    width = min(0.24, 0.78 / max(len(models), 1))
-    offsets = np.linspace(-(len(models) - 1) / 2, (len(models) - 1) / 2, len(models)) * width
-
-    fig, ax = plt.subplots(figsize=(max(6.5, 1.4 * len(pairs) + 2.5), 4.2))
-
-    for model, offset in zip(models, offsets):
-        sub = df[df["model"] == model].set_index("pair").reindex(pairs)
-        means = sub["delta_mean"].astype(float).values
-        stds = sub["delta_std"].astype(float).fillna(0).values
-        pvals = sub["wilcoxon_p_one_sided"].values
-
-        color = _MODEL_COLORS.get(model, "#7f8c8d")
-        ax.bar(
-            x + offset, means, width,
-            yerr=stds,
-            color=color,
-            edgecolor="white",
-            error_kw={"elinewidth": 1.0, "capsize": 2.5, "ecolor": "#444"},
-            label=_MODEL_DISPLAY.get(model, model),
-            alpha=0.9,
-        )
-
-        for xi, mean, p in zip(x + offset, means, pvals):
-            star = ""
-            if p is not None and not pd.isna(p):
-                if float(p) < 0.01:
-                    star = "**"
-                elif float(p) < 0.05:
-                    star = "*"
-            label_y = mean + (max(stds) if len(stds) else 0) + 0.005
-            txt = f"{mean:+.3f}{star}"
-            ax.text(xi, label_y, txt, ha="center", va="bottom", fontsize=6.5)
-
-    ax.axhline(0, color="#333", lw=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels(pairs, fontsize=8)
-    ax.set_ylabel(f"Δ {metric}")
-    ax.set_title(title or f"IMU contribution — paired Δ {metric}")
-    ax.grid(axis="y", alpha=0.3, lw=0.5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(loc="best", fontsize=8, framealpha=0.85)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
-    log.debug("Wrote IMU contribution plot → %s", project_relative_path(output_path))
-    return output_path
-
-
-# ---------------------------------------------------------------------------
-# Sweep figures (label_col × min_quality)
-# ---------------------------------------------------------------------------
-
-
-def plot_sweep_heatmap(
-    sweep_df: pd.DataFrame,
+def plot_label_grid_heatmap(
+    grid_df: pd.DataFrame,
     output_path: Path,
     *,
     metric: str = "macro_f1",
     feature_set: str = "fused",
     model: str | None = None,
 ) -> Path | None:
-    """Plot sweep heatmap."""
-    if sweep_df.empty:
+    """Heatmap of metric values across the label × quality grid."""
+    if grid_df.empty:
         return None
 
-    df = sweep_df[sweep_df["feature_set"] == feature_set].copy()
+    df = grid_df[grid_df["feature_set"] == feature_set].copy()
     if model is not None:
         df = df[df["model"] == model]
     if df.empty:
         return None
 
     if model is None:
-        # Pick best model per cell (max metric).
         df = (
             df.sort_values(metric, ascending=False)
             .groupby(["label_col", "min_quality"], as_index=False)
@@ -792,8 +575,9 @@ def plot_sweep_heatmap(
     if pivot.empty:
         return None
 
-    fig, ax = plt.subplots(figsize=(max(5.5, 0.9 * pivot.shape[1] + 3.5),
-                                     max(3.5, 0.55 * pivot.shape[0] + 1.5)))
+    fig, ax = plt.subplots(
+        figsize=(max(5.5, 0.9 * pivot.shape[1] + 3.5), max(3.5, 0.55 * pivot.shape[0] + 1.5))
+    )
     im = ax.imshow(pivot.values, cmap="viridis", aspect="auto", vmin=0, vmax=1)
 
     ax.set_xticks(range(pivot.shape[1]))
@@ -817,27 +601,27 @@ def plot_sweep_heatmap(
 
     plt.colorbar(im, ax=ax, shrink=0.8, label=metric)
     title_model = "best model" if model is None else _MODEL_DISPLAY.get(model, model)
-    ax.set_title(f"{metric} sweep — {feature_set} ({title_model})", fontsize=10)
+    ax.set_title(f"{metric} — {feature_set} ({title_model})", fontsize=10)
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.info("Wrote sweep heatmap → %s", project_relative_path(output_path))
+    log.info("Wrote label-grid heatmap → %s", _display_path(output_path))
     return output_path
 
 
-def plot_sweep_label_quality_grid(
-    sweep_df: pd.DataFrame,
+def plot_label_grid_quality_grid(
+    grid_df: pd.DataFrame,
     output_path: Path,
     *,
     metric: str = "macro_f1",
 ) -> Path | None:
-    """Plot sweep label quality grid."""
-    if sweep_df.empty:
+    """One heatmap panel per feature set showing label × quality grid."""
+    if grid_df.empty:
         return None
 
-    feature_sets = [fs for fs in _FS_ORDER if fs in sweep_df["feature_set"].unique()]
+    feature_sets = [fs for fs in _FS_ORDER if fs in grid_df["feature_set"].unique()]
     if not feature_sets:
-        log.debug("Sweep grid: no known feature sets in sweep metrics; skipping")
+        log.debug("Label-grid quality grid: no known feature sets; skipping")
         return None
 
     fig, axes = plt.subplots(
@@ -850,8 +634,7 @@ def plot_sweep_label_quality_grid(
 
     last_im = None
     for ax, fs in zip(axes_flat, feature_sets):
-        sub = sweep_df[sweep_df["feature_set"] == fs]
-        # Take best model per (label_col, min_quality) cell.
+        sub = grid_df[grid_df["feature_set"] == fs]
         sub = (
             sub.sort_values(metric, ascending=False)
             .groupby(["label_col", "min_quality"], as_index=False)
@@ -883,33 +666,28 @@ def plot_sweep_label_quality_grid(
 
     if last_im is None:
         plt.close(fig)
-        log.debug("Sweep grid: no plottable cells; skipping %s", output_path.name)
+        log.debug("Label-grid quality grid: no plottable cells; skipping %s", output_path.name)
         return None
 
     fig.colorbar(last_im, ax=axes_flat.tolist(), shrink=0.85, label=metric)
     fig.suptitle(f"{metric} across label scheme × quality filter", fontsize=11)
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.info("Wrote sweep grid → %s", project_relative_path(output_path))
+    log.info("Wrote label-grid quality grid → %s", _display_path(output_path))
     return output_path
 
 
 # ---------------------------------------------------------------------------
-# Misclassified-window overlay (binary objectives)
+# Misclassified-window overlays (binary objectives)
 # ---------------------------------------------------------------------------
 
-# False positive  = predicted positive class (riding) but actually negative.
-# False negative  = predicted negative class (non_riding) but actually positive.
-# Distinct hues so the two error modes pop against the (lighter) annotation
-# strip in the background.
-_FP_COLOR = "#d62728"  # red
-_FN_COLOR = "#ff7f0e"  # orange
+_FP_COLOR = "#d62728"
+_FN_COLOR = "#ff7f0e"
 _MISCLS_ALPHA = 0.45
 _MISCLS_EDGE_LW = 1.2
 
 
 def _load_section_signal(sec_dir: Path, sensor: str) -> pd.DataFrame | None:
-    """Load section signal."""
     derived = sec_dir / "derived" / f"{sensor}_signals.csv"
     if derived.exists():
         df = read_csv(derived)
@@ -920,8 +698,10 @@ def _load_section_signal(sec_dir: Path, sensor: str) -> pd.DataFrame | None:
     if calibrated.exists():
         df = read_csv(calibrated)
         if "timestamp" in df.columns:
-            for col, axes in (("acc_norm", ("ax", "ay", "az")),
-                              ("gyro_norm", ("gx", "gy", "gz"))):
+            for col, axes in (
+                ("acc_norm", ("ax", "ay", "az")),
+                ("gyro_norm", ("gx", "gy", "gz")),
+            ):
                 if col not in df.columns and all(a in df.columns for a in axes):
                     df[col] = vector_norm(df, list(axes))
             return df
@@ -935,7 +715,6 @@ def _draw_misclassified_spans(
     rows: pd.DataFrame,
     t0_ms: float,
 ) -> tuple[int, int]:
-    """Draw misclassified spans."""
     n_fp = n_fn = 0
     for _, r in rows.iterrows():
         x0 = (float(r["window_start_ms"]) - t0_ms) / 1000.0
@@ -985,7 +764,6 @@ def _draw_label_strip(
     t0_ms: float,
     colors: dict,
 ) -> None:
-    """Draw label strip."""
     for lr in labels:
         if not lr.label:
             continue
@@ -994,8 +772,7 @@ def _draw_label_strip(
         if x1 <= x0:
             continue
         color = colors.get(lr.label, "#90A4AE")
-        ax.axvspan(x0, x1, facecolor=color, edgecolor="none",
-                   alpha=0.85, zorder=1)
+        ax.axvspan(x0, x1, facecolor=color, edgecolor="none", alpha=0.85, zorder=1)
     ax.set_yticks([])
     ax.set_ylim(0, 1)
     ax.set_ylabel("labels", fontsize=7, rotation=0, ha="right", va="center", labelpad=18)
@@ -1011,7 +788,7 @@ def plot_misclassified_overlay_for_section(
     *,
     title_suffix: str = "",
 ) -> Path | None:
-    """Plot misclassified overlay for section."""
+    """IMU signal overlay with highlighted FP/FN windows for one section."""
     sec_dir = section_dir(section_id)
     if not sec_dir.is_dir():
         log.warning("Section directory missing for %s — skipping overlay", section_id)
@@ -1029,9 +806,6 @@ def plot_misclassified_overlay_for_section(
         if d is not None and not d.empty and "timestamp" in d.columns
     )
 
-    # Layout: thin annotation row (window numbers + probabilities), thin
-    # label strip, then three signal panels. Stripping labels off the
-    # signal axes keeps the IMU traces readable when label density is high.
     fig = plt.figure(figsize=(14, 8), constrained_layout=True)
     gs = fig.add_gridspec(
         5, 1,
@@ -1045,7 +819,6 @@ def plot_misclassified_overlay_for_section(
     ax_gyro = fig.add_subplot(gs[4], sharex=ax_anno)
     signal_axes = [ax_acc_bike, ax_acc_rider, ax_gyro]
 
-    # Annotation row holds the per-window text labels. No data, no spines.
     ax_anno.set_yticks([])
     ax_anno.set_ylim(0, 1)
     for spine in ("top", "right", "left", "bottom"):
@@ -1080,9 +853,6 @@ def plot_misclassified_overlay_for_section(
     ax_gyro.grid(True, alpha=0.3, lw=0.4)
     ax_gyro.legend(loc="upper right", fontsize=7)
 
-    # Per-section labels live at <sec>/labels/labels.csv (preferred — already
-    # trimmed to the section); fallback is the recording-level intervals file
-    # for sections that haven't been event-labeled yet.
     label_colors: dict = {}
     section_labels: list = []
     section_labels_path = section_labels_csv(sec_dir)
@@ -1105,8 +875,6 @@ def plot_misclassified_overlay_for_section(
     else:
         _draw_label_strip(ax_strip, [], t0_ms, {})
 
-    # Misclassified windows on the signal panels; per-window text on the
-    # dedicated annotation row above.
     n_fp, n_fn = _draw_misclassified_spans(signal_axes, ax_anno, miscls_rows, t0_ms)
 
     legend_handles = [
@@ -1128,7 +896,7 @@ def plot_misclassified_overlay_for_section(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
-    log.info("Wrote misclassified overlay → %s", project_relative_path(output_path))
+    log.info("Wrote misclassified overlay → %s", _display_path(output_path))
     return output_path
 
 
@@ -1138,7 +906,9 @@ def plot_misclassified_overlay(
     *,
     title_suffix: str = "",
 ) -> list[Path]:
-    """Plot misclassified overlay."""
+    """Generate per-section misclassified window overlays from a misclassified CSV."""
+    from common.paths import project_relative_path
+
     miscls_csv = Path(miscls_csv)
     if not miscls_csv.exists():
         log.warning("Misclassified CSV missing: %s", project_relative_path(miscls_csv))
@@ -1166,9 +936,22 @@ def plot_misclassified_overlay(
             continue
         if saved is not None:
             written.append(saved)
-    log.info(
-        "Misclassified overlays: %d sections → %s",
-        len(written),
-        project_relative_path(output_dir),
-    )
+    log.info("Misclassified overlays: %d sections → %s", len(written), _display_path(output_dir))
     return written
+
+
+__all__ = [
+    "generate_evaluation_figures",
+    "plot_confusion_matrix",
+    "plot_feature_importance",
+    "plot_imu_contribution",
+    "plot_label_grid_heatmap",
+    "plot_label_grid_quality_grid",
+    "plot_misclassified_overlay",
+    "plot_misclassified_overlay_for_section",
+    "plot_model_comparison",
+    "plot_per_class_f1",
+    "plot_per_class_f1_feature_set_comparison",
+    "plot_permutation_importance",
+    "plot_sensor_group_contribution",
+]

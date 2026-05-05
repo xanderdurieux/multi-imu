@@ -15,11 +15,11 @@ from evaluation.permutation_importance import (
     compute_permutation_importance_grouped,
     write_permutation_importance,
 )
-from evaluation.sweep import run_evaluation_sweep
+from evaluation.label_grid import run_label_grid_evaluation
 
 __all__ = [
     "run_evaluation",
-    "run_evaluation_sweep",
+    "run_label_grid_evaluation",
     "analyze_confusion_matrix",
     "write_confusion_analysis",
     "compute_imu_contribution",

@@ -86,6 +86,56 @@ def write_csv(df: pd.DataFrame, csv_path: Path | str) -> None:
     out.to_csv(path, index=False)
 
 
+def merge_csv(
+    new_df: pd.DataFrame,
+    csv_path: Path | str,
+    key_cols: list[str],
+) -> pd.DataFrame:
+    """Merge new_df into an existing CSV, replacing rows that share the same key.
+
+    If the file does not exist, new_df is written as-is.  For matching keys
+    (determined by key_cols), new rows replace existing rows so a re-run of a
+    specific configuration always reflects the latest results.
+
+    Returns the merged DataFrame that was written.
+    """
+    path = Path(csv_path)
+    if new_df.empty:
+        return new_df
+
+    if path.exists():
+        try:
+            existing = pd.read_csv(path)
+            if not existing.empty:
+                valid_keys = [c for c in key_cols if c in existing.columns and c in new_df.columns]
+                if valid_keys:
+                    new_keys = set(map(tuple, new_df[valid_keys].values.tolist()))
+                    existing = existing[
+                        ~existing[valid_keys].apply(tuple, axis=1).isin(new_keys)
+                    ]
+                merged = pd.concat([existing, new_df], ignore_index=True)
+                write_csv(merged, path)
+                return merged
+        except Exception:
+            pass  # Fall through to plain write on any read/parse error
+
+    write_csv(new_df, path)
+    return new_df
+
+
+def features_fingerprint(features_path: Path | str) -> str:
+    """Return a short fingerprint of a features file (mtime + size).
+
+    Used to detect whether features have changed between evaluation runs.
+    Stored in summary JSON files; compared when merging results across runs.
+    """
+    try:
+        stat = Path(features_path).stat()
+        return f"{stat.st_mtime:.0f}:{stat.st_size}"
+    except OSError:
+        return "unknown"
+
+
 def list_csv_files(directory: Path | str) -> list[Path]:
     """Return all CSV files directly inside *directory*, sorted by name."""
     path = Path(directory)

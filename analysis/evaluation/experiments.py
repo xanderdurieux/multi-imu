@@ -411,9 +411,9 @@ def _cv_evaluate(
     cv = GroupKFold(n_splits=n_splits)
 
     # Pre-allocate OOF arrays — every sample is a validation sample exactly once.
+    all_labels = np.unique(y)
     oof_pred = np.empty(len(y), dtype=y.dtype)
-    n_classes = len(np.unique(y))
-    oof_proba: np.ndarray | None = np.full((len(y), n_classes), np.nan, dtype=float)
+    oof_proba: np.ndarray | None = np.full((len(y), len(all_labels)), np.nan, dtype=float)
 
     fold_accuracies: list[float] = []
     fold_f1s: list[float] = []
@@ -453,7 +453,7 @@ def _cv_evaluate(
             oof_proba = None
 
         fold_accuracies.append(float(accuracy_score(y_val, y_hat)))
-        fold_f1s.append(float(f1_score(y_val, y_hat, average="macro", zero_division=0)))
+        fold_f1s.append(float(f1_score(y_val, y_hat, average="macro", labels=all_labels, zero_division=0)))
 
         if hasattr(clf, "feature_importances_"):
             fold_importances.append(clf.feature_importances_.copy())
@@ -461,15 +461,14 @@ def _cv_evaluate(
     # --- OOF aggregate metrics -------------------------------------------------
     # classification_report and confusion_matrix are computed on the stacked OOF
     # predictions, which cover all samples exactly once under GroupKFold.
-    labels = np.unique(y)
     report = classification_report(
         y, oof_pred,
-        labels=labels,
+        labels=all_labels,
         target_names=class_names,
         output_dict=True,
         zero_division=0,
     )
-    cm = confusion_matrix(y, oof_pred, labels=labels)
+    cm = confusion_matrix(y, oof_pred, labels=all_labels)
 
     # Mean feature importances across folds (None for models that lack them).
     importances: list[float] | None = None
@@ -486,7 +485,7 @@ def _cv_evaluate(
         "per_class": report,
         "confusion_matrix": cm.tolist(),
         "feature_importances": importances,
-        "labels": labels.tolist(),
+        "labels": all_labels.tolist(),
         "oof_pred": oof_pred,
         "oof_proba": oof_proba,
     }
@@ -689,6 +688,7 @@ def run_evaluation(
     # ------------------------------------------------------------------
     all_results: dict[str, dict[str, Any]] = {}
     metrics_rows: list[dict] = []
+    fi_frames: dict[str, list[pd.DataFrame]] = {}  # model_name → accumulated feature importance frames
 
     for fs_name, feat_cols in active_sets.items():
         # NaN handling happens inside the CV pipeline (SimpleImputer) so that
@@ -853,7 +853,7 @@ def run_evaluation(
                     # (the helper already warns and continues per section).
                     if not no_plots and n_miscls > 0:
                         try:
-                            from evaluation.plots import plot_misclassified_overlay
+                            from visualization.plot_eval_scenario import plot_misclassified_overlay
                             overlay_dir = (
                                 output_dir / model_name / f"misclassified_overlays_{fs_name}"
                             )
@@ -880,17 +880,21 @@ def run_evaluation(
             write_csv(fold_df, fold_path)
             log.debug("Wrote fold scores to %s", project_relative_path(fold_path))
 
-            # Write feature importances (mean across folds)
+            # Accumulate feature importances (written consolidated after the loop)
             if result["feature_importances"] is not None:
-                fi_path = output_dir / model_name / f"feature_importance_{fs_name}.csv"
                 fi_df = pd.DataFrame(
                     {
+                        "feature_set": fs_name,
                         "feature": feat_cols,
                         "importance": result["feature_importances"],
                     }
                 ).sort_values("importance", ascending=False)
-                write_csv(fi_df, fi_path)
-                log.debug("Wrote feature importances to %s", project_relative_path(fi_path))
+                fi_frames.setdefault(model_name, []).append(fi_df)
+
+    for model_name, frames in fi_frames.items():
+        fi_path = output_dir / model_name / "feature_importance.csv"
+        write_csv(pd.concat(frames, ignore_index=True), fi_path)
+        log.debug("Wrote feature importances to %s", project_relative_path(fi_path))
 
     # ------------------------------------------------------------------
     # 5. Write metrics table
@@ -927,21 +931,19 @@ def run_evaluation(
     # 5c. Permutation feature importance (model-agnostic)
     # ------------------------------------------------------------------
     # Only run for the models listed in `permutation_models` to bound runtime.
-    # Output goes alongside the existing impurity-based feature_importance_*.csv
-    # so the user can compare the two rankings.
+    # Output is written as consolidated feature_set-keyed CSVs alongside
+    # the impurity-based feature_importance.csv so rankings are comparable.
     if compute_permutation_importance and all_results:
         try:
             from evaluation.permutation_importance import (
+                aggregate_by_sensor_group,
                 compute_permutation_importance_grouped,
-                write_permutation_importance,
             )
         except Exception as exc:
             log.warning("Could not import permutation importance helpers: %s", exc)
         else:
+            perm_frames: dict[str, list[pd.DataFrame]] = {}  # model_name → accumulated frames
             for fs_name, feat_cols in active_sets.items():
-                # Re-derive X for this fs: same logic as the CV loop above so
-                # we operate on the same column set (after dropping all-NaN
-                # columns, which `_select_feature_cols` already handled).
                 sub = df[feat_cols].apply(pd.to_numeric, errors="coerce")
                 drop = [c for c in feat_cols if sub[c].isna().all()]
                 cols = [c for c in feat_cols if c not in drop]
@@ -967,16 +969,28 @@ def run_evaluation(
                             scoring="f1_macro",
                             seed=seed,
                         )
-                        write_permutation_importance(
-                            perm_df,
-                            output_dir / model_name,
-                            config_name=fs_name,
-                        )
+                        if not perm_df.empty:
+                            perm_df.insert(0, "feature_set", fs_name)
+                            perm_frames.setdefault(model_name, []).append(perm_df)
                     except Exception as exc:
                         log.warning(
                             "Permutation importance failed for %s/%s: %s",
                             fs_name, model_name, exc,
                         )
+
+            for model_name, frames in perm_frames.items():
+                perm_all = pd.concat(frames, ignore_index=True)
+                write_csv(perm_all, output_dir / model_name / "permutation_importance.csv")
+                grouped_frames = []
+                for fs_name_g, sub_g in perm_all.groupby("feature_set", sort=False):
+                    grp = aggregate_by_sensor_group(sub_g.drop(columns=["feature_set"]))
+                    grp.insert(0, "feature_set", fs_name_g)
+                    grouped_frames.append(grp)
+                if grouped_frames:
+                    write_csv(
+                        pd.concat(grouped_frames, ignore_index=True),
+                        output_dir / model_name / "permutation_importance_by_group.csv",
+                    )
 
     # ------------------------------------------------------------------
     # 6. Build evaluation summary
@@ -1020,7 +1034,7 @@ def run_evaluation(
     # ------------------------------------------------------------------
     if not no_plots:
         try:
-            from evaluation.plots import generate_evaluation_figures, plot_per_class_f1
+            from visualization.plot_eval_scenario import generate_evaluation_figures, plot_per_class_f1
             generate_evaluation_figures(output_dir)
 
             # Per-class F1 for each feature set that has results
@@ -1039,7 +1053,7 @@ def run_evaluation(
         # IMU contribution plot — requires imu_contribution.csv from §5b.
         if imu_summary_path is not None and imu_summary_path.exists():
             try:
-                from evaluation.plots import plot_imu_contribution
+                from visualization._eval_common import plot_imu_contribution
                 imu_df = pd.read_csv(imu_summary_path)
                 for metric in ("macro_f1", "accuracy"):
                     plot_imu_contribution(
@@ -1051,11 +1065,11 @@ def run_evaluation(
                 log.warning("IMU contribution plot failed: %s", exc)
 
         # Permutation importance plots — one bar chart per (model, fs) and
-        # one sensor-group totals chart per (model, fs).  Reads the CSVs we
-        # wrote in §5c to stay decoupled from the in-memory result dict.
+        # one sensor-group totals chart per (model, fs).  Reads consolidated
+        # CSVs written in §5c; iterates over feature_set column internally.
         if compute_permutation_importance:
             try:
-                from evaluation.plots import (
+                from visualization._eval_common import (
                     plot_permutation_importance,
                     plot_sensor_group_contribution,
                 )
@@ -1066,43 +1080,40 @@ def run_evaluation(
                     model_dir = output_dir / model_name
                     fig_dir = model_dir / "figures"
                     fig_dir.mkdir(parents=True, exist_ok=True)
-                    for fi_path in sorted(model_dir.glob("permutation_importance_*.csv")):
-                        if fi_path.stem.startswith("permutation_importance_by_group_"):
-                            continue
-                        fs_name = fi_path.stem.removeprefix("permutation_importance_")
+                    perm_path = model_dir / "permutation_importance.csv"
+                    if perm_path.exists():
                         try:
-                            perm_df = pd.read_csv(fi_path)
-                            plot_permutation_importance(
-                                perm_df,
-                                fig_dir / f"{fi_path.stem}.png",
-                                title=(
-                                    f"Permutation importance — "
-                                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
-                                    f"{_FS_DISPLAY.get(fs_name, fs_name)}"
-                                ),
-                            )
+                            perm_all = pd.read_csv(perm_path)
+                            for fs_name, perm_sub in perm_all.groupby("feature_set", sort=False):
+                                plot_permutation_importance(
+                                    perm_sub.drop(columns=["feature_set"]),
+                                    fig_dir / f"permutation_importance_{fs_name}.png",
+                                    title=(
+                                        f"Permutation importance — "
+                                        f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                                        f"{_FS_DISPLAY.get(fs_name, fs_name)}"
+                                    ),
+                                )
+                        except Exception as exc:
+                            log.warning("Permutation importance plots failed for %s: %s", model_name, exc)
+                    grp_path = model_dir / "permutation_importance_by_group.csv"
+                    if grp_path.exists():
+                        try:
+                            grp_all = pd.read_csv(grp_path)
+                            for fs_name, grp_sub in grp_all.groupby("feature_set", sort=False):
+                                plot_sensor_group_contribution(
+                                    grp_sub.drop(columns=["feature_set"]),
+                                    fig_dir / f"permutation_importance_by_group_{fs_name}.png",
+                                    title=(
+                                        f"Sensor-group contribution — "
+                                        f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                                        f"{_FS_DISPLAY.get(fs_name, fs_name)}"
+                                    ),
+                                )
                         except Exception as exc:
                             log.warning(
-                                "Permutation importance plot failed for %s: %s",
-                                fi_path.name, exc,
-                            )
-                    for grp_path in sorted(model_dir.glob("permutation_importance_by_group_*.csv")):
-                        fs_name = grp_path.stem.removeprefix("permutation_importance_by_group_")
-                        try:
-                            grp_df = pd.read_csv(grp_path)
-                            plot_sensor_group_contribution(
-                                grp_df,
-                                fig_dir / f"{grp_path.stem}.png",
-                                title=(
-                                    f"Sensor-group contribution — "
-                                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
-                                    f"{_FS_DISPLAY.get(fs_name, fs_name)}"
-                                ),
-                            )
-                        except Exception as exc:
-                            log.warning(
-                                "Sensor-group plot failed for %s: %s",
-                                grp_path.name, exc,
+                                "Sensor-group plots failed for %s: %s",
+                                model_name, exc,
                             )
 
     return summary

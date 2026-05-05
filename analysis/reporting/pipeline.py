@@ -282,6 +282,7 @@ def run_report(
     # 6. Copy evaluation figures
     # ------------------------------------------------------------------
     n_eval_figures = _copy_evaluation_figures(evaluation_dir, eval_dir)
+    n_signal_plots = len(list(signals_dir.glob("*.png")))
 
     # ------------------------------------------------------------------
     # 7. Write REPORT.md

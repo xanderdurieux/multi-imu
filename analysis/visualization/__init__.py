@@ -3,6 +3,8 @@
 from . import (
     plot_calibration,
     plot_comparison,
+    plot_eval_events,
+    plot_eval_scenario,
     plot_features,
     plot_orientation,
     plot_sensor,
@@ -12,6 +14,8 @@ from . import (
 __all__ = [
     "plot_calibration",
     "plot_comparison",
+    "plot_eval_events",
+    "plot_eval_scenario",
     "plot_features",
     "plot_orientation",
     "plot_sensor",

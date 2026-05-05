@@ -394,7 +394,7 @@ def _render_feature_set_comparison(
         metrics_df = _load_optional_csv(metrics_path)
         if metrics_df.empty:
             return False
-        from evaluation.plots import plot_model_comparison
+        from visualization.plot_eval_scenario import plot_model_comparison
         plot_model_comparison(
             metrics_df,
             output_path,

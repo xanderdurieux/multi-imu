@@ -28,15 +28,7 @@ from .config import WorkflowConfig
 
 log = logging.getLogger(__name__)
 
-_EVALUATION_LABEL_COLS = [
-    "scenario_label",
-    "scenario_label_activity",
-    "scenario_label_coarse",
-    "scenario_label_binary",
-    "scenario_label_riding",
-    "scenario_label_cornering",
-    "scenario_label_head_motion",
-]
+from evaluation.label_grid import ALL_LABEL_COLS as _EVALUATION_LABEL_COLS
 
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
     """Resolve the list of recording names to process."""
@@ -267,55 +259,105 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
 
     elif stage == "evaluation":
         from evaluation.experiments import resolve_evaluation_models
-        from evaluation.sweep import run_evaluation_sweep
         fused = exports_root() / "features_fused.csv"
         out = evaluation_root()
         if fused.exists():
-            # Resolve the label-col axis: "auto" → all schemes in _EVALUATION_LABEL_COLS;
-            # the user pinned one scheme and the sweep collapses on that axis.
-            if cfg.evaluation_label_col == "auto":
-                label_cols = _EVALUATION_LABEL_COLS
-            else:
-                label_cols = [cfg.evaluation_label_col]
+            if "label_grid" in cfg.evaluation_methods:
+                from evaluation.label_grid import run_label_grid_evaluation
+                label_cols = (
+                    list(_EVALUATION_LABEL_COLS)
+                    if cfg.evaluation_label_col == "auto"
+                    else [cfg.evaluation_label_col]
+                )
 
-            # Ensure the per-stage primary quality is always present so the
-            # canonical (primary) configuration always produces permutation
-            # importance even when the user shrinks the quality axis.
-            qualities = list(cfg.evaluation_quality_levels)
-            if cfg.min_quality_label not in qualities:
-                qualities = [cfg.min_quality_label] + qualities
+                # Always include the primary quality so permutation importance
+                # is produced even when the user narrows the quality axis.
+                qualities = list(cfg.evaluation_quality_levels)
+                if cfg.min_quality_label not in qualities:
+                    qualities = [cfg.min_quality_label] + qualities
 
-            try:
-                eval_models = resolve_evaluation_models(cfg.evaluation_models)
-                perm_models = resolve_evaluation_models(cfg.evaluation_permutation_models)
-                log.info(
-                    "Running evaluation sweep: label_cols=%s × qualities=%s "
-                    "models=%s permutation=%s -> %s",
-                    label_cols,
-                    qualities,
-                    eval_models,
-                    perm_models,
-                    project_relative_path(out),
-                )
-                sweep_summary = run_evaluation_sweep(
-                    fused,
-                    output_dir=out,
-                    label_cols=label_cols,
-                    qualities=qualities,
-                    primary_quality=cfg.min_quality_label,
-                    seed=cfg.evaluation_seed,
-                    exclude_non_riding=cfg.evaluation_exclude_non_riding,
-                    no_plots=cfg.no_plots,
-                    evaluation_models=eval_models,
-                    permutation_models=perm_models,
-                )
-                result["ok"] += int(sweep_summary.get("n_runs_ok", 0))
-                result["failed"] += int(
-                    sweep_summary.get("n_runs", 0) - sweep_summary.get("n_runs_ok", 0)
-                )
-            except Exception as exc:
-                log.error("evaluation sweep failed: %s", exc)
-                result["failed"] += 1
+                try:
+                    eval_models = resolve_evaluation_models(cfg.evaluation_models)
+                    perm_models = resolve_evaluation_models(cfg.evaluation_permutation_models)
+                    log.info(
+                        "Running label-grid evaluation: label_cols=%s × qualities=%s "
+                        "models=%s permutation=%s -> %s",
+                        label_cols,
+                        qualities,
+                        eval_models,
+                        perm_models,
+                        project_relative_path(out),
+                    )
+                    grid_summary = run_label_grid_evaluation(
+                        fused,
+                        output_dir=out,
+                        label_cols=label_cols,
+                        qualities=qualities,
+                        primary_quality=cfg.min_quality_label,
+                        seed=cfg.evaluation_seed,
+                        exclude_non_riding=cfg.evaluation_exclude_non_riding,
+                        no_plots=cfg.no_plots,
+                        evaluation_models=eval_models,
+                        permutation_models=perm_models,
+                    )
+                    result["ok"] += int(grid_summary.get("n_runs_ok", 0))
+                    result["failed"] += int(
+                        grid_summary.get("n_runs", 0) - grid_summary.get("n_runs_ok", 0)
+                    )
+                except Exception as exc:
+                    log.error("label-grid evaluation failed: %s", exc)
+                    result["failed"] += 1
+
+            if "event_contrasts" in cfg.evaluation_methods:
+                try:
+                    from evaluation.event_contrasts import run_event_contrast_evaluation
+                    event_models = resolve_evaluation_models(cfg.event_contrast_models)
+                    log.info(
+                        "Running event contrast evaluation: models=%s -> %s",
+                        event_models,
+                        project_relative_path(out / "event_contrasts"),
+                    )
+                    summary = run_event_contrast_evaluation(
+                        fused,
+                        output_dir=out,
+                        models=event_models,
+                        group_col="recording_name",
+                        min_quality=cfg.min_quality_label,
+                        seed=cfg.evaluation_seed,
+                        no_plots=cfg.no_plots,
+                    )
+                    result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
+                    result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
+                except Exception as exc:
+                    log.error("event contrast evaluation failed: %s", exc)
+                    result["failed"] += 1
+
+            if "two_stage_events" in cfg.evaluation_methods:
+                try:
+                    from evaluation.two_stage_events import run_two_stage_event_evaluation
+                    two_stage_models = resolve_evaluation_models(cfg.two_stage_event_models)
+                    log.info(
+                        "Running two-stage event evaluation: tasks=%s models=%s -> %s",
+                        cfg.two_stage_event_tasks,
+                        two_stage_models,
+                        project_relative_path(out / "two_stage_events"),
+                    )
+                    summary = run_two_stage_event_evaluation(
+                        fused,
+                        output_dir=out,
+                        task_names=cfg.two_stage_event_tasks,
+                        models=two_stage_models,
+                        min_quality=cfg.min_quality_label,
+                        seed=cfg.evaluation_seed,
+                        target_recall=cfg.two_stage_target_recall,
+                        hop_s=cfg.hop_s,
+                        no_plots=cfg.no_plots,
+                    )
+                    result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
+                    result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
+                except Exception as exc:
+                    log.error("two-stage event evaluation failed: %s", exc)
+                    result["failed"] += 1
         else:
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1

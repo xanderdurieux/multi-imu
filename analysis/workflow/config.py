@@ -17,10 +17,10 @@ _KNOWN_STAGES = [
     "derived",
     "features",
     "exports",
-    "dataset_summary",   # compact thesis-ready dataset audit (reads features_fused.csv)
+    "dataset_summary",
     "evaluation",
     "report",
-    "thesis_bundle",   # assemble final thesis figures/tables into report/thesis_bundle/
+    "thesis_bundle",
 ]
 
 
@@ -36,7 +36,7 @@ class WorkflowConfig:
     # Stage options
     sync_method: str = "auto"                        # "multi_anchor"|"one_anchor_adaptive"|"one_anchor_prior"|"signal_only"|"auto"
     split_stage: str = "synced"                      # "parsed"|"synced"
-    orientation_filter: str = "auto"                 # madgwick[_marg]|complementary|ekf[_marg]|auto
+    orientation_filter: str = "auto"                 # mahony
     sample_rate_hz: float = 100.0
 
     # Feature options
@@ -53,12 +53,15 @@ class WorkflowConfig:
     force: bool = False
     skip_exports: bool = False
     evaluation_seed: int = 42
+    evaluation_methods: list[str] = field(
+        default_factory=lambda: ["label_grid"]
+    )
     evaluation_label_col: str = "auto"
     evaluation_exclude_non_riding: bool = False
     # Sweep over the cross-product of {evaluation_label_col} × {quality_levels}.
     # Empty list = use the run's primary quality only (no sweep on that axis).
     evaluation_quality_levels: list[str] = field(
-        default_factory= lambda: ["good"]
+        default_factory= lambda: ["marginal"]
     )
 
     # Classifiers to train in CV ("auto" = all three registered models).
@@ -69,6 +72,14 @@ class WorkflowConfig:
     evaluation_permutation_models: list[str] = field(
         default_factory=lambda: ["hist_gradient_boosting"]
     )
+    event_contrast_models: list[str] = field(
+        default_factory=lambda: ["hist_gradient_boosting", "logistic_regression"]
+    )
+    two_stage_event_models: list[str] = field(
+        default_factory=lambda: ["hist_gradient_boosting", "logistic_regression"]
+    )
+    two_stage_event_tasks: list[str] = field(default_factory=lambda: ["core"])
+    two_stage_target_recall: float = 0.90
 
     thesis_protocol_path: str = ""
     min_quality_label: str = "marginal"
@@ -134,6 +145,18 @@ class WorkflowConfig:
             )
         if not isinstance(self.evaluation_exclude_non_riding, bool):
             errors.append("evaluation_exclude_non_riding must be a boolean")
+        valid_eval_methods = {"label_grid", "event_contrasts", "two_stage_events"}
+        if not isinstance(self.evaluation_methods, list):
+            errors.append("evaluation_methods must be a list")
+        else:
+            bad_methods = [m for m in self.evaluation_methods if m not in valid_eval_methods]
+            if bad_methods:
+                errors.append(
+                    f"evaluation_methods contains invalid entries {bad_methods}; "
+                    f"valid: {sorted(valid_eval_methods)}"
+                )
+            if not self.evaluation_methods:
+                errors.append("evaluation_methods must contain at least one method")
         valid_qualities = {"poor", "marginal", "good"}
         if not isinstance(self.evaluation_quality_levels, list):
             errors.append("evaluation_quality_levels must be a list of quality labels")
@@ -169,6 +192,36 @@ class WorkflowConfig:
 
         _check_model_list("evaluation_models", self.evaluation_models)
         _check_model_list("evaluation_permutation_models", self.evaluation_permutation_models)
+        _check_model_list("event_contrast_models", self.event_contrast_models)
+        _check_model_list("two_stage_event_models", self.two_stage_event_models)
+        valid_two_stage_tasks = {
+            "core",
+            "all",
+            "turning",
+            "deceleration",
+            "high_effort",
+            "posture",
+        }
+        if not isinstance(self.two_stage_event_tasks, list):
+            errors.append("two_stage_event_tasks must be a list")
+        else:
+            bad_tasks = [
+                task for task in self.two_stage_event_tasks if task not in valid_two_stage_tasks
+            ]
+            if bad_tasks:
+                errors.append(
+                    f"two_stage_event_tasks contains invalid entries {bad_tasks}; "
+                    f"valid: {sorted(valid_two_stage_tasks)}"
+                )
+            if {"core", "all"} & set(self.two_stage_event_tasks) and len(self.two_stage_event_tasks) != 1:
+                errors.append("'core' or 'all' must be the only two_stage_event_tasks entry")
+        try:
+            target_recall = float(self.two_stage_target_recall)
+        except (TypeError, ValueError):
+            errors.append("two_stage_target_recall must be numeric")
+        else:
+            if not 0.0 < target_recall <= 1.0:
+                errors.append("two_stage_target_recall must be in (0, 1]")
         return errors
 
 

@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 
 from common.paths import evaluation_root, exports_root
+from evaluation.event_contrasts import run_event_contrast_evaluation
 from evaluation.experiments import resolve_evaluation_models, run_evaluation
-from evaluation.sweep import DEFAULT_LABEL_COLS, DEFAULT_QUALITIES, run_evaluation_sweep
+from evaluation.label_grid import ALL_LABEL_COLS, DEFAULT_QUALITIES, run_label_grid_evaluation
+from evaluation.two_stage_events import run_two_stage_event_evaluation
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -75,6 +77,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip permutation importance (faster but loses the model-agnostic ranking).",
     )
     parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        default=False,
+        help="Skip figure generation.",
+    )
+    parser.add_argument(
         "--evaluation-models",
         nargs="+",
         default=["auto"],
@@ -95,10 +103,67 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--sweep",
+        "--event-contrast-models",
+        nargs="+",
+        default=["hist_gradient_boosting", "logistic_regression"],
+        metavar="MODEL",
+        help=(
+            "Classifier(s) for event contrasts: random_forest, "
+            "hist_gradient_boosting, logistic_regression, or auto alone "
+            "(default: hist_gradient_boosting logistic_regression)."
+        ),
+    )
+    parser.add_argument(
+        "--two-stage-event-models",
+        nargs="+",
+        default=["hist_gradient_boosting", "logistic_regression"],
+        metavar="MODEL",
+        help=(
+            "Classifier(s) for two-stage event evaluation: random_forest, "
+            "hist_gradient_boosting, logistic_regression, or auto alone "
+            "(default: hist_gradient_boosting logistic_regression)."
+        ),
+    )
+    parser.add_argument(
+        "--two-stage-tasks",
+        nargs="+",
+        default=["core"],
+        metavar="TASK",
+        help=(
+            "Two-stage event task(s): core, all, or explicit task names "
+            "(turning, deceleration, high_effort, posture)."
+        ),
+    )
+    parser.add_argument(
+        "--two-stage-target-recall",
+        type=float,
+        default=0.90,
+        help="Detector target recall for threshold selection (default: 0.90).",
+    )
+    parser.add_argument(
+        "--two-stage-hop-s",
+        type=float,
+        default=1.0,
+        help="Window hop in seconds for candidate interval merging (default: 1.0).",
+    )
+    parser.add_argument(
+        "--label-grid",
         action="store_true",
         default=False,
-        help="Run a sweep across the label_col × min_quality grid.",
+        dest="label_grid",
+        help="Run evaluation across all label schemes × quality filters.",
+    )
+    parser.add_argument(
+        "--event-contrasts",
+        action="store_true",
+        default=False,
+        help="Run label-derived event contrast evaluation under output/event_contrasts.",
+    )
+    parser.add_argument(
+        "--two-stage-events",
+        action="store_true",
+        default=False,
+        help="Run hierarchical detector-plus-contrast evaluation under output/two_stage_events.",
     )
     parser.add_argument(
         "--qualities",
@@ -131,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         eval_models = resolve_evaluation_models(args.evaluation_models)
         perm_models = resolve_evaluation_models(args.permutation_models)
+        event_models = resolve_evaluation_models(args.event_contrast_models)
+        two_stage_models = resolve_evaluation_models(args.two_stage_event_models)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -141,13 +208,48 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        if args.sweep:
+        if args.event_contrasts:
+            summary = run_event_contrast_evaluation(
+                features_path=Path(args.features),
+                output_dir=Path(args.output),
+                models=event_models,
+                min_quality=args.min_quality,
+                seed=args.seed,
+                no_plots=args.no_plots,
+            )
+            print("Event contrast evaluation complete.")
+            print(f"  Metric rows       : {summary['n_metric_rows']}")
+            print(f"  Output directory  : {summary['output_dir']}")
+            if summary.get("skipped"):
+                print(f"  Skipped entries   : {len(summary['skipped'])}")
+            return 0
+
+        if args.two_stage_events:
+            summary = run_two_stage_event_evaluation(
+                features_path=Path(args.features),
+                output_dir=Path(args.output),
+                task_names=args.two_stage_tasks,
+                models=two_stage_models,
+                min_quality=args.min_quality,
+                seed=args.seed,
+                target_recall=args.two_stage_target_recall,
+                hop_s=args.two_stage_hop_s,
+                no_plots=args.no_plots,
+            )
+            print("Two-stage event evaluation complete.")
+            print(f"  Metric rows       : {summary['n_metric_rows']}")
+            print(f"  Output directory  : {summary['output_dir']}")
+            if summary.get("skipped"):
+                print(f"  Skipped entries   : {len(summary['skipped'])}")
+            return 0
+
+        if args.label_grid:
             label_cols = (
-                list(DEFAULT_LABEL_COLS)
+                list(ALL_LABEL_COLS)
                 if args.label_col == "auto"
                 else [args.label_col]
             )
-            sweep_summary = run_evaluation_sweep(
+            grid_summary = run_label_grid_evaluation(
                 features_path=Path(args.features),
                 output_dir=Path(args.output),
                 label_cols=label_cols,
@@ -155,12 +257,12 @@ def main(argv: list[str] | None = None) -> int:
                 primary_quality=args.primary_quality,
                 seed=args.seed,
                 exclude_non_riding=args.exclude_non_riding,
-                no_plots=False,
+                no_plots=args.no_plots,
                 evaluation_models=eval_models,
                 permutation_models=perm_models,
             )
             print(
-                f"Sweep complete. {sweep_summary['n_runs_ok']}/{sweep_summary['n_runs']} "
+                f"Label-grid complete. {grid_summary['n_runs_ok']}/{grid_summary['n_runs']} "
                 "run(s) succeeded."
             )
             return 0
@@ -173,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             min_quality=args.min_quality,
             exclude_non_riding=args.exclude_non_riding,
+            no_plots=args.no_plots,
             compute_permutation_importance=args.permutation,
             evaluation_models=eval_models,
             permutation_models=perm_models,
