@@ -140,6 +140,31 @@ def _recording_count(df: pd.DataFrame) -> int:
     return 0
 
 
+def _with_section_metadata(df: pd.DataFrame, section_id: str) -> pd.DataFrame:
+    """Return feature frame with section metadata columns at the front."""
+    recording_name = _recording_from_section(section_id)
+    metadata_values = {
+        "recording_name": recording_name,
+        "session": _session_from_recording(recording_name),
+        "section_id": section_id,
+    }
+    missing = {
+        col: value
+        for col, value in metadata_values.items()
+        if col not in df.columns
+    }
+
+    if missing:
+        metadata = pd.DataFrame(missing, index=df.index)
+        out = pd.concat([metadata, df], axis=1, copy=False)
+    else:
+        out = df
+
+    metadata_cols = [c for c in metadata_values if c in out.columns]
+    data_cols = [c for c in out.columns if c not in metadata_cols]
+    return out.loc[:, metadata_cols + data_cols].copy()
+
+
 def aggregate_features(
     recording_names: list[str] | None = None,
     *,
@@ -185,16 +210,7 @@ def aggregate_features(
             log.warning("Failed to read %s: %s", project_relative_path(features_csv), exc)
             continue
 
-        # Inject section_id if not present
-        if "section_id" not in df.columns:
-            df.insert(0, "section_id", section_dir.name)
-        if "recording_name" not in df.columns:
-            df.insert(0, "recording_name", _recording_from_section(section_dir.name))
-        if "session" not in df.columns:
-            insert_at = 1 if "recording_name" in df.columns else 0
-            df.insert(insert_at, "session", _session_from_recording(_recording_from_section(section_dir.name)))
-
-        frames.append(df)
+        frames.append(_with_section_metadata(df, section_dir.name))
         log.debug("Loaded %d rows from %s", len(df), project_relative_path(features_csv))
 
     if not frames:

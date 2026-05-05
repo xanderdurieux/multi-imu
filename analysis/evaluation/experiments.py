@@ -32,6 +32,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from common.paths import project_relative_path, read_csv, write_csv
 from features.label_config import default_label_config
 from features.labels import (
+    ensure_resolved_labels,
     resolve_label_from_tokens,
     to_activity_label,
     to_binary_label,
@@ -532,7 +533,9 @@ def run_evaluation(
     # (`scenario_labels`). features.csv only persists `scenario_labels`; the
     # evaluation stage owns the choice of target taxonomy, so changing the
     # label scheme never requires re-running feature extraction.
-    df = ensure_resolved_labels(df)
+    # `overwrite=True` because incremental exports can leave stale empty
+    # `scenario_label*` columns from prior schema versions.
+    df = ensure_resolved_labels(df, overwrite=True)
 
     # Apply quality filter
     if "overall_quality_label" in df.columns:

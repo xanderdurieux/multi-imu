@@ -229,14 +229,24 @@ def plot_labels_features(
         log.warning("features.csv missing 'window_start_ms' column: %s", feat_csv)
         return None
 
-    t_ms = pd.to_numeric(df["window_start_ms"], errors="coerce").to_numpy(dtype=float)
-    finite_mask = np.isfinite(t_ms)
-    if not finite_mask.any():
+    # features.csv appends event-aligned windows after sliding ones, so window
+    # rows are not in time order. Sort by start so the plotted line follows
+    # time, then plot each value at the window center to align with the spans.
+    df["window_start_ms"] = pd.to_numeric(df["window_start_ms"], errors="coerce")
+    df["window_end_ms"] = pd.to_numeric(df.get("window_end_ms", df["window_start_ms"]), errors="coerce")
+    df = (
+        df.dropna(subset=["window_start_ms"])
+        .sort_values("window_start_ms")
+        .reset_index(drop=True)
+    )
+    if df.empty:
         log.warning("No valid window_start_ms values in %s", feat_csv)
         return None
 
-    t0_ms = t_ms[finite_mask][0]
-    t_s = (t_ms - t0_ms) / 1000.0
+    end_ms = df["window_end_ms"].fillna(df["window_start_ms"])
+    center_ms = ((df["window_start_ms"] + end_ms) / 2.0).to_numpy(dtype=float)
+    t0_ms = float(df["window_start_ms"].iloc[0])
+    t_s = (center_ms - t0_ms) / 1000.0
 
     feat_cols = _select_feature_cols(df, top_n=top_n)
     if not feat_cols:

@@ -46,10 +46,10 @@ def plot_section_pipeline_stage(section_dir: Path, stage: str) -> None:
         plot_derived_stage(section_dir)
         plot_labels(section_dir, stage="derived")
     elif stage == "features":
-        from visualization.plot_features import plot_features_stage
+        from visualization.plot_features import plot_features_full
         from visualization.plot_labels import plot_labels
 
-        plot_features_stage(section_dir)
+        plot_features_full(section_dir)
         plot_labels(section_dir, stage="calibrated")
         plot_labels(section_dir, stage="features")
     else:
