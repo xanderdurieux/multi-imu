@@ -132,7 +132,7 @@ Per-run under `data/evaluation/label_grid/<label_col>__q-<quality>/`:
 - `imu_contribution.csv`: paired fold deltas for `fused` vs single/fused variants.
 - `imu_contribution_per_class.csv`: per-class F1 deltas, with `better`,
   `baseline`, `model`, and class columns.
-- `per_class_reports/<model>/per_class_report_<feature_set>.json`: sklearn
+- `<model>/per_class_report/per_class_report_<feature_set>.json`: sklearn
   per-class report.
 - `<model>/fold_scores.csv`: fold-wise accuracy and macro-F1, with
   `feature_set`.
@@ -149,8 +149,8 @@ Per-run under `data/evaluation/label_grid/<label_col>__q-<quality>/`:
 - `<model>/permutation_importance_by_group.csv`: permutation importance
   aggregated into bike/rider/cross groups.
 - Optional when `label_grid_save_trained_models` or `--save-models` is enabled:
-  `saved_models/<model>/trained_model_<feature_set>.joblib` plus
-  `saved_models/<model>/trained_model_<feature_set>_meta.json`.
+  `<model>/saved_models/trained_model_<feature_set>.joblib` plus
+  `<model>/saved_models/trained_model_<feature_set>_meta.json`.
 - Binary targets only: `<model>/binary_metrics_<feature_set>.json`,
   `<model>/misclassified_<feature_set>.csv`, and optional per-section overlay
   figures.

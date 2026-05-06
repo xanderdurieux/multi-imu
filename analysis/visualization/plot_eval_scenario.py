@@ -522,10 +522,20 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to plot feature importance by group %s: %s", fi_grp_path.name, exc)
 
-        legacy_report_paths = sorted(model_dir.glob("per_class_report_*.json"))
-        report_dir = output_dir / "per_class_reports" / model_name
-        report_paths = sorted(report_dir.glob("per_class_report_*.json")) if report_dir.exists() else []
-        for pc_path in [*report_paths, *legacy_report_paths]:
+        model_report_dir = model_dir / "per_class_report"
+        report_paths = (
+            sorted(model_report_dir.glob("per_class_report_*.json"))
+            if model_report_dir.exists()
+            else []
+        )
+        legacy_flat_report_paths = sorted(model_dir.glob("per_class_report_*.json"))
+        legacy_root_report_dir = output_dir / "per_class_reports" / model_name
+        legacy_root_report_paths = (
+            sorted(legacy_root_report_dir.glob("per_class_report_*.json"))
+            if legacy_root_report_dir.exists()
+            else []
+        )
+        for pc_path in [*report_paths, *legacy_flat_report_paths, *legacy_root_report_paths]:
             try:
                 _, _, fs_name = pc_path.stem.partition("per_class_report_")
                 data = json.loads(pc_path.read_text(encoding="utf-8"))

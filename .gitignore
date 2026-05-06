@@ -1,6 +1,9 @@
-data/
 docs/
 *.zip
+
+# Data
+analysis/data/*
+!analysis/data/_configs/*
 
 # IDE
 .vscode/

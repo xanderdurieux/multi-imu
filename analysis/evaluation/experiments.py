@@ -749,7 +749,7 @@ def run_evaluation(
                         label_col=label_col,
                         feature_set=fs_name,
                         model_name=model_name,
-                        output_dir=output_dir / "saved_models" / model_name,
+                        output_dir=output_dir / model_name / "saved_models",
                     )
                 except Exception as exc:
                     log.warning("Could not save trained model for %s: %s", key, exc)
@@ -802,7 +802,7 @@ def run_evaluation(
                 log.warning("Confusion analysis failed for %s: %s", key, exc)
 
             # Write per-class report (OOF-based)
-            per_class_dir = output_dir / "per_class_reports" / model_name
+            per_class_dir = output_dir / model_name / "per_class_report"
             per_class_dir.mkdir(parents=True, exist_ok=True)
             per_class_path = per_class_dir / f"per_class_report_{fs_name}.json"
             per_class_path.write_text(
