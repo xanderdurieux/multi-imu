@@ -10,7 +10,7 @@ from pathlib import Path
 from common.paths import evaluation_root, exports_root
 from evaluation.event_contrasts import run_event_contrast_evaluation
 from evaluation.experiments import resolve_evaluation_models, run_evaluation
-from evaluation.label_grid import ALL_LABEL_COLS, DEFAULT_QUALITIES, run_label_grid_evaluation
+from evaluation.label_grid import DEFAULT_QUALITIES, all_label_cols, run_label_grid_evaluation
 from evaluation.two_stage_events import run_two_stage_event_evaluation
 
 
@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--exclude-non-riding",
         action="store_true",
         default=False,
-        help="Drop windows with scenario_label_binary=non_riding before evaluation.",
+        help="Drop windows with scenario_label_safety=non_riding before evaluation.",
     )
     parser.add_argument(
         "--no-permutation",
@@ -99,7 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="MODEL",
         help=(
             "Models for permutation importance (subset of evaluation models "
-            "recommended); auto alone runs all three (default: random_forest)."
+            "recommended); auto alone runs all three; none alone disables "
+            "permutation importance (default: random_forest)."
         ),
     )
     parser.add_argument(
@@ -201,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    if not eval_models:
+        print("Error: --evaluation-models cannot be none", file=sys.stderr)
+        return 1
+    if not event_models:
+        print("Error: --event-contrast-models cannot be none", file=sys.stderr)
+        return 1
+    if not two_stage_models:
+        print("Error: --two-stage-event-models cannot be none", file=sys.stderr)
+        return 1
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -245,13 +255,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.label_grid:
             label_cols = (
-                list(ALL_LABEL_COLS)
+                list(all_label_cols())
                 if args.label_col == "auto"
                 else [args.label_col]
             )
             grid_summary = run_label_grid_evaluation(
                 features_path=Path(args.features),
-                output_dir=Path(args.output),
+                output_dir=Path(args.output) / "label_grid",
                 label_cols=label_cols,
                 qualities=args.qualities,
                 primary_quality=args.primary_quality,

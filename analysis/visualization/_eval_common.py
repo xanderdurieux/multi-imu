@@ -233,7 +233,9 @@ def plot_imu_contribution(
     width = min(0.24, 0.78 / max(len(models), 1))
     offsets = np.linspace(-(len(models) - 1) / 2, (len(models) - 1) / 2, len(models)) * width
 
-    fig, ax = plt.subplots(figsize=(max(6.5, 1.4 * len(pairs) + 2.5), 4.2))
+    n_pairs = len(pairs)
+    fig_w = max(6.5, 1.6 * n_pairs + 2.5)
+    fig, ax = plt.subplots(figsize=(fig_w, 4.8))
 
     for model, offset in zip(models, offsets):
         sub = df[df["model"] == model].set_index("pair").reindex(pairs)
@@ -252,19 +254,30 @@ def plot_imu_contribution(
             alpha=0.9,
         )
 
-        for xi, mean, p in zip(x + offset, means, pvals):
+        for xi, mean, std, p in zip(x + offset, means, stds, pvals):
             star = ""
             if p is not None and not pd.isna(p):
                 if float(p) < 0.01:
                     star = "**"
                 elif float(p) < 0.05:
                     star = "*"
-            label_y = mean + (max(stds) if len(stds) else 0) + 0.005
-            ax.text(xi, label_y, f"{mean:+.3f}{star}", ha="center", va="bottom", fontsize=6.5)
+            gap = float(std) + 0.006
+            if mean >= 0:
+                label_y = mean + gap
+                va = "bottom"
+            else:
+                label_y = mean - gap
+                va = "top"
+            ax.text(
+                xi, label_y, f"{mean:+.3f}{star}",
+                ha="center", va=va, fontsize=6,
+                rotation=45 if n_pairs > 4 else 0,
+            )
 
     ax.axhline(0, color="#333", lw=0.7)
     ax.set_xticks(x)
-    ax.set_xticklabels(pairs, fontsize=8)
+    rotate = 30 if n_pairs > 4 else 0
+    ax.set_xticklabels(pairs, fontsize=8, rotation=rotate, ha="right" if rotate else "center")
     ax.set_ylabel(f"Δ {metric}")
     ax.set_title(title or f"IMU contribution — paired Δ {metric}")
     ax.grid(axis="y", alpha=0.3, lw=0.5)

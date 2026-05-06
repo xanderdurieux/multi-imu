@@ -120,10 +120,10 @@ def _build_label_scheme_counts(df: pd.DataFrame) -> pd.DataFrame:
 
     rows: list[dict] = []
     scheme_col = {
-        "fine": "scenario_label",
+        "fine": "scenario_label_fine",
         "activity": "scenario_label_activity",
         "coarse": "scenario_label_coarse",
-        "binary": "scenario_label_binary",
+        "safety": "scenario_label_safety",
     }
 
     for scheme, col in scheme_col.items():
@@ -178,8 +178,8 @@ def _build_exclusion_funnel(df: pd.DataFrame, *, min_quality: str = "marginal") 
     _step("labeled", len(df2), len(df1), "scenario_label == 'unlabeled'")
 
     # Non-riding filter (applies for binary safety target)
-    if "scenario_label_binary" in df2.columns:
-        df3 = df2[df2["scenario_label_binary"] != "non_riding"]
+    if "scenario_label_safety" in df2.columns:
+        df3 = df2[df2["scenario_label_safety"] != "non_riding"]
     elif "scenario_label" in df2.columns:
         df3 = df2[~df2["scenario_label"].isin(non_riding_labels())]
     else:

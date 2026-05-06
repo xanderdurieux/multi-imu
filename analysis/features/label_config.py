@@ -12,7 +12,21 @@ from common.paths import load_label_config_data
 
 @dataclass(frozen=True)
 class SetBasedBinaryScheme:
-    """Data container for set based binary scheme."""
+    """Data container for set based binary scheme.
+
+    Two resolution modes, selected by configuration:
+
+    Literal mode (``negative_labels`` provided):
+        Only tokens that appear in ``positive_labels`` or ``negative_labels``
+        are considered. Tokens outside both sets are discarded. If neither set
+        matches the remaining tokens the result is ``unlabeled_value``.
+
+    Qualify-all-others mode (``qualify_all_others=True``):
+        Tokens in ``exclude_labels`` are discarded first. Among the remaining
+        tokens, any token in ``positive_labels`` is a positive hit; any other
+        token is treated as evidence for the negative class. If no tokens
+        survive the exclude filter the result is ``unlabeled_value``.
+    """
 
     name: str
     positive_value: str
@@ -20,28 +34,30 @@ class SetBasedBinaryScheme:
     unlabeled_value: str
     positive_labels: frozenset[str]
     negative_labels: frozenset[str] = frozenset()
-    qualifier_labels: frozenset[str] = frozenset()
+    qualify_all_others: bool = False
+    exclude_labels: frozenset[str] = frozenset()
     on_overlap: str = "positive"  # "positive" | "negative"
 
     def resolve(self, tokens: set[str]) -> str:
-        """Resolve."""
+        """Resolve a token set to a class label."""
+        if self.qualify_all_others:
+            filtered = tokens - self.exclude_labels
+            if not filtered:
+                return self.unlabeled_value
+            pos_hit = bool(filtered & self.positive_labels)
+            neg_hit = bool(filtered - self.positive_labels)
+            if pos_hit and neg_hit:
+                return self.positive_value if self.on_overlap == "positive" else self.negative_value
+            return self.positive_value if pos_hit else self.negative_value
+
+        # Literal mode: only look at the explicitly configured label sets.
         pos_hit = bool(tokens & self.positive_labels)
         neg_hit = bool(tokens & self.negative_labels)
-
-        # Literal mode: both class lists are explicit.
-        if self.negative_labels:
-            if pos_hit and neg_hit:
-                return self.negative_value if self.on_overlap == "negative" else self.positive_value
-            if neg_hit:
-                return self.negative_value
-            if pos_hit:
-                return self.positive_value
-            return self.unlabeled_value
-
-        # Qualified-positive mode: positive vs (qualifier without positive).
+        if pos_hit and neg_hit:
+            return self.positive_value if self.on_overlap == "positive" else self.negative_value
         if pos_hit:
             return self.positive_value
-        if self.qualifier_labels and (tokens & self.qualifier_labels):
+        if neg_hit:
             return self.negative_value
         return self.unlabeled_value
 
@@ -98,23 +114,15 @@ class LabelConfig:
         ):
             return unlabeled
 
-        if scheme == "scenario_label_binary":
+        if scheme == "scenario_label_safety":
             if label in self.binary_non_riding_labels:
                 return self.binary_non_riding_value
             if label in self.binary_incident_labels:
                 return self.binary_incident_value
             return self.binary_normal_value
 
-        if scheme == "scenario_label_riding":
-            if label in self.binary_non_riding_labels:
-                return self.binary_non_riding_value
-            return "riding"
-
         sb = self.set_based_scheme(scheme)
         if sb is not None:
-            # Single-label fallback for set-based objectives: pretend the
-            # one fine label is the entire overlap set.  Matches the
-            # legacy behaviour of `to_riding_label` etc.
             return sb.resolve({label})
 
         return self.derived_maps.get(scheme, {}).get(
@@ -177,21 +185,23 @@ def _build_set_based_scheme(name: str, block: dict[str, Any]) -> SetBasedBinaryS
     neg_labels = frozenset(
         str(s).strip() for s in (block.get("negative_labels") or []) if str(s).strip()
     )
-    qual_labels = frozenset(
-        str(s).strip() for s in (block.get("qualifier_labels") or []) if str(s).strip()
+    qualify_all = bool(block.get("qualify_all_others", False))
+    exclude_labels = frozenset(
+        str(s).strip() for s in (block.get("exclude_labels") or []) if str(s).strip()
     )
 
-    if not neg_labels and not qual_labels:
+    if not neg_labels and not qualify_all:
         raise ValueError(
             f"label config: {name!r} needs either 'negative_labels' (literal mode) "
-            "or 'qualifier_labels' (qualified-positive mode)."
+            "or 'qualify_all_others: true' (qualify-all-others mode)."
         )
-    overlap = pos_labels & neg_labels
-    if overlap:
-        raise ValueError(
-            f"label config: {name!r} positive/negative label sets overlap: "
-            + ", ".join(sorted(overlap))
-        )
+    if neg_labels:
+        overlap = pos_labels & neg_labels
+        if overlap:
+            raise ValueError(
+                f"label config: {name!r} positive/negative label sets overlap: "
+                + ", ".join(sorted(overlap))
+            )
 
     on_overlap = str(block.get("on_overlap", "positive")).strip().lower()
     if on_overlap not in {"positive", "negative"}:
@@ -206,7 +216,8 @@ def _build_set_based_scheme(name: str, block: dict[str, Any]) -> SetBasedBinaryS
         unlabeled_value=str(block.get("unlabeled_value", "unlabeled")).strip() or "unlabeled",
         positive_labels=pos_labels,
         negative_labels=neg_labels,
-        qualifier_labels=qual_labels,
+        qualify_all_others=qualify_all,
+        exclude_labels=exclude_labels,
         on_overlap=on_overlap,
     )
 
@@ -239,18 +250,18 @@ def _build(payload: dict[str, Any]) -> LabelConfig:
         unlabeled_values[scheme] = str(block.get("unlabeled_value", "unlabeled")).strip() or "unlabeled"
         unknown_values[scheme] = str(block.get("unknown_value", "unknown")).strip() or "unknown"
 
-    binary = derived.get("scenario_label_binary")
+    binary = derived.get("scenario_label_safety")
     if not isinstance(binary, dict):
-        raise ValueError("label config: missing 'scenario_label_binary' object.")
-    unlabeled_values["scenario_label_binary"] = (
+        raise ValueError("label config: missing 'scenario_label_safety' object.")
+    unlabeled_values["scenario_label_safety"] = (
         str(binary.get("unlabeled_value", "unlabeled")).strip() or "unlabeled"
     )
 
     incident_labels = frozenset(
-        _string_list(binary.get("incident_labels"), field_name="scenario_label_binary.incident_labels")
+        _string_list(binary.get("incident_labels"), field_name="scenario_label_safety.incident_labels")
     )
     non_riding_labels = frozenset(
-        _string_list(binary.get("non_riding_labels"), field_name="scenario_label_binary.non_riding_labels")
+        _string_list(binary.get("non_riding_labels"), field_name="scenario_label_safety.non_riding_labels")
     )
 
     overlap = incident_labels & non_riding_labels

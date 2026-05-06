@@ -18,6 +18,7 @@ from common.paths import project_relative_path
 
 from visualization.plot_calibration_segments import (
     plot_calibration_segments_from_detection,
+    plot_zoomed_calibration_sequence_from_detection,
 )
 from visualization.plot_sensor import plot_sensor_data
 
@@ -200,6 +201,12 @@ def process_session(session_name: str, *, plot: bool = True) -> None:
                     df_work,
                     segments,
                     out_path=out_dir / f"{sensor_name}_cal_segments.png",
+                    sensor=sensor_name,
+                )
+                plot_zoomed_calibration_sequence_from_detection(
+                    df_work,
+                    segments,
+                    out_path=out_dir / f"{sensor_name}_cal_sequence_zoom.png",
                     sensor=sensor_name,
                 )
 

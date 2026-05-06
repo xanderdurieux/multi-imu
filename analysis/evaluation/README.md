@@ -80,6 +80,9 @@ uv run python -m evaluation \
   --permutation-models hist_gradient_boosting
 ```
 
+Use `--permutation-models none` or `"evaluation_permutation_models": ["none"]`
+in workflow config to skip permutation importance.
+
 Directly — single label/quality run:
 
 ```bash
@@ -90,37 +93,49 @@ uv run python -m evaluation \
 
 ### Outputs
 
-Top-level under `data/evaluation/`:
+Under `data/evaluation/label_grid/`:
 
 - `label_grid_summary.json`: run grid, success/failure metadata, model choices,
   quality filters.
 - `label_grid_metrics.csv`: aggregate metrics across label schemes, qualities,
   models, and feature sets.
 - `label_grid_imu_contribution.csv`: aggregate paired sensor-ablation deltas.
-- `figures/label_grid_heatmap_macro_f1.png`, `label_grid_heatmap_accuracy.png`,
-  `label_grid_quality_grid_macro_f1.png`.
 
-Per-run under `data/evaluation/<label_col>__q-<quality>/`:
+Report-stage summary figures are rendered from `label_grid_metrics.csv` under
+`data/report/figures/evaluation/label_grid/`:
 
-- `metrics_table.csv`: accuracy and macro-F1 for each model and feature set.
+- `label_grid_heatmap_macro_f1.png`
+- `label_grid_heatmap_accuracy.png`
+- `label_grid_quality_grid_macro_f1.png`
+
+Per-run under `data/evaluation/label_grid/<label_col>__q-<quality>/`:
+
 - `evaluation_summary.json`: run metadata, classes, and metric summary.
+- `metrics_table.csv`: accuracy and macro-F1 for each model and feature set.
 - `imu_contribution.csv`: paired fold deltas for `fused` vs single/fused variants.
 - `imu_contribution_per_class_<pair>__<model>.csv`: per-class F1 deltas.
-- `<model>/confusion_matrix_<feature_set>.csv`: OOF confusion matrix.
-- `<model>/confusion_per_class_<feature_set>.csv`: per-class recall/precision/F1
-  and dominant confusions.
-- `<model>/confusion_top_pairs_<feature_set>.csv`: largest off-diagonal confusion
-  pairs.
-- `<model>/fold_scores_<feature_set>.csv`: fold-wise accuracy and macro-F1.
 - `<model>/per_class_report_<feature_set>.json`: sklearn per-class report.
-- `<model>/feature_importance_<feature_set>.csv`: model-native importances.
-- `<model>/permutation_importance_<feature_set>.csv`: grouped permutation
-  importance (primary-quality runs only, for configured permutation models).
-- `<model>/permutation_importance_by_group_<feature_set>.csv`: permutation
-  importance aggregated into bike/rider/cross groups.
+- `<model>/fold_scores.csv`: fold-wise accuracy and macro-F1, with
+  `feature_set`.
+- `<model>/confusion_matrix.csv`: long-form OOF confusion matrices, with
+  `feature_set`.
+- `<model>/confusion_per_class.csv`: per-class recall/precision/F1 and dominant
+  confusions, with `feature_set`.
+- `<model>/confusion_top_pairs.csv`: largest off-diagonal confusion pairs, with
+  `feature_set`.
+- `<model>/feature_importance.csv`: model-native importances, already
+  consolidated by `feature_set`.
+- `<model>/permutation_importance.csv`: grouped permutation importance,
+  primary-quality runs only, for configured permutation models.
+- `<model>/permutation_importance_by_group.csv`: permutation importance
+  aggregated into bike/rider/cross groups.
 - Binary targets only: `<model>/binary_metrics_<feature_set>.json`,
   `<model>/misclassified_<feature_set>.csv`, and optional per-section overlay
   figures.
+
+Per-model CSVs that used to be split as one file per feature set, such as
+`confusion_top_pairs_bike.csv` and `confusion_top_pairs_rider.csv`, are merged
+into a single file with a `feature_set` column.
 
 ---
 

@@ -29,51 +29,27 @@ from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-from common.paths import project_relative_path, read_csv, write_csv
+from common.paths import merge_csv, project_relative_path, read_csv, write_csv
 from features.label_config import default_label_config
 from features.labels import (
     ensure_resolved_labels,
     resolve_label_from_tokens,
     to_activity_label,
-    to_binary_label,
     to_coarse_label,
-    to_riding_label,
+    to_safety_label,
     to_set_based_label,
 )
 
 _DERIVED_LABEL_MAPPERS: dict[str, Any] = {
     "scenario_label_activity": to_activity_label,
     "scenario_label_coarse": to_coarse_label,
-    "scenario_label_binary": to_binary_label,
-    "scenario_label_riding": to_riding_label,
-    "scenario_label_cornering": None,
-    "scenario_label_head_motion": None,
+    "scenario_label_safety": to_safety_label,
 }
 
 
 def _label_tokens(raw: str) -> set[str]:
     """Return normalized label tokens from a pipe-delimited overlap string."""
     return {token.strip() for token in str(raw or "").split("|") if token.strip()}
-
-
-def _derive_cornering_label(raw: str) -> str:
-    """Return a cornering vs non-cornering label from an overlap set."""
-    tokens = _label_tokens(raw)
-    if not tokens:
-        return "unlabeled"
-    if "cornering" in tokens:
-        return "cornering"
-    return "non_cornering"
-
-
-def _derive_head_motion_label(raw: str) -> str:
-    """Return a head-motion vs non-head-motion label from an overlap set."""
-    tokens = _label_tokens(raw)
-    if not tokens:
-        return "unlabeled"
-    if tokens & {"head_movement", "shoulder_check"}:
-        return "head_motion"
-    return "non_head_motion"
 
 log = logging.getLogger(__name__)
 
@@ -89,12 +65,14 @@ _META_COLS = {
     # Labels
     "scenario_label",
     "scenario_labels",
+    "scenario_label_fine",
     "scenario_label_activity",
     "scenario_label_coarse",
-    "scenario_label_binary",
+    "scenario_label_safety",
     "scenario_label_riding",
-    "scenario_label_cornering",
+    "scenario_label_turning",
     "scenario_label_head_motion",
+    "scenario_label_standing",
     # Quality summary (section- and window-level)
     "overall_quality_label",
     "overall_quality_score",
@@ -123,10 +101,16 @@ EVALUATION_MODEL_IDS: tuple[str, ...] = tuple(_MODEL_REGISTRY.keys())
 
 
 def resolve_evaluation_models(models: list[str] | tuple[str, ...]) -> tuple[str, ...]:
-    """Expand ``[\"auto\"]`` to all registered models; otherwise validate and dedupe."""
+    """Expand special model selectors, otherwise validate and dedupe."""
     if not models:
         raise ValueError("evaluation_models must be a non-empty list")
     seq = list(models)
+    if any(m == "none" for m in seq):
+        if len(seq) != 1:
+            raise ValueError(
+                '"none" must be the sole entry when used'
+            )
+        return ()
     if any(m == "auto" for m in seq):
         if len(seq) != 1:
             raise ValueError(
@@ -139,12 +123,20 @@ def resolve_evaluation_models(models: list[str] | tuple[str, ...]) -> tuple[str,
         if m not in _MODEL_REGISTRY:
             raise ValueError(
                 f"unknown evaluation model {m!r}; "
-                f"expected one of {list(_MODEL_REGISTRY)!r} or ['auto']"
+                f"expected one of {list(_MODEL_REGISTRY)!r}, ['auto'], or ['none']"
             )
         if m not in seen:
             seen.add(m)
             out.append(m)
     return tuple(out)
+
+
+def resolve_optional_evaluation_models(models: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Resolve model selectors for optional evaluation steps."""
+    if not models:
+        return ()
+    return resolve_evaluation_models(models)
+
 
 _MODEL_DISPLAY: dict[str, str] = {
     "random_forest": "Random Forest",
@@ -333,12 +325,14 @@ def _export_misclassified(
         # a clearly-correct label or with a missing/ambiguous one.
         "scenario_labels",
         "scenario_label",
+        "scenario_label_fine",
         "scenario_label_activity",
         "scenario_label_coarse",
-        "scenario_label_binary",
+        "scenario_label_safety",
         "scenario_label_riding",
-        "scenario_label_cornering",
+        "scenario_label_turning",
         "scenario_label_head_motion",
+        "scenario_label_standing",
         label_col,
         "overall_quality_label",
         "overall_quality_score",
@@ -382,6 +376,34 @@ def _export_misclassified(
         project_relative_path(output_path),
     )
     return int(len(rows))
+
+
+def _confusion_matrix_rows(cm_df: pd.DataFrame, feature_set: str) -> pd.DataFrame:
+    """Return a feature-set keyed long confusion matrix table."""
+    out = (
+        cm_df.rename_axis("true")
+        .reset_index()
+        .melt(id_vars="true", var_name="predicted", value_name="count")
+    )
+    out.insert(0, "feature_set", feature_set)
+    return out
+
+
+def _remove_legacy_feature_set_csvs(model_dir: Path, feature_set: str) -> None:
+    """Remove old per-feature-set CSV outputs after writing consolidated files."""
+    for stem in (
+        "confusion_matrix",
+        "confusion_per_class",
+        "confusion_top_pairs",
+        "fold_scores",
+    ):
+        path = model_dir / f"{stem}_{feature_set}.csv"
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            log.warning("Could not remove legacy evaluation CSV %s: %s", path, exc)
 
 
 def _build_model(name: str, seed: int) -> Any:
@@ -516,7 +538,7 @@ def run_evaluation(
     cv_models = resolve_evaluation_models(
         list(evaluation_models) if evaluation_models is not None else ["auto"]
     )
-    perm_models_resolved = resolve_evaluation_models(permutation_models)
+    perm_models_resolved = resolve_optional_evaluation_models(permutation_models)
 
     # ------------------------------------------------------------------
     # 1. Load data
@@ -552,12 +574,15 @@ def run_evaluation(
     # requiring the features stage to be re-run.
     cfg_labels = default_label_config()
     if "scenario_labels" in df.columns:
-        # Prefer deriving from the multi-label overlap set whenever possible.
-        if label_col in cfg_labels.set_based_scheme_names:
+        token_series = df["scenario_labels"].fillna("unlabeled").astype(str)
+        if label_col == "scenario_label_fine":
+            df[label_col] = token_series.map(
+                lambda s: resolve_label_from_tokens(s.split("|"), config=cfg_labels)
+            )
+            log.info("Derived %s from scenario_labels (multi-label set)", label_col)
+        elif label_col in cfg_labels.set_based_scheme_names:
             df[label_col] = (
-                df["scenario_labels"]
-                .fillna("unlabeled")
-                .astype(str)
+                token_series
                 .map(
                     lambda s: to_set_based_label(
                         label_col,
@@ -568,50 +593,21 @@ def run_evaluation(
             )
             log.info("Derived %s from scenario_labels (multi-label set)", label_col)
         elif label_col in _DERIVED_LABEL_MAPPERS:
-            token_series = df["scenario_labels"].fillna("unlabeled").astype(str)
-            if label_col == "scenario_label_activity":
-                df[label_col] = token_series.map(
-                    lambda s: to_activity_label(
-                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
-                        config=cfg_labels,
-                    )
+            mapper = _DERIVED_LABEL_MAPPERS[label_col]
+            df[label_col] = token_series.map(
+                lambda s, m=mapper: m(
+                    resolve_label_from_tokens(s.split("|"), config=cfg_labels),
+                    config=cfg_labels,
                 )
-            elif label_col == "scenario_label_coarse":
-                df[label_col] = token_series.map(
-                    lambda s: to_coarse_label(
-                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
-                        config=cfg_labels,
-                    )
-                )
-            elif label_col == "scenario_label_binary":
-                df[label_col] = token_series.map(
-                    lambda s: to_binary_label(
-                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
-                        config=cfg_labels,
-                    )
-                )
-            elif label_col == "scenario_label_riding":
-                df[label_col] = token_series.map(
-                    lambda s: to_riding_label(
-                        resolve_label_from_tokens(s.split("|"), config=cfg_labels),
-                        config=cfg_labels,
-                    )
-                )
-            elif label_col == "scenario_label_cornering":
-                df[label_col] = token_series.map(_derive_cornering_label)
-            elif label_col == "scenario_label_head_motion":
-                df[label_col] = token_series.map(_derive_head_motion_label)
+            )
             log.info("Derived %s from scenario_labels (multi-label set)", label_col)
-        else:
-            # If the requested label_col is not a known derived scheme and it
-            # already exists in the frame, keep it; otherwise it will be
-            # handled by the existing presence check below.
-            pass
     else:
-        # Fallback: derive from a pre-collapsed `scenario_label` when the
-        # multi-label set is not present (legacy feature tables).
         if label_col not in df.columns:
-            if label_col in cfg_labels.set_based_scheme_names:
+            if label_col == "scenario_label_fine":
+                if "scenario_label" in df.columns:
+                    df[label_col] = df["scenario_label"]
+                    log.info("Derived %s from scenario_label", label_col)
+            elif label_col in cfg_labels.set_based_scheme_names:
                 raise ValueError(
                     f"Cannot derive {label_col!r}: column 'scenario_labels' missing "
                     "(set-based schemes require the pipe-delimited overlap set)."
@@ -623,19 +619,16 @@ def run_evaluation(
                         df["scenario_label"].fillna("unlabeled").astype(str).map(mapper)
                     )
                     log.info("Derived %s from scenario_label", label_col)
-                else:
-                    # Will be caught by the presence check below.
-                    pass
 
     if exclude_non_riding:
-        binary_col = "scenario_label_binary"
-        if binary_col not in df.columns:
+        safety_col = "scenario_label_safety"
+        if safety_col not in df.columns:
             raise ValueError(
                 "Cannot exclude non-riding windows: 'scenario_labels' missing "
-                "(needed to derive scenario_label_binary)."
+                "(needed to derive scenario_label_safety)."
             )
         before = len(df)
-        df = df[df[binary_col] != "non_riding"].copy()
+        df = df[df[safety_col] != "non_riding"].copy()
         log.info("Excluded non-riding rows: %d → %d", before, len(df))
 
     # Drop unlabeled rows
@@ -755,26 +748,37 @@ def run_evaluation(
                 }
             )
 
-            # Write confusion matrix — rows = true class, cols = predicted class.
-            # Built from OOF predictions; label index preserved for readability.
-            cm_path = output_dir / model_name / f"confusion_matrix_{fs_name}.csv"
+            model_dir = output_dir / model_name
+
+            # Write confusion outputs directly as feature-set keyed CSVs.  The
+            # confusion matrix is stored in long form so all feature sets share
+            # one schema.
             cm_df = pd.DataFrame(
                 result["confusion_matrix"],
                 index=le.classes_,
                 columns=le.classes_,
             )
-            cm_df.to_csv(cm_path, index=True)
+            cm_path = model_dir / "confusion_matrix.csv"
+            merge_csv(_confusion_matrix_rows(cm_df, fs_name), cm_path, ["feature_set"])
             log.debug("Wrote confusion matrix to %s", project_relative_path(cm_path))
 
             # Confusion analysis: hardest classes + dominant confusion targets +
             # top-N off-diagonal pairs.  Cheap (pure NumPy on the matrix);
             # written next to the matrix it derives from.
             try:
-                from evaluation.confusion_analysis import write_confusion_analysis
-                write_confusion_analysis(
-                    cm_df,
-                    output_dir / model_name,
-                    config_name=fs_name,
+                from evaluation.confusion_analysis import analyze_confusion_matrix
+                per_class_df, pairs_df = analyze_confusion_matrix(cm_df)
+                per_class_df.insert(0, "feature_set", fs_name)
+                pairs_df.insert(0, "feature_set", fs_name)
+                merge_csv(
+                    per_class_df,
+                    model_dir / "confusion_per_class.csv",
+                    ["feature_set"],
+                )
+                merge_csv(
+                    pairs_df,
+                    model_dir / "confusion_top_pairs.csv",
+                    ["feature_set"],
                 )
             except Exception as exc:
                 log.warning("Confusion analysis failed for %s: %s", key, exc)
@@ -857,10 +861,13 @@ def run_evaluation(
                             overlay_dir = (
                                 output_dir / model_name / f"misclassified_overlays_{fs_name}"
                             )
+                            neg_cls = next(c for c in list(le.classes_) if c != positive_class)
                             plot_misclassified_overlay(
                                 miscls_path,
                                 overlay_dir,
                                 title_suffix=f"{model_name} / {fs_name}",
+                                positive_class=positive_class,
+                                negative_class=neg_cls,
                             )
                         except Exception as exc:
                             log.warning(
@@ -869,16 +876,18 @@ def run_evaluation(
                             )
 
             # Write fold-wise scores so variance is inspectable
-            fold_path = output_dir / model_name / f"fold_scores_{fs_name}.csv"
             fold_df = pd.DataFrame(
                 {
+                    "feature_set": fs_name,
                     "fold": range(1, n_splits + 1),
                     "accuracy": result["fold_accuracies"],
                     "macro_f1": result["fold_f1s"],
                 }
             )
-            write_csv(fold_df, fold_path)
+            fold_path = model_dir / "fold_scores.csv"
+            merge_csv(fold_df, fold_path, ["feature_set"])
             log.debug("Wrote fold scores to %s", project_relative_path(fold_path))
+            _remove_legacy_feature_set_csvs(model_dir, fs_name)
 
             # Accumulate feature importances (written consolidated after the loop)
             if result["feature_importances"] is not None:
@@ -892,9 +901,37 @@ def run_evaluation(
                 fi_frames.setdefault(model_name, []).append(fi_df)
 
     for model_name, frames in fi_frames.items():
+        fi_all = pd.concat(frames, ignore_index=True)
         fi_path = output_dir / model_name / "feature_importance.csv"
-        write_csv(pd.concat(frames, ignore_index=True), fi_path)
+        write_csv(fi_all, fi_path)
         log.debug("Wrote feature importances to %s", project_relative_path(fi_path))
+
+        grp_rows: list[dict] = []
+        for fs_name_g, sub_g in fi_all.groupby("feature_set", sort=False):
+            groups: dict[str, list[float]] = {}
+            for feat, imp in zip(sub_g["feature"], sub_g["importance"]):
+                if feat.startswith("bike_") or feat.startswith("sporsa_"):
+                    grp = "bike"
+                elif feat.startswith("rider_") or feat.startswith("arduino_"):
+                    grp = "rider"
+                elif feat.startswith("cross_"):
+                    grp = "cross"
+                else:
+                    grp = "other"
+                groups.setdefault(grp, []).append(float(imp))
+            for grp, vals in groups.items():
+                grp_rows.append(
+                    {
+                        "feature_set": fs_name_g,
+                        "sensor_group": grp,
+                        "total_importance": round(sum(vals), 6),
+                        "n_features": len(vals),
+                    }
+                )
+        if grp_rows:
+            grp_path = output_dir / model_name / "feature_importance_by_group.csv"
+            write_csv(pd.DataFrame(grp_rows), grp_path)
+            log.debug("Wrote feature importance by group to %s", project_relative_path(grp_path))
 
     # ------------------------------------------------------------------
     # 5. Write metrics table

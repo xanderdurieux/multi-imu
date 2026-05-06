@@ -200,6 +200,21 @@ def _build_output_df(
     return out
 
 
+def _plot_orientation_outputs(section_dir: Path) -> None:
+    """Generate orientation-stage diagnostics, including label overlays."""
+    try:
+        from visualization.plot_orientation import plot_orientation_stage
+        plot_orientation_stage(section_dir)
+    except Exception as exc:
+        log.warning("Orientation plots failed for %s: %s", section_dir.name, exc)
+
+    try:
+        from visualization.plot_labels import plot_labels
+        plot_labels(section_dir, stage="orientation")
+    except Exception as exc:
+        log.warning("Orientation label overlay failed for %s: %s", section_dir.name, exc)
+
+
 # ---------------------------------------------------------------------------
 # Public section/recording pipeline
 # ---------------------------------------------------------------------------
@@ -219,6 +234,7 @@ def process_section_orientation(
 
     if stats_json.exists() and not force:
         log.info("Orientation already exists for %s — skipping", project_relative_path(section_dir))
+        _plot_orientation_outputs(section_dir)
         return read_json_file(stats_json)
 
     orient_dir.mkdir(parents=True, exist_ok=True)
@@ -292,13 +308,8 @@ def process_section_orientation(
             section_dir.name, sensor, residual, _quality_label(residual),
         )
 
-        try:
-            from visualization.plot_orientation import plot_orientation_stage
-            plot_orientation_stage(section_dir)
-        except Exception as exc:
-            log.warning("Orientation plot failed for %s/%s: %s", section_dir.name, sensor, exc)
-
     write_json_file(stats_json, stats)
+    _plot_orientation_outputs(section_dir)
     log.info("Orientation done for %s → %s", section_dir.name, project_relative_path(orient_dir))
     return stats
 

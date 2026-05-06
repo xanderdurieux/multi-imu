@@ -123,6 +123,34 @@ def plot_stage_data(
     except Exception as exc:
         log.warning("Failed comparison plot for %s: %s", stage_dir, exc)
 
+    if stage_dir.name == "parsed":
+        from parser.calibration_segments import load_calibration_segments_from_json
+        from visualization.plot_calibration_segments import (
+            plot_zoomed_calibration_sequence_from_detection,
+        )
+
+        recording_name = stage_dir.parent.name
+        for sensor in selected_sensors:
+            df = load_sensor_df(stage_dir, sensor)
+            if df is None or df.empty:
+                continue
+            try:
+                segments = load_calibration_segments_from_json(recording_name, sensor)
+            except Exception as exc:
+                log.debug("No parsed calibration segments for %s/%s: %s", recording_name, sensor, exc)
+                continue
+            try:
+                saved_path = plot_zoomed_calibration_sequence_from_detection(
+                    df,
+                    segments,
+                    out_path=stage_dir / f"{sensor}_cal_sequence_zoom.png",
+                    sensor=sensor,
+                )
+                if saved_path is not None:
+                    saved.append(saved_path)
+            except Exception as exc:
+                log.warning("Failed zoomed calibration sequence plot for %s/%s: %s", stage_dir, sensor, exc)
+
     return saved
 
 

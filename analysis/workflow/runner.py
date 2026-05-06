@@ -8,15 +8,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from common.paths import (
     data_root,
     evaluation_root,
     exports_root,
     iter_sections_for_recording,
     project_relative_path,
+    read_csv,
     recording_sort_key,
     recording_stage_dir,
     recordings_root,
+    write_csv,
     write_json_file,
 )
 from visualization.stage_plots import (
@@ -28,7 +32,7 @@ from .config import WorkflowConfig
 
 log = logging.getLogger(__name__)
 
-from evaluation.label_grid import ALL_LABEL_COLS as _EVALUATION_LABEL_COLS
+from evaluation.label_grid import all_label_cols as _evaluation_label_cols
 
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
     """Resolve the list of recording names to process."""
@@ -60,6 +64,141 @@ def _collect_sections(recordings: list[str]) -> list[Path]:
     for rec in recordings:
         sections.extend(iter_sections_for_recording(rec))
     return sections
+
+
+def _recording_from_section_id(section_id: str) -> str:
+    """Return recording name from a section id such as ``2026-02-26_r1s2``."""
+    name = str(section_id)
+    if "s" not in name:
+        return name
+    return name.rsplit("s", 1)[0]
+
+
+def _session_from_recording(recording_name: str) -> str:
+    """Return session name from a recording name such as ``2026-02-26_r1``."""
+    name = str(recording_name)
+    return name.rsplit("_", 1)[0] if "_" in name else name
+
+
+def _evaluation_scope_configured(cfg: WorkflowConfig) -> bool:
+    """Return whether evaluation should use a scoped feature-table copy."""
+    return any(
+        (
+            cfg.evaluation_sessions,
+            cfg.evaluation_exclude_sessions,
+            cfg.evaluation_recordings,
+            cfg.evaluation_exclude_recordings,
+        )
+    )
+
+
+def _feature_recording_series(df: pd.DataFrame) -> pd.Series:
+    """Return per-row recording names from a feature table."""
+    if "recording_name" in df.columns:
+        return df["recording_name"].astype(str)
+    if "section_id" in df.columns:
+        return df["section_id"].astype(str).map(_recording_from_section_id)
+    raise ValueError("features table must contain recording_name or section_id")
+
+
+def _feature_session_series(df: pd.DataFrame, recordings: pd.Series) -> pd.Series:
+    """Return per-row session names from a feature table."""
+    if "session" in df.columns:
+        return df["session"].astype(str)
+    return recordings.map(_session_from_recording)
+
+
+def _prepare_evaluation_features(
+    fused: Path,
+    cfg: WorkflowConfig,
+    *,
+    method: str,
+    output_dir: Path,
+) -> Path | None:
+    """Return the feature CSV to evaluate, preserving the full exported feature set."""
+    if not _evaluation_scope_configured(cfg):
+        return fused
+
+    df = read_csv(fused)
+    if df.empty:
+        log.warning("features_fused.csv is empty — skipping evaluation")
+        return None
+
+    recordings = _feature_recording_series(df)
+    sessions = _feature_session_series(df, recordings)
+
+    include_mask = pd.Series(True, index=df.index)
+    include_parts: list[pd.Series] = []
+    if cfg.evaluation_sessions:
+        include_sessions = {str(s) for s in cfg.evaluation_sessions}
+        include_parts.append(sessions.isin(include_sessions))
+    if cfg.evaluation_recordings:
+        include_recordings = {str(r) for r in cfg.evaluation_recordings}
+        include_parts.append(recordings.isin(include_recordings))
+    if include_parts:
+        include_mask = include_parts[0].copy()
+        for part in include_parts[1:]:
+            include_mask |= part
+
+    exclude_mask = pd.Series(False, index=df.index)
+    if cfg.evaluation_exclude_sessions:
+        exclude_sessions = {str(s) for s in cfg.evaluation_exclude_sessions}
+        exclude_mask |= sessions.isin(exclude_sessions)
+    if cfg.evaluation_exclude_recordings:
+        exclude_recordings = {str(r) for r in cfg.evaluation_exclude_recordings}
+        exclude_mask |= recordings.isin(exclude_recordings)
+
+    scoped = df.loc[include_mask & ~exclude_mask].copy()
+    scoped_recordings = _feature_recording_series(scoped) if not scoped.empty else pd.Series(dtype=str)
+    scoped_sessions = (
+        _feature_session_series(scoped, scoped_recordings)
+        if not scoped.empty
+        else pd.Series(dtype=str)
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "features_scoped.csv"
+    metadata_path = output_dir / "features_scoped_metadata.json"
+
+    metadata = {
+        "source": project_relative_path(fused),
+        "output": project_relative_path(out_path),
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "evaluation_method": method,
+        "filters": {
+            "evaluation_sessions": list(cfg.evaluation_sessions),
+            "evaluation_exclude_sessions": list(cfg.evaluation_exclude_sessions),
+            "evaluation_recordings": list(cfg.evaluation_recordings),
+            "evaluation_exclude_recordings": list(cfg.evaluation_exclude_recordings),
+        },
+        "n_rows_source": int(len(df)),
+        "n_rows_scoped": int(len(scoped)),
+        "n_sessions_source": int(sessions.nunique()),
+        "n_sessions_scoped": int(scoped_sessions.nunique()),
+        "n_recordings_source": int(recordings.nunique()),
+        "n_recordings_scoped": int(scoped_recordings.nunique()),
+    }
+
+    write_json_file(metadata_path, metadata, indent=2)
+    if scoped.empty:
+        log.warning(
+            "%s evaluation scope produced 0 rows from %s; metadata written to %s",
+            method,
+            project_relative_path(fused),
+            project_relative_path(metadata_path),
+        )
+        return None
+
+    write_csv(scoped, out_path)
+    log.info(
+        "%s evaluation scope: %d/%d rows, %d recording(s), %d session(s) -> %s",
+        method,
+        len(scoped),
+        len(df),
+        metadata["n_recordings_scoped"],
+        metadata["n_sessions_scoped"],
+        project_relative_path(out_path),
+    )
+    return out_path
 
 
 def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[str, Any]:
@@ -262,102 +401,139 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
         fused = exports_root() / "features_fused.csv"
         out = evaluation_root()
         if fused.exists():
-            if "label_grid" in cfg.evaluation_methods:
-                from evaluation.label_grid import run_label_grid_evaluation
-                label_cols = (
-                    list(_EVALUATION_LABEL_COLS)
-                    if cfg.evaluation_label_col == "auto"
-                    else [cfg.evaluation_label_col]
-                )
+            seen_methods: set[str] = set()
+            for method in cfg.evaluation_methods:
+                if method in seen_methods:
+                    continue
+                seen_methods.add(method)
 
-                # Always include the primary quality so permutation importance
-                # is produced even when the user narrows the quality axis.
-                qualities = list(cfg.evaluation_quality_levels)
-                if cfg.min_quality_label not in qualities:
-                    qualities = [cfg.min_quality_label] + qualities
-
-                try:
-                    eval_models = resolve_evaluation_models(cfg.evaluation_models)
-                    perm_models = resolve_evaluation_models(cfg.evaluation_permutation_models)
-                    log.info(
-                        "Running label-grid evaluation: label_cols=%s × qualities=%s "
-                        "models=%s permutation=%s -> %s",
-                        label_cols,
-                        qualities,
-                        eval_models,
-                        perm_models,
-                        project_relative_path(out),
-                    )
-                    grid_summary = run_label_grid_evaluation(
+                if method == "label_grid":
+                    from evaluation.label_grid import run_label_grid_evaluation
+                    method_out = out / "label_grid"
+                    eval_features = _prepare_evaluation_features(
                         fused,
-                        output_dir=out,
-                        label_cols=label_cols,
-                        qualities=qualities,
-                        primary_quality=cfg.min_quality_label,
-                        seed=cfg.evaluation_seed,
-                        exclude_non_riding=cfg.evaluation_exclude_non_riding,
-                        no_plots=cfg.no_plots,
-                        evaluation_models=eval_models,
-                        permutation_models=perm_models,
+                        cfg,
+                        method=method,
+                        output_dir=method_out,
                     )
-                    result["ok"] += int(grid_summary.get("n_runs_ok", 0))
-                    result["failed"] += int(
-                        grid_summary.get("n_runs", 0) - grid_summary.get("n_runs_ok", 0)
+                    if eval_features is None:
+                        result["skipped"] += 1
+                        continue
+                    label_cols = (
+                        list(_evaluation_label_cols())
+                        if cfg.evaluation_label_col == "auto"
+                        else [cfg.evaluation_label_col]
                     )
-                except Exception as exc:
-                    log.error("label-grid evaluation failed: %s", exc)
-                    result["failed"] += 1
+                    # Always include the primary quality so permutation importance
+                    # is produced even when the user narrows the quality axis.
+                    qualities = list(cfg.evaluation_quality_levels)
+                    if cfg.min_quality_label not in qualities:
+                        qualities = [cfg.min_quality_label] + qualities
+                    try:
+                        eval_models = resolve_evaluation_models(cfg.evaluation_models)
+                        perm_models = resolve_evaluation_models(cfg.evaluation_permutation_models)
+                        log.info(
+                            "Running label-grid evaluation: label_cols=%s × qualities=%s "
+                            "models=%s permutation=%s features=%s -> %s",
+                            label_cols,
+                            qualities,
+                            eval_models,
+                            perm_models,
+                            project_relative_path(eval_features),
+                            project_relative_path(method_out),
+                        )
+                        grid_summary = run_label_grid_evaluation(
+                            eval_features,
+                            output_dir=method_out,
+                            label_cols=label_cols,
+                            qualities=qualities,
+                            primary_quality=cfg.min_quality_label,
+                            seed=cfg.evaluation_seed,
+                            exclude_non_riding=cfg.evaluation_exclude_non_riding,
+                            no_plots=cfg.no_plots,
+                            evaluation_models=eval_models,
+                            permutation_models=perm_models,
+                        )
+                        result["ok"] += int(grid_summary.get("n_runs_ok", 0))
+                        result["failed"] += int(
+                            grid_summary.get("n_runs", 0) - grid_summary.get("n_runs_ok", 0)
+                        )
+                    except Exception as exc:
+                        log.error("label-grid evaluation failed: %s", exc)
+                        result["failed"] += 1
 
-            if "event_contrasts" in cfg.evaluation_methods:
-                try:
-                    from evaluation.event_contrasts import run_event_contrast_evaluation
-                    event_models = resolve_evaluation_models(cfg.event_contrast_models)
-                    log.info(
-                        "Running event contrast evaluation: models=%s -> %s",
-                        event_models,
-                        project_relative_path(out / "event_contrasts"),
-                    )
-                    summary = run_event_contrast_evaluation(
-                        fused,
-                        output_dir=out,
-                        models=event_models,
-                        group_col="recording_name",
-                        min_quality=cfg.min_quality_label,
-                        seed=cfg.evaluation_seed,
-                        no_plots=cfg.no_plots,
-                    )
-                    result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
-                    result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
-                except Exception as exc:
-                    log.error("event contrast evaluation failed: %s", exc)
-                    result["failed"] += 1
+                elif method == "event_contrasts":
+                    try:
+                        from evaluation.event_contrasts import run_event_contrast_evaluation
+                        method_out = out / "event_contrasts"
+                        eval_features = _prepare_evaluation_features(
+                            fused,
+                            cfg,
+                            method=method,
+                            output_dir=method_out,
+                        )
+                        if eval_features is None:
+                            result["skipped"] += 1
+                            continue
+                        event_models = resolve_evaluation_models(cfg.event_contrast_models)
+                        log.info(
+                            "Running event contrast evaluation: models=%s features=%s -> %s",
+                            event_models,
+                            project_relative_path(eval_features),
+                            project_relative_path(method_out),
+                        )
+                        summary = run_event_contrast_evaluation(
+                            eval_features,
+                            output_dir=out,
+                            models=event_models,
+                            group_col="recording_name",
+                            min_quality=cfg.min_quality_label,
+                            seed=cfg.evaluation_seed,
+                            no_plots=cfg.no_plots,
+                        )
+                        result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
+                        result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
+                    except Exception as exc:
+                        log.error("event contrast evaluation failed: %s", exc)
+                        result["failed"] += 1
 
-            if "two_stage_events" in cfg.evaluation_methods:
-                try:
-                    from evaluation.two_stage_events import run_two_stage_event_evaluation
-                    two_stage_models = resolve_evaluation_models(cfg.two_stage_event_models)
-                    log.info(
-                        "Running two-stage event evaluation: tasks=%s models=%s -> %s",
-                        cfg.two_stage_event_tasks,
-                        two_stage_models,
-                        project_relative_path(out / "two_stage_events"),
-                    )
-                    summary = run_two_stage_event_evaluation(
-                        fused,
-                        output_dir=out,
-                        task_names=cfg.two_stage_event_tasks,
-                        models=two_stage_models,
-                        min_quality=cfg.min_quality_label,
-                        seed=cfg.evaluation_seed,
-                        target_recall=cfg.two_stage_target_recall,
-                        hop_s=cfg.hop_s,
-                        no_plots=cfg.no_plots,
-                    )
-                    result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
-                    result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
-                except Exception as exc:
-                    log.error("two-stage event evaluation failed: %s", exc)
-                    result["failed"] += 1
+                elif method == "two_stage_events":
+                    try:
+                        from evaluation.two_stage_events import run_two_stage_event_evaluation
+                        method_out = out / "two_stage_events"
+                        eval_features = _prepare_evaluation_features(
+                            fused,
+                            cfg,
+                            method=method,
+                            output_dir=method_out,
+                        )
+                        if eval_features is None:
+                            result["skipped"] += 1
+                            continue
+                        two_stage_models = resolve_evaluation_models(cfg.two_stage_event_models)
+                        log.info(
+                            "Running two-stage event evaluation: tasks=%s models=%s features=%s -> %s",
+                            cfg.two_stage_event_tasks,
+                            two_stage_models,
+                            project_relative_path(eval_features),
+                            project_relative_path(method_out),
+                        )
+                        summary = run_two_stage_event_evaluation(
+                            eval_features,
+                            output_dir=out,
+                            task_names=cfg.two_stage_event_tasks,
+                            models=two_stage_models,
+                            min_quality=cfg.min_quality_label,
+                            seed=cfg.evaluation_seed,
+                            target_recall=cfg.two_stage_target_recall,
+                            hop_s=cfg.hop_s,
+                            no_plots=cfg.no_plots,
+                        )
+                        result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
+                        result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
+                    except Exception as exc:
+                        log.error("two-stage event evaluation failed: %s", exc)
+                        result["failed"] += 1
         else:
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1

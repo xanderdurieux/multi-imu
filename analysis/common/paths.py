@@ -395,8 +395,8 @@ def static_calibration_json(sensor: str) -> Path:
 _EVALUATION_LABEL_DIR_PRIORITY = (
     "scenario_label_activity",
     "scenario_label_coarse",
-    "scenario_label",
-    "scenario_label_binary",
+    "scenario_label_fine",
+    "scenario_label_safety",
 )
 
 

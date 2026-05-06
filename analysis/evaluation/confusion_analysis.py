@@ -77,8 +77,9 @@ def analyze_confusion_matrix(
                     ),
                 }
             )
+    pair_cols = ["true", "predicted", "count", "share_of_true"]
     pairs_df = (
-        pd.DataFrame(pairs)
+        pd.DataFrame(pairs, columns=pair_cols)
         .sort_values(["count", "share_of_true"], ascending=[False, False])
         .head(top_pairs)
         .reset_index(drop=True)

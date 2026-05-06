@@ -75,6 +75,30 @@ def main(argv: list[str] | None = None) -> None:
         help="Skip generating plots.",
     )
     parser.add_argument(
+        "--evaluation-session",
+        nargs="+",
+        metavar="SESSION",
+        help="Evaluate only these session prefixes without changing the exported feature set.",
+    )
+    parser.add_argument(
+        "--exclude-evaluation-session",
+        nargs="+",
+        metavar="SESSION",
+        help="Exclude these session prefixes from evaluation without changing the exported feature set.",
+    )
+    parser.add_argument(
+        "--evaluation-recording",
+        nargs="+",
+        metavar="RECORDING",
+        help="Evaluate only these recordings without changing the exported feature set.",
+    )
+    parser.add_argument(
+        "--exclude-evaluation-recording",
+        nargs="+",
+        metavar="RECORDING",
+        help="Exclude these recordings from evaluation without changing the exported feature set.",
+    )
+    parser.add_argument(
         "--list-stages",
         action="store_true",
         help="Print available stages and exit.",
@@ -112,6 +136,14 @@ def main(argv: list[str] | None = None) -> None:
         cfg.no_plots = True
     if args.stage:
         cfg.stages = list(args.stage)
+    if args.evaluation_session is not None:
+        cfg.evaluation_sessions = list(args.evaluation_session)
+    if args.exclude_evaluation_session is not None:
+        cfg.evaluation_exclude_sessions = list(args.exclude_evaluation_session)
+    if args.evaluation_recording is not None:
+        cfg.evaluation_recordings = list(args.evaluation_recording)
+    if args.exclude_evaluation_recording is not None:
+        cfg.evaluation_exclude_recordings = list(args.exclude_evaluation_recording)
 
     log_path = _configure_logging(cfg.log_to_file)
 

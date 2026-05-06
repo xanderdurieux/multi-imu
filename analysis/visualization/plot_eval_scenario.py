@@ -330,7 +330,7 @@ def plot_per_class_f1_feature_set_comparison(
     classes: list[str],
     output_path: Path,
     *,
-    feature_sets: tuple[str, ...] = ("bike", "rider", "fused"),
+    feature_sets: tuple[str, ...] = ("bike", "rider", "fused_no_cross", "fused"),
     title: str = "Per-class F1-score by feature set",
 ) -> Path | None:
     """Per-class F1 with feature sets side by side for each model."""
@@ -484,6 +484,25 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to plot feature importance %s: %s", fi_path.name, exc)
 
+        fi_grp_path = model_dir / "feature_importance_by_group.csv"
+        if fi_grp_path.exists():
+            try:
+                fi_grp_all = pd.read_csv(fi_grp_path)
+                for fs_name, grp_df in fi_grp_all.groupby("feature_set", sort=False):
+                    human = (
+                        f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                        f"{fs_name.replace('_', ' ').title()}"
+                    )
+                    out = model_figures_dir / f"feature_importance_by_group_{fs_name}.png"
+                    plot_sensor_group_contribution(
+                        grp_df.drop(columns=["feature_set"]),
+                        out,
+                        title=f"Feature importance by sensor group — {human}",
+                    )
+                    generated.append(out)
+            except Exception as exc:
+                log.warning("Failed to plot feature importance by group %s: %s", fi_grp_path.name, exc)
+
         for pc_path in sorted(model_dir.glob("per_class_report_*.json")):
             try:
                 _, _, fs_name = pc_path.stem.partition("per_class_report_")
@@ -516,7 +535,7 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to plot per-class F1 for %s: %s", fs_name, exc)
 
-        out = figures_dir / "per_class_f1_feature_sets.png"
+        out = figures_dir / "per_class_f1_by_feature_set.png"
         try:
             result = plot_per_class_f1_feature_set_comparison(
                 all_results_disk,
@@ -787,6 +806,8 @@ def plot_misclassified_overlay_for_section(
     output_path: Path,
     *,
     title_suffix: str = "",
+    positive_class: str = "riding",
+    negative_class: str = "non_riding",
 ) -> Path | None:
     """IMU signal overlay with highlighted FP/FN windows for one section."""
     sec_dir = section_dir(section_id)
@@ -879,9 +900,9 @@ def plot_misclassified_overlay_for_section(
 
     legend_handles = [
         mpatches.Patch(color=_FP_COLOR, alpha=_MISCLS_ALPHA,
-                       label=f"FP — predicted riding (n={n_fp})"),
+                       label=f"FP — predicted {positive_class} (n={n_fp})"),
         mpatches.Patch(color=_FN_COLOR, alpha=_MISCLS_ALPHA,
-                       label=f"FN — predicted non_riding (n={n_fn})"),
+                       label=f"FN — predicted {negative_class} (n={n_fn})"),
     ] + _label_patches(label_colors)
     fig.legend(handles=legend_handles, loc="lower center",
                ncol=min(6, len(legend_handles)),
@@ -905,6 +926,8 @@ def plot_misclassified_overlay(
     output_dir: Path,
     *,
     title_suffix: str = "",
+    positive_class: str = "riding",
+    negative_class: str = "non_riding",
 ) -> list[Path]:
     """Generate per-section misclassified window overlays from a misclassified CSV."""
     from common.paths import project_relative_path
@@ -929,7 +952,10 @@ def plot_misclassified_overlay(
         out = output_dir / f"{sec_id}.png"
         try:
             saved = plot_misclassified_overlay_for_section(
-                str(sec_id), rows, out, title_suffix=title_suffix,
+                str(sec_id), rows, out,
+                title_suffix=title_suffix,
+                positive_class=positive_class,
+                negative_class=negative_class,
             )
         except Exception as exc:
             log.warning("Misclassified overlay failed for %s: %s", sec_id, exc)

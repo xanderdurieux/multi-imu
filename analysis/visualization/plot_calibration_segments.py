@@ -119,3 +119,151 @@ def plot_calibration_segments_from_detection(
     _dedupe_legend(ax_bot, loc="upper right", fontsize=8, framealpha=0.92)
 
     save_figure(fig, out_path)
+
+
+def _dedupe_legend(ax: Axes, **kw: object) -> None:
+    """Draw a legend with duplicate labels removed."""
+    handles, labels = ax.get_legend_handles_labels()
+    seen: dict[str, object] = {}
+    for handle, label in zip(handles, labels):
+        if not label or label == "_":
+            continue
+        seen.setdefault(label, handle)
+    if seen:
+        ax.legend(list(seen.values()), list(seen.keys()), **kw)
+
+
+def _selected_segment(
+    segments: Sequence[CalibrationSegment],
+    segment_index: int | None,
+) -> tuple[int, CalibrationSegment] | None:
+    """Return the requested segment, or the strongest segment by default."""
+    seg_list = list(segments)
+    if not seg_list:
+        return None
+    if segment_index is not None:
+        if 0 <= segment_index < len(seg_list):
+            return segment_index, seg_list[segment_index]
+        log.warning("Calibration segment index %d out of range (%d segment(s))", segment_index, len(seg_list))
+    return max(
+        enumerate(seg_list),
+        key=lambda item: (
+            item[1].peak_strength,
+            len(item[1].peak_ms or []),
+            item[1].end_ms - item[1].start_ms,
+        ),
+    )
+
+
+def plot_zoomed_calibration_sequence_from_detection(
+    df: pd.DataFrame,
+    segments: Sequence[CalibrationSegment],
+    out_path: Path,
+    *,
+    sensor: str,
+    segment_index: int | None = None,
+    flank_s: float = 5.0,
+) -> Path | None:
+    """Plot a presentation-friendly zoom around one detected calibration sequence."""
+    selected = _selected_segment(segments, segment_index)
+    if selected is None:
+        log.info("No calibration segments for %s — skipping zoom plot", sensor)
+        return None
+
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    if df.empty:
+        return None
+
+    ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+    finite_ts = ts_ms[np.isfinite(ts_ms)]
+    if finite_ts.size == 0:
+        return None
+
+    selected_index, seg = selected
+    peaks = [float(p) for p in (seg.peak_ms or []) if np.isfinite(p)]
+    if peaks:
+        burst_start_ms = min(peaks)
+        burst_end_ms = max(peaks)
+    else:
+        burst_start_ms = seg.start_ms + 0.5 * (seg.end_ms - seg.start_ms)
+        burst_end_ms = burst_start_ms
+
+    flank_ms = max(0.0, flank_s) * 1000.0
+    zoom_start_ms = max(float(finite_ts[0]), burst_start_ms - flank_ms)
+    zoom_end_ms = min(float(finite_ts[-1]), burst_end_ms + flank_ms)
+    if zoom_end_ms <= zoom_start_ms:
+        zoom_start_ms = max(float(finite_ts[0]), seg.start_ms)
+        zoom_end_ms = min(float(finite_ts[-1]), seg.end_ms)
+    if zoom_end_ms <= zoom_start_ms:
+        return None
+
+    mask = np.isfinite(ts_ms) & (ts_ms >= zoom_start_ms) & (ts_ms <= zoom_end_ms)
+    if not mask.any():
+        return None
+
+    ts_s = (ts_ms[mask] - zoom_start_ms) / 1000.0
+    acc_norm, dynamic_smooth = _compute_plot_signals(df, ts_ms)
+    acc_zoom = acc_norm[mask]
+    dyn_zoom = dynamic_smooth[mask]
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+
+    def _span(ax: Axes, start_ms: float, end_ms: float, color: str, label: str, alpha: float) -> None:
+        start_ms = max(start_ms, zoom_start_ms)
+        end_ms = min(end_ms, zoom_end_ms)
+        if end_ms <= start_ms:
+            return
+        ax.axvspan(
+            (start_ms - zoom_start_ms) / 1000.0,
+            (end_ms - zoom_start_ms) / 1000.0,
+            color=color,
+            alpha=alpha,
+            lw=0,
+            zorder=0,
+            label=label,
+        )
+
+    pre_end_ms = seg.start_ms + max(0.0, seg.static_pre_ms)
+    post_start_ms = seg.end_ms - max(0.0, seg.static_post_ms)
+    for ax in (ax_top, ax_bot):
+        _span(ax, seg.start_ms, pre_end_ms, "green", "pre-static", 0.16)
+        _span(ax, burst_start_ms, burst_end_ms, "#d62728", "tap sequence", 0.14)
+        _span(ax, post_start_ms, seg.end_ms, "lime", "post-static", 0.16)
+        for idx, peak_ms in enumerate(peaks):
+            if zoom_start_ms <= peak_ms <= zoom_end_ms:
+                ax.axvline(
+                    (peak_ms - zoom_start_ms) / 1000.0,
+                    color="#d62728",
+                    lw=0.8,
+                    alpha=0.75,
+                    zorder=3,
+                    label="tap peak" if idx == 0 else "_",
+                )
+
+    x_plot, y_plot = filter_valid_plot_xy(ts_s, acc_zoom)
+    ax_top.plot(x_plot, y_plot, lw=1.1, color="#1f77b4", zorder=2, label="|acc|")
+    ax_top.axhline(
+        y=_NOMINAL_GRAVITY_MS2,
+        color="gray",
+        lw=0.8,
+        ls="--",
+        alpha=0.7,
+        zorder=1,
+        label="g",
+    )
+    ax_top.set_ylabel("|acc| (m/s²)")
+    ax_top.set_title(f"{sensor} calibration sequence {selected_index + 1}")
+    ax_top.grid(True, alpha=0.25)
+
+    x_s, y_s = filter_valid_plot_xy(ts_s, dyn_zoom)
+    ax_bot.plot(x_s, y_s, lw=1.1, color="#4c78a8", zorder=2, label="Smoothed |acc-g|")
+    ax_bot.set_xlabel("Time in zoom window (s)")
+    ax_bot.set_ylabel("Smoothed |acc-g| (m/s²)")
+    ax_bot.grid(True, alpha=0.25)
+    ax_bot.set_xlim(0.0, (zoom_end_ms - zoom_start_ms) / 1000.0)
+
+    _dedupe_legend(ax_top, loc="upper right", fontsize=8, framealpha=0.92, ncol=3)
+    _dedupe_legend(ax_bot, loc="upper right", fontsize=8, framealpha=0.92)
+
+    fig.tight_layout()
+    return save_figure(fig, out_path)

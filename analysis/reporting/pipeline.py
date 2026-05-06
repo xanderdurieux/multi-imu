@@ -25,6 +25,14 @@ from features.labels import ensure_resolved_labels
 log = logging.getLogger(__name__)
 
 
+def _display_path(path: Path | str) -> str:
+    """Return a readable project-relative path when possible."""
+    try:
+        return project_relative_path(path)
+    except ValueError:
+        return str(Path(path))
+
+
 def _copy_evaluation_figures(evaluation_dir: Path, report_eval_dir: Path) -> int:
     """Copy evaluation PNGs into ``report/figures/evaluation/``."""
     if not evaluation_dir.is_dir():
@@ -32,21 +40,14 @@ def _copy_evaluation_figures(evaluation_dir: Path, report_eval_dir: Path) -> int
         return 0
 
     sources: list[tuple[Path, Path]] = []
-
-    root_figures_dir = evaluation_dir / "figures"
-    if root_figures_dir.is_dir():
+    for figures_dir in sorted(d for d in evaluation_dir.rglob("figures") if d.is_dir()):
+        if figures_dir == evaluation_dir / "figures":
+            relative_parent = Path()
+        else:
+            relative_parent = figures_dir.parent.relative_to(evaluation_dir)
         sources.extend(
-            (png, Path(png.name))
-            for png in sorted(root_figures_dir.glob("*.png"))
-        )
-
-    for model_dir in sorted(d for d in evaluation_dir.iterdir() if d.is_dir() and d.name != "figures"):
-        model_figures_dir = model_dir / "figures"
-        if not model_figures_dir.is_dir():
-            continue
-        sources.extend(
-            (png, Path(model_dir.name) / png.name)
-            for png in sorted(model_figures_dir.glob("*.png"))
+            (png, relative_parent / png.name)
+            for png in sorted(figures_dir.glob("*.png"))
         )
 
     if not sources:
@@ -61,6 +62,60 @@ def _copy_evaluation_figures(evaluation_dir: Path, report_eval_dir: Path) -> int
         shutil.copy2(src_path, dest)
         n += 1
     log.info("Copied %d evaluation figures to %s", n, project_relative_path(report_eval_dir))
+    return n
+
+
+def _find_label_grid_metrics(evaluation_dir: Path) -> Path | None:
+    """Return the current or legacy label-grid metrics path, if present."""
+    candidates = [
+        evaluation_dir / "label_grid" / "label_grid_metrics.csv",
+        evaluation_dir / "label_grid_metrics.csv",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _generate_evaluation_summary_figures(evaluation_dir: Path, report_eval_dir: Path) -> int:
+    """Render report-stage summary figures from available evaluation tables."""
+    n = 0
+    label_grid_metrics = _find_label_grid_metrics(evaluation_dir)
+    if label_grid_metrics is not None:
+        try:
+            from visualization.plot_eval_scenario import (
+                plot_label_grid_heatmap,
+                plot_label_grid_quality_grid,
+            )
+
+            grid_metrics_df = read_csv(label_grid_metrics)
+            if not grid_metrics_df.empty:
+                label_grid_dir = report_eval_dir / "label_grid"
+                label_grid_dir.mkdir(parents=True, exist_ok=True)
+                plot_label_grid_heatmap(
+                    grid_metrics_df,
+                    label_grid_dir / "label_grid_heatmap_macro_f1.png",
+                    metric="macro_f1",
+                )
+                plot_label_grid_heatmap(
+                    grid_metrics_df,
+                    label_grid_dir / "label_grid_heatmap_accuracy.png",
+                    metric="accuracy",
+                )
+                plot_label_grid_quality_grid(
+                    grid_metrics_df,
+                    label_grid_dir / "label_grid_quality_grid_macro_f1.png",
+                    metric="macro_f1",
+                )
+                n += 3
+                log.info(
+                    "Rendered label-grid summary figures from %s to %s",
+                    _display_path(label_grid_metrics),
+                    _display_path(label_grid_dir),
+                )
+        except Exception as exc:
+            log.warning("Label-grid report figure generation failed: %s", exc)
+
     return n
 
 
@@ -148,7 +203,7 @@ def _write_report_md(
         "  - `orientation_method_quality_counts.png` — quality counts per method and sensor",
         "",
         "### Evaluation (`figures/evaluation/`)",
-        f"- {n_eval_figures} figures copied from evaluation stage",
+        f"- {n_eval_figures} figures copied or rendered from evaluation artifacts",
         "",
         "## Tables (`tables/`)",
         "- `class_counts.csv` — window counts per fine-grained class",
@@ -282,6 +337,8 @@ def run_report(
     # 6. Copy evaluation figures
     # ------------------------------------------------------------------
     n_eval_figures = _copy_evaluation_figures(evaluation_dir, eval_dir)
+    if not no_plots:
+        n_eval_figures += _generate_evaluation_summary_figures(evaluation_dir, eval_dir)
     n_signal_plots = len(list(signals_dir.glob("*.png")))
 
     # ------------------------------------------------------------------

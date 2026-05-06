@@ -173,9 +173,9 @@ def to_activity_label(fine_label: str, config: LabelConfig | None = None) -> str
     return (config or default_label_config()).map_label("scenario_label_activity", fine_label)
 
 
-def to_binary_label(fine_label: str, config: LabelConfig | None = None) -> str:
-    """Map a fine-grained label using the configured binary taxonomy."""
-    return (config or default_label_config()).map_label("scenario_label_binary", fine_label)
+def to_safety_label(fine_label: str, config: LabelConfig | None = None) -> str:
+    """Map a fine-grained label using the configured safety taxonomy."""
+    return (config or default_label_config()).map_label("scenario_label_safety", fine_label)
 
 
 def to_set_based_label(
@@ -185,11 +185,6 @@ def to_set_based_label(
 ) -> str:
     """Convert set based label."""
     return (config or default_label_config()).map_label_set(scheme, fine_labels)
-
-
-def to_riding_label(fine_label: str, config: LabelConfig | None = None) -> str:
-    """Convert riding label."""
-    return (config or default_label_config()).map_label("scenario_label_riding", fine_label)
 
 
 def non_riding_labels(config: LabelConfig | None = None) -> frozenset[str]:
@@ -239,6 +234,8 @@ def ensure_resolved_labels(
 
     if overwrite or "scenario_label" not in out.columns:
         out["scenario_label"] = fine_series
+    if overwrite or "scenario_label_fine" not in out.columns:
+        out["scenario_label_fine"] = fine_series
     if overwrite or "scenario_label_activity" not in out.columns:
         out["scenario_label_activity"] = fine_series.map(
             lambda lbl: to_activity_label(lbl, config=cfg)
@@ -247,9 +244,9 @@ def ensure_resolved_labels(
         out["scenario_label_coarse"] = fine_series.map(
             lambda lbl: to_coarse_label(lbl, config=cfg)
         )
-    if overwrite or "scenario_label_binary" not in out.columns:
-        out["scenario_label_binary"] = fine_series.map(
-            lambda lbl: to_binary_label(lbl, config=cfg)
+    if overwrite or "scenario_label_safety" not in out.columns:
+        out["scenario_label_safety"] = fine_series.map(
+            lambda lbl: to_safety_label(lbl, config=cfg)
         )
 
     for scheme in cfg.set_based_scheme_names:

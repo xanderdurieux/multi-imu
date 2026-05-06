@@ -28,8 +28,10 @@ from visualization._utils import (
     ACC_COLS,
     GYRO_COLS,
     SENSOR_COLORS,
+    SENSORS,
     filter_valid_plot_xy,
     save_figure,
+    timestamps_to_relative_seconds,
 )
 
 log = logging.getLogger(__name__)
@@ -320,7 +322,7 @@ def plot_labels_calibrated(
 # Orientation stage
 # ---------------------------------------------------------------------------
 
-_ORIENT_ANGLES = ("yaw_deg", "pitch_deg", "roll_deg")
+_ORIENT_ANGLES = ("roll_deg", "pitch_deg", "yaw_deg")
 
 
 def plot_labels_orientation(
@@ -331,13 +333,15 @@ def plot_labels_orientation(
     title: str = "",
 ) -> Path | None:
     """Plot labels orientation."""
+    from visualization.plot_orientation import _ANGLE_LABELS, _prepare_wrapped_angle
+
     orient_dir = section_dir / "orientation"
     if not orient_dir.is_dir():
         log.warning("No orientation directory found under %s", section_dir)
         return None
 
     sensor_dfs: dict[str, pd.DataFrame] = {}
-    for sensor in ("sporsa", "arduino"):
+    for sensor in SENSORS:
         csv_path = orient_dir / f"{sensor}.csv"
         if csv_path.exists():
             try:
@@ -358,32 +362,50 @@ def plot_labels_orientation(
 
     colors = _label_colors(labels)
     fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+    any_line = False
 
     for sensor, df in sensor_dfs.items():
-        ts_ms = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
-        ts_s = (ts_ms - t0_ms) / 1000.0
+        ts_s = timestamps_to_relative_seconds(df["timestamp"])
         sc = SENSOR_COLORS.get(sensor, "gray")
-        for idx, angle_col in enumerate(_ORIENT_ANGLES):
+        for row, angle_col in enumerate(_ORIENT_ANGLES):
             if angle_col not in df.columns:
                 continue
             y = pd.to_numeric(df[angle_col], errors="coerce").to_numpy(dtype=float)
-            x_plot, y_plot = filter_valid_plot_xy(ts_s, y)
+            x_plot, y_plot = _prepare_wrapped_angle(ts_s, y)
             if x_plot.size:
-                axes[idx].plot(x_plot, y_plot, lw=0.8, alpha=0.9, color=sc, label=sensor)
+                axes[row].plot(
+                    x_plot,
+                    y_plot,
+                    lw=0.9,
+                    alpha=0.95,
+                    color=sc,
+                    label=sensor if row == 0 else "_",
+                )
+                any_line = True
+
+    if not any_line:
+        plt.close(fig)
+        return None
 
     _draw_spans(list(axes), labels, t0_ms, colors)
 
-    for idx, angle_col in enumerate(_ORIENT_ANGLES):
-        axes[idx].set_ylabel(angle_col.replace("_deg", " (deg)"), fontsize=8)
-        axes[idx].grid(alpha=0.2, lw=0.4)
-        sensor_handles, sensor_labels_text = axes[idx].get_legend_handles_labels()
-        all_handles = sensor_handles + _label_patches(colors)
-        all_labels = sensor_labels_text + list(colors.keys())
-        if all_handles:
-            axes[idx].legend(all_handles, all_labels, loc="upper right", fontsize=7, framealpha=0.8)
+    for ax, angle_col in zip(axes, _ORIENT_ANGLES):
+        ax.set_ylabel(_ANGLE_LABELS[angle_col])
+        ax.grid(alpha=0.2, lw=0.4)
 
+    sensor_handles, sensor_labels_text = axes[0].get_legend_handles_labels()
+    label_handles = _label_patches(colors)
+    if sensor_handles or label_handles:
+        axes[0].legend(
+            sensor_handles + label_handles,
+            sensor_labels_text + list(colors.keys()),
+            loc="upper right",
+            fontsize=8,
+            framealpha=0.8,
+        )
+
+    axes[0].set_title(title or f"{section_dir.name} — orientation (mahony)")
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(title or f"{section_dir.name} — orientation with label overlay", fontsize=10)
     fig.tight_layout()
 
     if output_path is None:

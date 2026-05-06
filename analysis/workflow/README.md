@@ -86,6 +86,19 @@ Only fields defined by `WorkflowConfig` are accepted.
   importance.
 - `evaluation_methods`: list of methods to run — `label_grid`,
   `event_contrasts`, `two_stage_events`, or any combination.
+- `evaluation_sessions`: optional session prefixes to evaluate from the existing
+  full `features_fused.csv`. Empty means include all sessions unless recordings
+  are selected below.
+- `evaluation_exclude_sessions`: optional session prefixes to exclude from
+  evaluation.
+- `evaluation_recordings`: optional recording names to evaluate from the
+  existing full `features_fused.csv`. When combined with `evaluation_sessions`,
+  rows matching either include list are evaluated.
+- `evaluation_exclude_recordings`: optional recording names to exclude from
+  evaluation. Exclusions are applied after inclusions.
+  Scoped feature copies are written per evaluation method, e.g.
+  `data/evaluation/label_grid/features_scoped.csv`, leaving
+  `data/exports/features_fused.csv` unchanged.
 - `evaluation_label_col`: target label scheme. Use `auto` to run all known
   schemes.
 - `evaluation_quality_levels`: quality thresholds to include in the label grid.
@@ -95,7 +108,8 @@ Only fields defined by `WorkflowConfig` are accepted.
 - `evaluation_models`: classifiers for label-grid CV — `random_forest`,
   `hist_gradient_boosting`, `logistic_regression`, or `auto` for all three.
 - `evaluation_permutation_models`: subset of models used for permutation
-  importance. Keep short for faster runs.
+  importance. Keep short for faster runs. Use `["none"]` to disable
+  permutation importance.
 - `event_contrast_models`: classifiers for the event-contrast evaluator. Same
   valid values as `evaluation_models`.
 - `two_stage_event_models`: classifiers for the two-stage event evaluator. Same
@@ -119,6 +133,13 @@ Run only evaluation after exports exist:
 
 ```bash
 uv run python -m workflow --stage evaluation
+```
+
+Run evaluation on a scoped copy of the full exported feature set:
+
+```bash
+uv run python -m workflow --stage evaluation --evaluation-session 2026-04-29
+uv run python -m workflow --stage evaluation --exclude-evaluation-session 2026-05-04
 ```
 
 Quick label-grid check with one model:

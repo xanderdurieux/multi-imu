@@ -56,6 +56,10 @@ class WorkflowConfig:
     evaluation_methods: list[str] = field(
         default_factory=lambda: ["label_grid"]
     )
+    evaluation_sessions: list[str] = field(default_factory=list)
+    evaluation_exclude_sessions: list[str] = field(default_factory=list)
+    evaluation_recordings: list[str] = field(default_factory=list)
+    evaluation_exclude_recordings: list[str] = field(default_factory=list)
     evaluation_label_col: str = "auto"
     evaluation_exclude_non_riding: bool = False
     # Sweep over the cross-product of {evaluation_label_col} × {quality_levels}.
@@ -131,12 +135,14 @@ class WorkflowConfig:
         valid_eval_label_cols = {
             "auto",
             "scenario_label",
+            "scenario_label_fine",
             "scenario_label_activity",
             "scenario_label_coarse",
-            "scenario_label_binary",
+            "scenario_label_safety",
             "scenario_label_riding",
-            "scenario_label_cornering",
+            "scenario_label_turning",
             "scenario_label_head_motion",
+            "scenario_label_standing",
         }
         if self.evaluation_label_col not in valid_eval_label_cols:
             errors.append(
@@ -145,6 +151,17 @@ class WorkflowConfig:
             )
         if not isinstance(self.evaluation_exclude_non_riding, bool):
             errors.append("evaluation_exclude_non_riding must be a boolean")
+
+        for field_name in (
+            "evaluation_sessions",
+            "evaluation_exclude_sessions",
+            "evaluation_recordings",
+            "evaluation_exclude_recordings",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                errors.append(f"{field_name} must be a list of strings")
+
         valid_eval_methods = {"label_grid", "event_contrasts", "two_stage_events"}
         if not isinstance(self.evaluation_methods, list):
             errors.append("evaluation_methods must be a list")
@@ -169,19 +186,21 @@ class WorkflowConfig:
                 )
         valid_models = {"random_forest", "hist_gradient_boosting", "logistic_regression"}
         valid_or_auto = valid_models | {"auto"}
+        valid_or_auto_or_none = valid_or_auto | {"none"}
 
-        def _check_model_list(name: str, lst: Any) -> None:
+        def _check_model_list(name: str, lst: Any, *, allow_none: bool = False) -> None:
             if not isinstance(lst, list):
                 errors.append(f"{name} must be a list of model names")
                 return
             if not lst:
                 errors.append(f"{name} must be a non-empty list")
                 return
-            bad = [m for m in lst if m not in valid_or_auto]
+            valid = valid_or_auto_or_none if allow_none else valid_or_auto
+            bad = [m for m in lst if m not in valid]
             if bad:
                 errors.append(
                     f"{name} contains invalid entries {bad}; "
-                    f"valid: {sorted(valid_or_auto)}"
+                    f"valid: {sorted(valid)}"
                 )
                 return
             if "auto" in lst and len(lst) != 1:
@@ -189,9 +208,17 @@ class WorkflowConfig:
                     f'{name}: when using "auto", it must be the only list entry '
                     "(use explicit model names for subsets)"
                 )
+            if "none" in lst and len(lst) != 1:
+                errors.append(
+                    f'{name}: when using "none", it must be the only list entry'
+                )
 
         _check_model_list("evaluation_models", self.evaluation_models)
-        _check_model_list("evaluation_permutation_models", self.evaluation_permutation_models)
+        _check_model_list(
+            "evaluation_permutation_models",
+            self.evaluation_permutation_models,
+            allow_none=True,
+        )
         _check_model_list("event_contrast_models", self.event_contrast_models)
         _check_model_list("two_stage_event_models", self.two_stage_event_models)
         valid_two_stage_tasks = {
