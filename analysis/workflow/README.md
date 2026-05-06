@@ -51,7 +51,11 @@ Only fields defined by `WorkflowConfig` are accepted.
 - `stages`: ordered list of stages to run. Valid values: `parse`, `sync`,
   `split`, `calibration`, `orientation`, `derived`, `features`, `exports`,
   `dataset_summary`, `evaluation`, `report`, `thesis_bundle`.
-- `force`: overwrite stage outputs where supported.
+- `force`: overwrite stage outputs where supported. For evaluation, `false`
+  reuses completed saved artifacts and regenerates plots. Label-grid and
+  single-run evaluation can also resume interrupted runs by recomputing only
+  feature-set/model pairs whose core artifacts are missing. Set `true` to
+  recompute evaluations from scratch.
 - `skip_exports`: skip the exports stage body when the stage is listed.
 - `no_plots`: suppress plot generation.
 - `log_to_file`: write a timestamped log under `data/logs/`.

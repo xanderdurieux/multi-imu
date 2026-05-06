@@ -29,7 +29,7 @@ from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-from common.paths import merge_csv, project_relative_path, read_csv, write_csv
+from common.paths import features_fingerprint, merge_csv, project_relative_path, read_csv, write_csv
 from features.label_config import default_label_config
 from features.labels import (
     ensure_resolved_labels,
@@ -406,6 +406,122 @@ def _remove_legacy_feature_set_csvs(model_dir: Path, feature_set: str) -> None:
             log.warning("Could not remove legacy evaluation CSV %s: %s", path, exc)
 
 
+def _csv_has_values(path: Path, expected: dict[str, Any]) -> bool:
+    """Return whether a CSV contains at least one row matching *expected*."""
+    if not path.exists():
+        return False
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return False
+    if df.empty:
+        return False
+    mask = pd.Series(True, index=df.index)
+    for col, value in expected.items():
+        if col not in df.columns:
+            return False
+        mask &= df[col].astype(str) == str(value)
+    return bool(mask.any())
+
+
+def _existing_metrics_row(metrics_df: pd.DataFrame, feature_set: str, model: str) -> dict[str, Any] | None:
+    """Return a saved metrics row for one feature/model pair."""
+    if metrics_df.empty or not {"feature_set", "model"}.issubset(metrics_df.columns):
+        return None
+    rows = metrics_df[
+        (metrics_df["feature_set"].astype(str) == str(feature_set))
+        & (metrics_df["model"].astype(str) == str(model))
+    ]
+    if rows.empty:
+        return None
+    return rows.iloc[-1].to_dict()
+
+
+def _has_reusable_evaluation_artifacts(
+    output_dir: Path,
+    feature_set: str,
+    model: str,
+    metrics_df: pd.DataFrame,
+) -> bool:
+    """Return whether saved artifacts are sufficient to skip a CV run."""
+    if _existing_metrics_row(metrics_df, feature_set, model) is None:
+        return False
+    model_dir = output_dir / model
+    if not _csv_has_values(model_dir / "confusion_matrix.csv", {"feature_set": feature_set}):
+        return False
+    if not _csv_has_values(model_dir / "fold_scores.csv", {"feature_set": feature_set}):
+        return False
+    if not (model_dir / "per_class_report" / f"per_class_report_{feature_set}.json").exists():
+        return False
+    return True
+
+
+def _saved_evaluation_summary_matches(
+    output_dir: Path,
+    *,
+    features_path: Path,
+    label_col: str,
+    group_col: str,
+    min_quality: str,
+    evaluation_models: tuple[str, ...],
+    permutation_models: tuple[str, ...],
+    exclude_non_riding: bool,
+) -> bool | None:
+    """Return whether an existing summary matches, or None when no summary exists."""
+    summary_path = output_dir / "evaluation_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not read existing evaluation summary for resume: %s", exc)
+        return False
+
+    expected = {
+        "features_fingerprint": features_fingerprint(features_path),
+        "label_col": label_col,
+        "group_col": group_col,
+        "min_quality": min_quality,
+        "evaluation_models": list(evaluation_models),
+        "permutation_models": list(permutation_models),
+        "exclude_non_riding": exclude_non_riding,
+    }
+    for key, value in expected.items():
+        saved = summary.get(key)
+        if saved is not None and saved != value:
+            log.info("Saved evaluation summary differs on %s; recomputing", key)
+            return False
+    return True
+
+
+def _fold_scores_from_disk(output_dir: Path, feature_set: str, model: str) -> tuple[list[float], list[float]]:
+    """Return saved fold accuracies and macro-F1 values for a skipped run."""
+    path = output_dir / model / "fold_scores.csv"
+    if not path.exists():
+        return [], []
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return [], []
+    if "feature_set" in df.columns:
+        df = df[df["feature_set"].astype(str) == str(feature_set)]
+    if df.empty:
+        return [], []
+    return (
+        pd.to_numeric(df.get("accuracy"), errors="coerce").dropna().astype(float).tolist(),
+        pd.to_numeric(df.get("macro_f1"), errors="coerce").dropna().astype(float).tolist(),
+    )
+
+
+def _safe_float(value: Any, default: float = np.nan) -> float:
+    """Return a float for numeric CSV values."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out
+
+
 def _build_model(name: str, seed: int) -> Any:
     """Build model."""
     cls = _MODEL_REGISTRY[name]
@@ -529,6 +645,7 @@ def run_evaluation(
     evaluation_models: tuple[str, ...] | None = None,
     permutation_models: tuple[str, ...] = ("random_forest",),
     save_trained_models: bool = False,
+    force: bool = True,
 ) -> dict:
     """Train and evaluate models on a feature table."""
     features_path = Path(features_path)
@@ -682,7 +799,30 @@ def run_evaluation(
     # ------------------------------------------------------------------
     all_results: dict[str, dict[str, Any]] = {}
     metrics_rows: list[dict] = []
+    reused_keys: set[str] = set()
     fi_frames: dict[str, list[pd.DataFrame]] = {}  # model_name → accumulated feature importance frames
+    metrics_path = output_dir / "metrics_table.csv"
+    existing_metrics_df = pd.DataFrame()
+    if not force and metrics_path.exists():
+        summary_matches = _saved_evaluation_summary_matches(
+            output_dir,
+            features_path=features_path,
+            label_col=label_col,
+            group_col=group_col,
+            min_quality=min_quality,
+            evaluation_models=cv_models,
+            permutation_models=perm_models_resolved,
+            exclude_non_riding=exclude_non_riding,
+        )
+        if summary_matches is not False:
+            if summary_matches is None:
+                log.info(
+                    "No evaluation summary found; attempting artifact-level resume from saved CSV/JSON outputs"
+                )
+            try:
+                existing_metrics_df = pd.read_csv(metrics_path)
+            except Exception as exc:
+                log.warning("Could not read existing metrics table for resume: %s", exc)
 
     for fs_name, feat_cols in active_sets.items():
         # NaN handling happens inside the CV pipeline (SimpleImputer) so that
@@ -714,6 +854,22 @@ def run_evaluation(
             key = f"{fs_name}__{model_name}"
             log.info("Evaluating %s ...", key)
             (output_dir / model_name).mkdir(exist_ok=True)
+
+            if not force and _has_reusable_evaluation_artifacts(
+                output_dir,
+                fs_name,
+                model_name,
+                existing_metrics_df,
+            ):
+                row = _existing_metrics_row(existing_metrics_df, fs_name, model_name)
+                if row is not None:
+                    metrics_rows.append(row)
+                    reused_keys.add(key)
+                    log.info(
+                        "Reusing saved evaluation artifacts for %s; plots will be regenerated",
+                        key,
+                    )
+                    continue
 
             model = _build_model(model_name, seed)
             try:
@@ -959,11 +1115,14 @@ def run_evaluation(
     if metrics_rows:
         metrics_rows = sorted(
             metrics_rows,
-            key=lambda r: (-r["macro_f1"], r["macro_f1_std"], -r["accuracy"]),
+            key=lambda r: (
+                -_safe_float(r.get("macro_f1"), -np.inf),
+                _safe_float(r.get("macro_f1_std"), np.inf),
+                -_safe_float(r.get("accuracy"), -np.inf),
+            ),
         )
         metrics_df = pd.DataFrame(metrics_rows).reset_index(drop=True)
-        metrics_path = output_dir / "metrics_table.csv"
-        write_csv(metrics_df, metrics_path)
+        metrics_df = merge_csv(metrics_df, metrics_path, ["feature_set", "model"])
         log.info("Wrote metrics table to %s", project_relative_path(metrics_path))
 
     # ------------------------------------------------------------------
@@ -983,6 +1142,10 @@ def run_evaluation(
             )
         except Exception as exc:
             log.warning("IMU contribution analysis failed: %s", exc)
+    elif not force:
+        existing_imu_path = output_dir / "imu_contribution.csv"
+        if existing_imu_path.exists():
+            imu_summary_path = existing_imu_path
 
     # ------------------------------------------------------------------
     # 5c. Permutation feature importance (model-agnostic)
@@ -1059,27 +1222,53 @@ def run_evaluation(
         default=None,
     )
 
+    summary_results: dict[str, dict[str, Any]] = {}
+    for row in metrics_rows:
+        fs_name = str(row.get("feature_set", ""))
+        model_name = str(row.get("model", ""))
+        if not fs_name or not model_name:
+            continue
+        key = f"{fs_name}__{model_name}"
+        if key in all_results:
+            result = all_results[key]
+            summary_results[key] = {
+                "accuracy": round(result["accuracy"], 4),
+                "accuracy_std": round(result["accuracy_std"], 4),
+                "macro_f1": round(result["macro_f1"], 4),
+                "macro_f1_std": round(result["macro_f1_std"], 4),
+                "fold_accuracies": result["fold_accuracies"],
+                "fold_f1s": result["fold_f1s"],
+                "reused_existing_artifacts": False,
+            }
+            continue
+        fold_accuracies, fold_f1s = _fold_scores_from_disk(output_dir, fs_name, model_name)
+        summary_results[key] = {
+            "accuracy": round(_safe_float(row.get("accuracy")), 4),
+            "accuracy_std": round(_safe_float(row.get("accuracy_std")), 4),
+            "macro_f1": round(_safe_float(row.get("macro_f1")), 4),
+            "macro_f1_std": round(_safe_float(row.get("macro_f1_std")), 4),
+            "fold_accuracies": fold_accuracies,
+            "fold_f1s": fold_f1s,
+            "reused_existing_artifacts": key in reused_keys,
+        }
+
     summary: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "features_path": project_relative_path(features_path),
+        "features_fingerprint": features_fingerprint(features_path),
         "seed": seed,
         "label_col": label_col,
+        "group_col": group_col,
+        "min_quality": min_quality,
         "evaluation_models": list(cv_models),
         "permutation_models": list(perm_models_resolved),
         "exclude_non_riding": exclude_non_riding,
+        "force": force,
+        "reused_existing_artifacts": sorted(reused_keys),
         "n_windows": int(len(df)),
         "n_classes": len(classes),
         "classes": classes,
-        "results": {
-            k: {
-                "accuracy": round(v["accuracy"], 4),
-                "accuracy_std": round(v["accuracy_std"], 4),
-                "macro_f1": round(v["macro_f1"], 4),
-                "macro_f1_std": round(v["macro_f1_std"], 4),
-                "fold_accuracies": v["fold_accuracies"],
-                "fold_f1s": v["fold_f1s"],
-            }
-            for k, v in all_results.items()
-        },
+        "results": summary_results,
     }
 
     summary_path = output_dir / "evaluation_summary.json"
@@ -1091,19 +1280,8 @@ def run_evaluation(
     # ------------------------------------------------------------------
     if not no_plots:
         try:
-            from visualization.plot_eval_scenario import generate_evaluation_figures, plot_per_class_f1
+            from visualization.plot_eval_scenario import generate_evaluation_figures
             generate_evaluation_figures(output_dir)
-
-            # Per-class F1 for each feature set that has results
-            for fs_name in active_sets:
-                out = output_dir / "figures" / f"per_class_f1_{fs_name}.png"
-                plot_per_class_f1(
-                    pd.DataFrame(metrics_rows),
-                    all_results,
-                    classes,
-                    out,
-                    feature_set=fs_name,
-                )
         except Exception as exc:
             log.warning("Evaluation figure generation failed: %s", exc)
 

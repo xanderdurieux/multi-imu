@@ -450,6 +450,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                             evaluation_models=eval_models,
                             permutation_models=perm_models,
                             save_trained_models=cfg.label_grid_save_trained_models,
+                            force=cfg.force,
                         )
                         result["ok"] += int(grid_summary.get("n_runs_ok", 0))
                         result["failed"] += int(
@@ -487,6 +488,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                             min_quality=cfg.evaluation_min_quality,
                             seed=cfg.evaluation_seed,
                             no_plots=cfg.no_plots,
+                            force=cfg.force,
                         )
                         result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
                         result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0
@@ -525,6 +527,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                             target_recall=cfg.two_stage_target_recall,
                             hop_s=cfg.hop_s,
                             no_plots=cfg.no_plots,
+                            force=cfg.force,
                         )
                         result["ok"] += 1 if int(summary.get("n_metric_rows", 0)) > 0 else 0
                         result["skipped"] += 1 if int(summary.get("n_metric_rows", 0)) == 0 else 0

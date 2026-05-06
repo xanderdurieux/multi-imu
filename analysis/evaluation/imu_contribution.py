@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import wilcoxon
 
-from common.paths import project_relative_path, write_csv
+from common.paths import merge_csv, project_relative_path
 
 log = logging.getLogger(__name__)
 
@@ -137,7 +137,11 @@ def write_imu_contribution(
         return None, []
 
     summary_path = output_dir / "imu_contribution.csv"
-    write_csv(contribution_df, summary_path)
+    contribution_df = merge_csv(
+        contribution_df,
+        summary_path,
+        ["model", "better", "baseline", "metric"],
+    )
     log.info(
         "IMU contribution → %s (%d rows)",
         project_relative_path(summary_path),
@@ -162,7 +166,11 @@ def write_imu_contribution(
     if delta_frames:
         per_class_path = output_dir / "imu_contribution_per_class.csv"
         per_class_df = pd.concat(delta_frames, ignore_index=True)
-        write_csv(per_class_df, per_class_path)
+        per_class_df = merge_csv(
+            per_class_df,
+            per_class_path,
+            ["model", "better", "baseline", "class"],
+        )
         delta_paths.append(per_class_path)
         log.info(
             "Per-class IMU contribution → %s (%d rows)",

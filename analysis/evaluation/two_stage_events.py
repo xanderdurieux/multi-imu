@@ -754,6 +754,51 @@ def _task_to_dict(task: TwoStageEventTask) -> dict[str, Any]:
     }
 
 
+def _load_reusable_two_stage_summary(
+    out_dir: Path,
+    *,
+    features_path: Path,
+    tasks: tuple[TwoStageEventTask, ...],
+    models: tuple[str, ...],
+    min_quality: str | None,
+    seed: int,
+    target_recall: float,
+    hop_s: float,
+) -> dict[str, Any] | None:
+    """Return a saved two-stage summary when it matches this request."""
+    summary_path = out_dir / "two_stage_event_summary.json"
+    metrics_path = out_dir / "two_stage_event_metrics.csv"
+    if not summary_path.exists() or not metrics_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not read saved two-stage summary %s: %s", _display_path(summary_path), exc)
+        return None
+
+    if summary.get("features_fingerprint") != features_fingerprint(features_path):
+        return None
+    if summary.get("models") != list(models):
+        return None
+    if summary.get("min_quality") != min_quality:
+        return None
+    if summary.get("seed") != seed:
+        return None
+    try:
+        saved_target_recall = float(summary.get("target_recall"))
+        saved_hop_s = float(summary.get("hop_s"))
+    except (TypeError, ValueError):
+        return None
+    if saved_target_recall != float(target_recall):
+        return None
+    if saved_hop_s != float(hop_s):
+        return None
+    saved_tasks = [task.get("name") for task in summary.get("tasks", [])]
+    if saved_tasks != [task.name for task in tasks]:
+        return None
+    return summary
+
+
 def run_two_stage_event_evaluation(
     features_path: Path | str,
     *,
@@ -765,6 +810,7 @@ def run_two_stage_event_evaluation(
     target_recall: float = 0.90,
     hop_s: float = 1.0,
     no_plots: bool = False,
+    force: bool = True,
 ) -> dict[str, Any]:
     """Run two-stage event evaluation and write artifacts."""
     features_path = Path(features_path)
@@ -781,6 +827,35 @@ def run_two_stage_event_evaluation(
     model_ids = resolve_evaluation_models(
         list(models or ["hist_gradient_boosting", "logistic_regression"])
     )
+
+    if not force:
+        reusable = _load_reusable_two_stage_summary(
+            out_dir,
+            features_path=features_path,
+            tasks=tasks,
+            models=model_ids,
+            min_quality=min_quality,
+            seed=seed,
+            target_recall=target_recall,
+            hop_s=hop_s,
+        )
+        if reusable is not None:
+            log.info("Reusing saved two-stage event artifacts; regenerating figures")
+            if not no_plots:
+                try:
+                    from visualization.plot_eval_events import generate_two_stage_event_figures
+                    figure_paths = generate_two_stage_event_figures(out_dir)
+                    reusable.setdefault("artifacts", {})["figures"] = [
+                        _display_path(path) for path in figure_paths
+                    ]
+                except Exception as exc:
+                    log.warning("Two-stage event figure regeneration failed: %s", exc)
+            reusable["reused_existing_artifacts"] = True
+            (out_dir / "two_stage_event_summary.json").write_text(
+                json.dumps(reusable, indent=2, default=_json_default),
+                encoding="utf-8",
+            )
+            return reusable
 
     log.info("Loading features from %s", _display_path(features_path))
     source_df = _apply_quality_filter(read_csv(features_path), min_quality)
@@ -955,6 +1030,7 @@ def run_two_stage_event_evaluation(
         "grouping": "recording_name",
         "min_quality": min_quality,
         "seed": seed,
+        "force": force,
         "target_recall": target_recall,
         "hop_s": hop_s,
         "n_source_windows": int(len(source_df)),

@@ -420,6 +420,50 @@ def _display_path(path: Path | str) -> str:
         return str(Path(path))
 
 
+def _load_reusable_event_summary(
+    event_output_dir: Path,
+    *,
+    features_path: Path,
+    contrasts: tuple[EventContrast, ...],
+    models: tuple[str, ...],
+    group_col: str,
+    min_quality: str | None,
+    seed: int,
+    permutation_n_repeats: int,
+    stability_top_k: int,
+) -> dict[str, Any] | None:
+    """Return a saved event-contrast summary when it matches this request."""
+    summary_path = event_output_dir / "event_contrast_summary.json"
+    metrics_path = event_output_dir / "event_contrast_metrics.csv"
+    if not summary_path.exists() or not metrics_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not read saved event-contrast summary %s: %s", _display_path(summary_path), exc)
+        return None
+
+    if summary.get("features_fingerprint") != features_fingerprint(features_path):
+        return None
+    if summary.get("models") != list(models):
+        return None
+    if summary.get("group_col") != group_col:
+        return None
+    if summary.get("min_quality") != min_quality:
+        return None
+    if summary.get("seed") != seed:
+        return None
+    if summary.get("permutation_n_repeats") != permutation_n_repeats:
+        return None
+    if summary.get("stability_top_k") != stability_top_k:
+        return None
+
+    saved_contrasts = [c.get("name") for c in summary.get("contrasts", [])]
+    if saved_contrasts != [c.name for c in contrasts]:
+        return None
+    return summary
+
+
 def run_event_contrast_evaluation(
     features_path: Path | str,
     *,
@@ -432,6 +476,7 @@ def run_event_contrast_evaluation(
     permutation_n_repeats: int = 5,
     stability_top_k: int = 20,
     no_plots: bool = False,
+    force: bool = True,
 ) -> dict[str, Any]:
     """Run event contrast evaluation and write CSV/JSON artifacts."""
     features_path = Path(features_path)
@@ -444,6 +489,36 @@ def run_event_contrast_evaluation(
 
     contrast_configs = tuple(contrasts or DEFAULT_EVENT_CONTRASTS)
     model_ids = resolve_evaluation_models(list(models or ["hist_gradient_boosting", "logistic_regression"]))
+
+    if not force:
+        reusable = _load_reusable_event_summary(
+            event_output_dir,
+            features_path=features_path,
+            contrasts=contrast_configs,
+            models=model_ids,
+            group_col=group_col,
+            min_quality=min_quality,
+            seed=seed,
+            permutation_n_repeats=permutation_n_repeats,
+            stability_top_k=stability_top_k,
+        )
+        if reusable is not None:
+            log.info("Reusing saved event-contrast artifacts; regenerating figures")
+            if not no_plots:
+                try:
+                    from visualization.plot_eval_events import generate_event_contrast_figures
+                    figure_paths = generate_event_contrast_figures(event_output_dir)
+                    reusable.setdefault("artifacts", {})["figures"] = [
+                        _display_path(path) for path in figure_paths
+                    ]
+                except Exception as exc:
+                    log.warning("Event contrast figure regeneration failed: %s", exc)
+            reusable["reused_existing_artifacts"] = True
+            (event_output_dir / "event_contrast_summary.json").write_text(
+                json.dumps(reusable, indent=2, default=_json_default),
+                encoding="utf-8",
+            )
+            return reusable
 
     log.info("Loading features from %s", _display_path(features_path))
     source_df = _apply_quality_filter(read_csv(features_path), min_quality)
@@ -680,6 +755,7 @@ def run_event_contrast_evaluation(
         "group_col": group_col,
         "min_quality": min_quality,
         "seed": seed,
+        "force": force,
         "permutation_n_repeats": permutation_n_repeats,
         "stability_top_k": stability_top_k,
         "n_source_windows": int(len(source_df)),

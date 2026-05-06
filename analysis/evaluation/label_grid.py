@@ -189,6 +189,51 @@ def _collect_model_artifact_csv(
     return frames
 
 
+def _load_reusable_run_summary(
+    run_out: Path,
+    *,
+    label_col: str,
+    quality: str,
+    features_path: Path,
+    evaluation_models: tuple[str, ...],
+    permutation_models: tuple[str, ...],
+    exclude_non_riding: bool,
+) -> dict[str, Any] | None:
+    """Return a saved run summary when it is compatible with the requested run."""
+    summary_path = run_out / "evaluation_summary.json"
+    metrics_path = run_out / "metrics_table.csv"
+    if not summary_path.exists() or not metrics_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not read saved evaluation summary %s: %s", _display_path(summary_path), exc)
+        return None
+
+    if summary.get("label_col") not in (None, label_col):
+        return None
+    if summary.get("min_quality") not in (None, quality):
+        return None
+    if summary.get("exclude_non_riding") not in (None, exclude_non_riding):
+        return None
+
+    saved_models = summary.get("evaluation_models")
+    if saved_models is not None and list(saved_models) != list(evaluation_models):
+        return None
+    saved_perm_models = summary.get("permutation_models")
+    if saved_perm_models is not None and list(saved_perm_models) != list(permutation_models):
+        return None
+
+    saved_fp = summary.get("features_fingerprint")
+    if saved_fp is not None and saved_fp != features_fingerprint(features_path):
+        log.info("Saved run %s has a different feature fingerprint; recomputing", run_out.name)
+        return None
+
+    if not summary.get("results"):
+        return None
+    return summary
+
+
 def run_label_grid_evaluation(
     features_path: Path | str,
     *,
@@ -202,6 +247,7 @@ def run_label_grid_evaluation(
     evaluation_models: tuple[str, ...] | None = None,
     permutation_models: tuple[str, ...] = ("random_forest",),
     save_trained_models: bool = False,
+    force: bool = True,
 ) -> dict[str, Any]:
     """Run scenario evaluation for each (label_col, quality) combination.
 
@@ -274,61 +320,85 @@ def run_label_grid_evaluation(
                 compute_perm,
                 _display_path(run_out),
             )
-            try:
-                run_summary = run_evaluation(
-                    features_path,
-                    output_dir=run_out,
+            reused_run = False
+            if not force:
+                run_summary = _load_reusable_run_summary(
+                    run_out,
                     label_col=label_col,
-                    seed=seed,
-                    min_quality=quality,
-                    exclude_non_riding=exclude_non_riding,
-                    no_plots=no_plots,
-                    compute_permutation_importance=compute_perm,
+                    quality=quality,
+                    features_path=features_path,
                     evaluation_models=cv_models,
                     permutation_models=perm_models,
-                    save_trained_models=save_trained_models,
+                    exclude_non_riding=exclude_non_riding,
                 )
-            except (FileNotFoundError, ValueError) as exc:
-                log.warning(
-                    "  label-grid run %s skipped (%d/%d): %s",
-                    run_name,
-                    run_idx,
-                    total_runs,
-                    exc,
-                )
-                runs_meta.append(
-                    {
-                        "label_col": label_col,
-                        "min_quality": quality,
-                        "is_binary": _is_binary_col(label_col),
-                        "ok": False,
-                        "error": str(exc),
-                        "output_dir": str(project_relative_path(run_out)),
-                    }
-                )
-                continue
-            except Exception as exc:
-                log.error(
-                    "  label-grid run %s failed (%d/%d): %s",
-                    run_name,
-                    run_idx,
-                    total_runs,
-                    exc,
-                )
-                runs_meta.append(
-                    {
-                        "label_col": label_col,
-                        "min_quality": quality,
-                        "is_binary": _is_binary_col(label_col),
-                        "ok": False,
-                        "error": str(exc),
-                        "output_dir": str(project_relative_path(run_out)),
-                    }
-                )
-                continue
+                if run_summary is not None:
+                    reused_run = True
+                    log.info("  reusing saved label-grid run %s; regenerating figures", run_name)
+                    if not no_plots:
+                        try:
+                            from visualization.plot_eval_scenario import generate_evaluation_figures
+                            generate_evaluation_figures(run_out)
+                        except Exception as exc:
+                            log.warning("  saved-run figure regeneration failed for %s: %s", run_name, exc)
+
+            if run_summary is None:
+                try:
+                    run_summary = run_evaluation(
+                        features_path,
+                        output_dir=run_out,
+                        label_col=label_col,
+                        seed=seed,
+                        min_quality=quality,
+                        exclude_non_riding=exclude_non_riding,
+                        no_plots=no_plots,
+                        compute_permutation_importance=compute_perm,
+                        evaluation_models=cv_models,
+                        permutation_models=perm_models,
+                        save_trained_models=save_trained_models,
+                        force=force,
+                    )
+                except (FileNotFoundError, ValueError) as exc:
+                    log.warning(
+                        "  label-grid run %s skipped (%d/%d): %s",
+                        run_name,
+                        run_idx,
+                        total_runs,
+                        exc,
+                    )
+                    runs_meta.append(
+                        {
+                            "label_col": label_col,
+                            "min_quality": quality,
+                            "is_binary": _is_binary_col(label_col),
+                            "ok": False,
+                            "error": str(exc),
+                            "output_dir": str(project_relative_path(run_out)),
+                        }
+                    )
+                    continue
+                except Exception as exc:
+                    log.error(
+                        "  label-grid run %s failed (%d/%d): %s",
+                        run_name,
+                        run_idx,
+                        total_runs,
+                        exc,
+                    )
+                    runs_meta.append(
+                        {
+                            "label_col": label_col,
+                            "min_quality": quality,
+                            "is_binary": _is_binary_col(label_col),
+                            "ok": False,
+                            "error": str(exc),
+                            "output_dir": str(project_relative_path(run_out)),
+                        }
+                    )
+                    continue
 
             log.info(
-                "  completed %s: windows=%d classes=%d class_labels=%s",
+                "  %s %s: windows=%d classes=%d class_labels=%s",
+                "reused" if reused_run else "completed",
                 run_name,
                 int(run_summary["n_windows"]),
                 int(run_summary["n_classes"]),
@@ -344,6 +414,7 @@ def run_label_grid_evaluation(
                     "n_windows": int(run_summary["n_windows"]),
                     "n_classes": int(run_summary["n_classes"]),
                     "classes": run_summary["classes"],
+                    "reused_existing_artifacts": reused_run,
                     "output_dir": str(project_relative_path(run_out)),
                 }
             )
@@ -427,7 +498,11 @@ def run_label_grid_evaluation(
 
     if not grid_metrics_df.empty:
         metrics_path = output_dir / "label_grid_metrics.csv"
-        merge_csv(grid_metrics_df, metrics_path, ["label_col", "min_quality", "feature_set", "model"])
+        grid_metrics_df = merge_csv(
+            grid_metrics_df,
+            metrics_path,
+            ["label_col", "min_quality", "feature_set", "model"],
+        )
         log.info(
             "Wrote label-grid metrics → %s (%d rows)",
             project_relative_path(metrics_path),
@@ -436,7 +511,11 @@ def run_label_grid_evaluation(
 
     if not grid_imu_df.empty:
         imu_path = output_dir / "label_grid_imu_contribution.csv"
-        merge_csv(grid_imu_df, imu_path, ["label_col", "min_quality", "metric", "better", "baseline", "model"])
+        grid_imu_df = merge_csv(
+            grid_imu_df,
+            imu_path,
+            ["label_col", "min_quality", "metric", "better", "baseline", "model"],
+        )
         log.info(
             "Wrote label-grid IMU contribution → %s (%d rows)",
             project_relative_path(imu_path),
@@ -445,7 +524,7 @@ def run_label_grid_evaluation(
 
     if not grid_imu_per_class_df.empty:
         imu_pc_path = output_dir / "label_grid_imu_contribution_per_class.csv"
-        merge_csv(
+        grid_imu_per_class_df = merge_csv(
             grid_imu_per_class_df,
             imu_pc_path,
             ["label_col", "min_quality", "class", "better", "baseline", "model"],
@@ -458,7 +537,7 @@ def run_label_grid_evaluation(
 
     if not grid_feature_importance_df.empty:
         fi_path = output_dir / "label_grid_feature_importance.csv"
-        merge_csv(
+        grid_feature_importance_df = merge_csv(
             grid_feature_importance_df,
             fi_path,
             ["label_col", "min_quality", "model", "feature_set", "feature"],
@@ -471,7 +550,7 @@ def run_label_grid_evaluation(
 
     if not grid_feature_importance_by_group_df.empty:
         fig_path = output_dir / "label_grid_feature_importance_by_group.csv"
-        merge_csv(
+        grid_feature_importance_by_group_df = merge_csv(
             grid_feature_importance_by_group_df,
             fig_path,
             ["label_col", "min_quality", "model", "feature_set", "sensor_group"],
@@ -484,7 +563,7 @@ def run_label_grid_evaluation(
 
     if not grid_permutation_importance_df.empty:
         perm_path = output_dir / "label_grid_permutation_importance.csv"
-        merge_csv(
+        grid_permutation_importance_df = merge_csv(
             grid_permutation_importance_df,
             perm_path,
             ["label_col", "min_quality", "model", "feature_set", "feature"],
@@ -497,7 +576,7 @@ def run_label_grid_evaluation(
 
     if not grid_permutation_importance_by_group_df.empty:
         perm_grp_path = output_dir / "label_grid_permutation_importance_by_group.csv"
-        merge_csv(
+        grid_permutation_importance_by_group_df = merge_csv(
             grid_permutation_importance_by_group_df,
             perm_grp_path,
             ["label_col", "min_quality", "model", "feature_set", "sensor_group"],
@@ -697,6 +776,7 @@ def run_label_grid_evaluation(
         "evaluation_models": list(cv_models),
         "permutation_models": list(perm_models),
         "exclude_non_riding": exclude_non_riding,
+        "force": force,
         "n_runs": len(runs_meta),
         "n_runs_ok": int(sum(1 for r in runs_meta if r.get("ok"))),
         "runs": runs_meta,

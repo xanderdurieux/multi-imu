@@ -87,6 +87,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip figure generation.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Recompute evaluation artifacts instead of reusing completed saved runs.",
+    )
+    parser.add_argument(
         "--save-models",
         action="store_true",
         default=False,
@@ -240,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_quality=args.min_quality,
                 seed=args.seed,
                 no_plots=args.no_plots,
+                force=args.force,
             )
             print("Event contrast evaluation complete.")
             print(f"  Metric rows       : {summary['n_metric_rows']}")
@@ -259,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_recall=args.two_stage_target_recall,
                 hop_s=args.two_stage_hop_s,
                 no_plots=args.no_plots,
+                force=args.force,
             )
             print("Two-stage event evaluation complete.")
             print(f"  Metric rows       : {summary['n_metric_rows']}")
@@ -284,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
                 evaluation_models=eval_models,
                 permutation_models=perm_models,
                 save_trained_models=args.save_trained_models,
+                force=args.force,
             )
             print(
                 f"Label-grid complete. {grid_summary['n_runs_ok']}/{grid_summary['n_runs']} "
@@ -310,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             evaluation_models=eval_models,
             permutation_models=perm_models,
             save_trained_models=args.save_trained_models,
+            force=args.force,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
