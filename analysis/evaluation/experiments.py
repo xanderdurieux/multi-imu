@@ -528,6 +528,7 @@ def run_evaluation(
     permutation_n_repeats: int = 5,
     evaluation_models: tuple[str, ...] | None = None,
     permutation_models: tuple[str, ...] = ("random_forest",),
+    save_trained_models: bool = False,
 ) -> dict:
     """Train and evaluate models on a feature table."""
     features_path = Path(features_path)
@@ -736,6 +737,23 @@ def run_evaluation(
 
             all_results[key] = result
 
+            if save_trained_models:
+                try:
+                    from evaluation.trained_model import save_trained_model
+                    save_trained_model(
+                        X,
+                        y_all,
+                        _build_model(model_name, seed),
+                        label_encoder=le,
+                        feature_names=feat_cols,
+                        label_col=label_col,
+                        feature_set=fs_name,
+                        model_name=model_name,
+                        output_dir=output_dir / "saved_models" / model_name,
+                    )
+                except Exception as exc:
+                    log.warning("Could not save trained model for %s: %s", key, exc)
+
             metrics_rows.append(
                 {
                     "feature_set": fs_name,
@@ -784,7 +802,9 @@ def run_evaluation(
                 log.warning("Confusion analysis failed for %s: %s", key, exc)
 
             # Write per-class report (OOF-based)
-            per_class_path = output_dir / model_name /f"per_class_report_{fs_name}.json"
+            per_class_dir = output_dir / "per_class_reports" / model_name
+            per_class_dir.mkdir(parents=True, exist_ok=True)
+            per_class_path = per_class_dir / f"per_class_report_{fs_name}.json"
             per_class_path.write_text(
                 json.dumps(result["per_class"], indent=2), encoding="utf-8"
             )

@@ -10,7 +10,7 @@ from pathlib import Path
 from common.paths import evaluation_root, exports_root
 from evaluation.event_contrasts import run_event_contrast_evaluation
 from evaluation.experiments import resolve_evaluation_models, run_evaluation
-from evaluation.label_grid import DEFAULT_QUALITIES, all_label_cols, run_label_grid_evaluation
+from evaluation.label_grid import DEFAULT_QUALITIES, all_label_cols, resolve_label_cols, run_label_grid_evaluation
 from evaluation.two_stage_events import run_two_stage_event_evaluation
 
 
@@ -48,12 +48,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--label",
+        nargs="+",
         metavar="COL",
-        default="scenario_label_activity",
-        dest="label_col",
+        default=["scenario_label_activity"],
+        dest="label_cols",
         help=(
-            "Target label column. In sweep mode, pass 'auto' to evaluate every "
-            "label scheme (default: scenario_label_activity)."
+            "Target label column(s). In --label-grid mode multiple values are "
+            "accepted; use 'auto' for all schemes, 'multiclass' for the four "
+            "multiclass schemes, 'binary' for all set-based binary schemes, or "
+            "explicit column names separated by spaces. In single-run mode only "
+            "the first value is used (default: scenario_label_activity)."
         ),
     )
     parser.add_argument(
@@ -81,6 +85,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Skip figure generation.",
+    )
+    parser.add_argument(
+        "--save-models",
+        action="store_true",
+        default=False,
+        dest="save_trained_models",
+        help=(
+            "After CV evaluation, train a final pipeline on all data and save it "
+            "as a .joblib file alongside a _meta.json in each model subdirectory."
+        ),
     )
     parser.add_argument(
         "--evaluation-models",
@@ -254,11 +268,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.label_grid:
-            label_cols = (
-                list(all_label_cols())
-                if args.label_col == "auto"
-                else [args.label_col]
-            )
+            label_cols = resolve_label_cols(args.label_cols)
+            if not label_cols:
+                print("Error: --label produced an empty label list", file=sys.stderr)
+                return 1
             grid_summary = run_label_grid_evaluation(
                 features_path=Path(args.features),
                 output_dir=Path(args.output) / "label_grid",
@@ -270,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                 no_plots=args.no_plots,
                 evaluation_models=eval_models,
                 permutation_models=perm_models,
+                save_trained_models=args.save_trained_models,
             )
             print(
                 f"Label-grid complete. {grid_summary['n_runs_ok']}/{grid_summary['n_runs']} "
@@ -277,10 +291,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
+        label_col = args.label_cols[0]
+        if len(args.label_cols) > 1:
+            log.warning(
+                "Multiple --label values given but not in --label-grid mode; "
+                "using only the first: %r", label_col,
+            )
         summary = run_evaluation(
             features_path=Path(args.features),
             output_dir=Path(args.output),
-            label_col=args.label_col,
+            label_col=label_col,
             group_col=args.group_col,
             seed=args.seed,
             min_quality=args.min_quality,
@@ -289,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             compute_permutation_importance=args.permutation,
             evaluation_models=eval_models,
             permutation_models=perm_models,
+            save_trained_models=args.save_trained_models,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

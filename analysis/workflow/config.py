@@ -60,22 +60,22 @@ class WorkflowConfig:
     evaluation_exclude_sessions: list[str] = field(default_factory=list)
     evaluation_recordings: list[str] = field(default_factory=list)
     evaluation_exclude_recordings: list[str] = field(default_factory=list)
-    evaluation_label_col: str = "auto"
-    evaluation_exclude_non_riding: bool = False
-    # Sweep over the cross-product of {evaluation_label_col} × {quality_levels}.
-    # Empty list = use the run's primary quality only (no sweep on that axis).
-    evaluation_quality_levels: list[str] = field(
-        default_factory= lambda: ["marginal"]
+    # Label-grid evaluation settings
+    label_grid_label_cols: list[str] = field(default_factory=lambda: ["auto"])
+    label_grid_exclude_non_riding: bool = False
+    # Sweep over the cross-product of {label_grid_label_cols} × {label_grid_quality_sweep}.
+    label_grid_quality_sweep: list[str] = field(
+        default_factory=lambda: ["marginal"]
     )
-
     # Classifiers to train in CV ("auto" = all three registered models).
-    evaluation_models: list[str] = field(default_factory=lambda: ["auto"])
-
+    label_grid_models: list[str] = field(default_factory=lambda: ["auto"])
     # Models to compute permutation importance for (per-feature-set).
     # "auto" = all three; limit to one tree-ensemble to save runtime.
-    evaluation_permutation_models: list[str] = field(
+    label_grid_permutation_models: list[str] = field(
         default_factory=lambda: ["hist_gradient_boosting"]
     )
+    label_grid_save_trained_models: bool = False
+
     event_contrast_models: list[str] = field(
         default_factory=lambda: ["hist_gradient_boosting", "logistic_regression"]
     )
@@ -86,7 +86,8 @@ class WorkflowConfig:
     two_stage_target_recall: float = 0.90
 
     thesis_protocol_path: str = ""
-    min_quality_label: str = "marginal"
+    # Minimum quality filter applied to all evaluation methods.
+    evaluation_min_quality: str = "marginal"
 
     # Stages to run
     stages: list[str] = field(default_factory=list)
@@ -132,25 +133,17 @@ class WorkflowConfig:
             errors.append("hop_s must be > 0")
         if not isinstance(self.label_set, str) or not self.label_set.strip():
             errors.append("label_set must be a non-empty string")
-        valid_eval_label_cols = {
-            "auto",
-            "scenario_label",
-            "scenario_label_fine",
-            "scenario_label_activity",
-            "scenario_label_coarse",
-            "scenario_label_safety",
-            "scenario_label_riding",
-            "scenario_label_turning",
-            "scenario_label_head_motion",
-            "scenario_label_standing",
-        }
-        if self.evaluation_label_col not in valid_eval_label_cols:
-            errors.append(
-                "evaluation_label_col must be one of "
-                f"{valid_eval_label_cols}, got {self.evaluation_label_col!r}"
-            )
-        if not isinstance(self.evaluation_exclude_non_riding, bool):
-            errors.append("evaluation_exclude_non_riding must be a boolean")
+        valid_label_grid_spec_keywords = {"auto", "multiclass", "binary"}
+        if not isinstance(self.label_grid_label_cols, list) or not self.label_grid_label_cols:
+            errors.append("label_grid_label_cols must be a non-empty list of label-column specs")
+        else:
+            for spec in self.label_grid_label_cols:
+                if not isinstance(spec, str) or not spec.strip():
+                    errors.append(
+                        f"label_grid_label_cols: each entry must be a non-empty string, got {spec!r}"
+                    )
+        if not isinstance(self.label_grid_exclude_non_riding, bool):
+            errors.append("label_grid_exclude_non_riding must be a boolean")
 
         for field_name in (
             "evaluation_sessions",
@@ -175,13 +168,18 @@ class WorkflowConfig:
             if not self.evaluation_methods:
                 errors.append("evaluation_methods must contain at least one method")
         valid_qualities = {"poor", "marginal", "good"}
-        if not isinstance(self.evaluation_quality_levels, list):
-            errors.append("evaluation_quality_levels must be a list of quality labels")
+        if self.evaluation_min_quality not in valid_qualities:
+            errors.append(
+                f"evaluation_min_quality must be one of {sorted(valid_qualities)}, "
+                f"got {self.evaluation_min_quality!r}"
+            )
+        if not isinstance(self.label_grid_quality_sweep, list):
+            errors.append("label_grid_quality_sweep must be a list of quality labels")
         else:
-            bad = [q for q in self.evaluation_quality_levels if q not in valid_qualities]
+            bad = [q for q in self.label_grid_quality_sweep if q not in valid_qualities]
             if bad:
                 errors.append(
-                    f"evaluation_quality_levels contains invalid entries {bad}; "
+                    f"label_grid_quality_sweep contains invalid entries {bad}; "
                     f"valid: {sorted(valid_qualities)}"
                 )
         valid_models = {"random_forest", "hist_gradient_boosting", "logistic_regression"}
@@ -213,10 +211,10 @@ class WorkflowConfig:
                     f'{name}: when using "none", it must be the only list entry'
                 )
 
-        _check_model_list("evaluation_models", self.evaluation_models)
+        _check_model_list("label_grid_models", self.label_grid_models)
         _check_model_list(
-            "evaluation_permutation_models",
-            self.evaluation_permutation_models,
+            "label_grid_permutation_models",
+            self.label_grid_permutation_models,
             allow_none=True,
         )
         _check_model_list("event_contrast_models", self.event_contrast_models)

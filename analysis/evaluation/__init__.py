@@ -15,11 +15,22 @@ from evaluation.permutation_importance import (
     compute_permutation_importance_grouped,
     write_permutation_importance,
 )
-from evaluation.label_grid import run_label_grid_evaluation
+from evaluation.label_grid import resolve_label_cols, run_label_grid_evaluation
+from evaluation.trained_model import (
+    TrainedModel,
+    list_trained_models,
+    load_trained_model,
+    save_trained_model,
+)
 
 __all__ = [
     "run_evaluation",
     "run_label_grid_evaluation",
+    "resolve_label_cols",
+    "TrainedModel",
+    "load_trained_model",
+    "save_trained_model",
+    "list_trained_models",
     "analyze_confusion_matrix",
     "write_confusion_analysis",
     "compute_imu_contribution",

@@ -29,13 +29,17 @@ compares four feature sets:
 - `fused_no_cross`: bike + rider features, excluding cross-sensor features.
 - `fused`: bike + rider + `cross_*` features.
 
-Cross-validation uses `GroupKFold` with `section_id` as the grouping column.
+Cross-validation uses `GroupKFold`. The workflow label-grid path uses the
+single-run evaluator default group column, `section_id`; the direct single-run
+CLI can override this with `--group`, for example `--group recording_name`.
 
 The grid axes are:
 
-- **label scheme**: `evaluation_label_col`, or all known schemes when set to `auto`.
-- **quality filter**: `evaluation_quality_levels`, with `min_quality_label` always
-  added as the primary quality level if it is missing.
+- **label scheme**: `label_grid_label_cols`, or all known schemes when set to
+  `auto`.
+- **quality filter**: `label_grid_quality_sweep`, with
+  `evaluation_min_quality` always added as the primary quality level if it is
+  missing.
 
 ### Label Schemes
 
@@ -44,13 +48,15 @@ The grid axes are:
 - `scenario_label_activity`: activity taxonomy, e.g. steady, turning, head
   motion, longitudinal effort.
 - `scenario_label_coarse`: compact coarse activity taxonomy.
+- `scenario_label_fine`: configured priority-resolved fine label.
+- `scenario_label_safety`: non-riding / normal / incident taxonomy.
 
 **Binary detection** (detect presence/absence of a specific phenomenon):
 
-- `scenario_label_binary`: riding vs non-riding.
 - `scenario_label_riding`: riding detail.
-- `scenario_label_cornering`: cornering vs non-cornering.
+- `scenario_label_turning`: turning vs non-turning.
 - `scenario_label_head_motion`: head-motion vs non-head-motion.
+- `scenario_label_standing`: standing vs non-standing.
 
 ### Running
 
@@ -60,11 +66,11 @@ Via the workflow:
 {
   "stages": ["exports", "evaluation"],
   "evaluation_methods": ["label_grid"],
-  "evaluation_label_col": "auto",
-  "evaluation_quality_levels": ["marginal", "good"],
-  "evaluation_models": ["random_forest", "hist_gradient_boosting", "logistic_regression"],
-  "evaluation_permutation_models": ["hist_gradient_boosting"],
-  "min_quality_label": "marginal"
+  "label_grid_label_cols": ["auto"],
+  "label_grid_quality_sweep": ["marginal", "good"],
+  "label_grid_models": ["random_forest", "hist_gradient_boosting", "logistic_regression"],
+  "label_grid_permutation_models": ["hist_gradient_boosting"],
+  "evaluation_min_quality": "marginal"
 }
 ```
 
@@ -80,7 +86,7 @@ uv run python -m evaluation \
   --permutation-models hist_gradient_boosting
 ```
 
-Use `--permutation-models none` or `"evaluation_permutation_models": ["none"]`
+Use `--permutation-models none` or `"label_grid_permutation_models": ["none"]`
 in workflow config to skip permutation importance.
 
 Directly — single label/quality run:
@@ -100,6 +106,14 @@ Under `data/evaluation/label_grid/`:
 - `label_grid_metrics.csv`: aggregate metrics across label schemes, qualities,
   models, and feature sets.
 - `label_grid_imu_contribution.csv`: aggregate paired sensor-ablation deltas.
+- `label_grid_imu_contribution_per_class.csv`: aggregate per-class F1 deltas for
+  all feature-set comparisons and models.
+- `label_grid_feature_importance.csv` and
+  `label_grid_feature_importance_by_group.csv`: aggregate model-native feature
+  importance tables.
+- `label_grid_permutation_importance.csv` and
+  `label_grid_permutation_importance_by_group.csv`: aggregate permutation
+  importance tables for primary-quality runs.
 
 Report-stage summary figures are rendered from `label_grid_metrics.csv` under
 `data/report/figures/evaluation/label_grid/`:
@@ -107,14 +121,19 @@ Report-stage summary figures are rendered from `label_grid_metrics.csv` under
 - `label_grid_heatmap_macro_f1.png`
 - `label_grid_heatmap_accuracy.png`
 - `label_grid_quality_grid_macro_f1.png`
+- `feature_importance/`: per-label, per-quality feature-importance plots.
+- `permutation_importance/`: per-label, per-quality permutation-importance
+  plots.
 
 Per-run under `data/evaluation/label_grid/<label_col>__q-<quality>/`:
 
 - `evaluation_summary.json`: run metadata, classes, and metric summary.
 - `metrics_table.csv`: accuracy and macro-F1 for each model and feature set.
 - `imu_contribution.csv`: paired fold deltas for `fused` vs single/fused variants.
-- `imu_contribution_per_class_<pair>__<model>.csv`: per-class F1 deltas.
-- `<model>/per_class_report_<feature_set>.json`: sklearn per-class report.
+- `imu_contribution_per_class.csv`: per-class F1 deltas, with `better`,
+  `baseline`, `model`, and class columns.
+- `per_class_reports/<model>/per_class_report_<feature_set>.json`: sklearn
+  per-class report.
 - `<model>/fold_scores.csv`: fold-wise accuracy and macro-F1, with
   `feature_set`.
 - `<model>/confusion_matrix.csv`: long-form OOF confusion matrices, with
@@ -129,6 +148,9 @@ Per-run under `data/evaluation/label_grid/<label_col>__q-<quality>/`:
   primary-quality runs only, for configured permutation models.
 - `<model>/permutation_importance_by_group.csv`: permutation importance
   aggregated into bike/rider/cross groups.
+- Optional when `label_grid_save_trained_models` or `--save-models` is enabled:
+  `saved_models/<model>/trained_model_<feature_set>.joblib` plus
+  `saved_models/<model>/trained_model_<feature_set>_meta.json`.
 - Binary targets only: `<model>/binary_metrics_<feature_set>.json`,
   `<model>/misclassified_<feature_set>.csv`, and optional per-section overlay
   figures.
@@ -169,7 +191,7 @@ Via the workflow:
   "stages": ["exports", "evaluation"],
   "evaluation_methods": ["event_contrasts"],
   "event_contrast_models": ["hist_gradient_boosting", "logistic_regression"],
-  "min_quality_label": "marginal"
+  "evaluation_min_quality": "marginal"
 }
 ```
 
@@ -251,7 +273,7 @@ Via the workflow:
   "two_stage_event_tasks": ["all"],
   "two_stage_event_models": ["hist_gradient_boosting", "logistic_regression"],
   "two_stage_target_recall": 0.90,
-  "min_quality_label": "marginal"
+  "evaluation_min_quality": "marginal"
 }
 ```
 

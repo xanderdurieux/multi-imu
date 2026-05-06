@@ -32,7 +32,7 @@ from .config import WorkflowConfig
 
 log = logging.getLogger(__name__)
 
-from evaluation.label_grid import all_label_cols as _evaluation_label_cols
+from evaluation.label_grid import resolve_label_cols
 
 def _collect_recordings(cfg: WorkflowConfig) -> list[str]:
     """Resolve the list of recording names to process."""
@@ -385,7 +385,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 run_dataset_summary(
                     fused,
                     output_dir=out,
-                    min_quality=cfg.min_quality_label,
+                    min_quality=cfg.evaluation_min_quality,
                     no_plots=cfg.no_plots,
                 )
                 result["ok"] += 1
@@ -419,19 +419,15 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     if eval_features is None:
                         result["skipped"] += 1
                         continue
-                    label_cols = (
-                        list(_evaluation_label_cols())
-                        if cfg.evaluation_label_col == "auto"
-                        else [cfg.evaluation_label_col]
-                    )
+                    label_cols = resolve_label_cols(cfg.label_grid_label_cols)
                     # Always include the primary quality so permutation importance
                     # is produced even when the user narrows the quality axis.
-                    qualities = list(cfg.evaluation_quality_levels)
-                    if cfg.min_quality_label not in qualities:
-                        qualities = [cfg.min_quality_label] + qualities
+                    qualities = list(cfg.label_grid_quality_sweep)
+                    if cfg.evaluation_min_quality not in qualities:
+                        qualities = [cfg.evaluation_min_quality] + qualities
                     try:
-                        eval_models = resolve_evaluation_models(cfg.evaluation_models)
-                        perm_models = resolve_evaluation_models(cfg.evaluation_permutation_models)
+                        eval_models = resolve_evaluation_models(cfg.label_grid_models)
+                        perm_models = resolve_evaluation_models(cfg.label_grid_permutation_models)
                         log.info(
                             "Running label-grid evaluation: label_cols=%s × qualities=%s "
                             "models=%s permutation=%s features=%s -> %s",
@@ -447,12 +443,13 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                             output_dir=method_out,
                             label_cols=label_cols,
                             qualities=qualities,
-                            primary_quality=cfg.min_quality_label,
+                            primary_quality=cfg.evaluation_min_quality,
                             seed=cfg.evaluation_seed,
-                            exclude_non_riding=cfg.evaluation_exclude_non_riding,
+                            exclude_non_riding=cfg.label_grid_exclude_non_riding,
                             no_plots=cfg.no_plots,
                             evaluation_models=eval_models,
                             permutation_models=perm_models,
+                            save_trained_models=cfg.label_grid_save_trained_models,
                         )
                         result["ok"] += int(grid_summary.get("n_runs_ok", 0))
                         result["failed"] += int(
@@ -487,7 +484,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                             output_dir=out,
                             models=event_models,
                             group_col="recording_name",
-                            min_quality=cfg.min_quality_label,
+                            min_quality=cfg.evaluation_min_quality,
                             seed=cfg.evaluation_seed,
                             no_plots=cfg.no_plots,
                         )
@@ -523,7 +520,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                             output_dir=out,
                             task_names=cfg.two_stage_event_tasks,
                             models=two_stage_models,
-                            min_quality=cfg.min_quality_label,
+                            min_quality=cfg.evaluation_min_quality,
                             seed=cfg.evaluation_seed,
                             target_recall=cfg.two_stage_target_recall,
                             hop_s=cfg.hop_s,

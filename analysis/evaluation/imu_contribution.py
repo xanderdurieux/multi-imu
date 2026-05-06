@@ -108,9 +108,12 @@ def per_class_f1_deltas(
         support = int(pc_b.get(cls, {}).get("support", 0))
         rows.append(
             {
+                "better": better,
+                "baseline": baseline,
+                "model": model,
                 "class": cls,
-                f"f1_{better}": round(f1_b, 4),
-                f"f1_{baseline}": round(f1_a, 4),
+                "f1_better": round(f1_b, 4),
+                "f1_baseline": round(f1_a, 4),
                 "delta_f1": round(f1_b - f1_a, 4),
                 "support": support,
             }
@@ -141,7 +144,7 @@ def write_imu_contribution(
         len(contribution_df),
     )
 
-    delta_paths: list[Path] = []
+    delta_frames: list[pd.DataFrame] = []
     pair_models = (
         contribution_df[["better", "baseline", "model"]]
         .drop_duplicates()
@@ -153,11 +156,18 @@ def write_imu_contribution(
         )
         if df.empty:
             continue
-        path = (
-            output_dir
-            / f"imu_contribution_per_class_{better}_vs_{baseline}__{model}.csv"
+        delta_frames.append(df)
+
+    delta_paths: list[Path] = []
+    if delta_frames:
+        per_class_path = output_dir / "imu_contribution_per_class.csv"
+        per_class_df = pd.concat(delta_frames, ignore_index=True)
+        write_csv(per_class_df, per_class_path)
+        delta_paths.append(per_class_path)
+        log.info(
+            "Per-class IMU contribution → %s (%d rows)",
+            project_relative_path(per_class_path),
+            len(per_class_df),
         )
-        write_csv(df, path)
-        delta_paths.append(path)
 
     return summary_path, delta_paths

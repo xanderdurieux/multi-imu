@@ -50,6 +50,41 @@ def _is_binary_col(label_col: str) -> bool:
     return label_col in _binary_label_cols()
 
 
+def resolve_label_cols(specs: list[str]) -> list[str]:
+    """Expand a list of label-column specs into concrete column names.
+
+    Each entry can be:
+    - ``"auto"``        → all configured label columns
+    - ``"multiclass"``  → multiclass schemes only
+    - ``"binary"``      → set-based binary schemes only
+    - a concrete column name (``"scenario_label_activity"``, etc.)
+
+    Duplicates are removed while preserving order.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(col: str) -> None:
+        if col not in seen:
+            seen.add(col)
+            out.append(col)
+
+    for spec in specs:
+        if spec == "auto":
+            for col in all_label_cols():
+                _add(col)
+        elif spec == "multiclass":
+            for col in MULTICLASS_LABEL_COLS:
+                _add(col)
+        elif spec == "binary":
+            for col in _binary_label_cols():
+                _add(col)
+        else:
+            _add(spec)
+
+    return out
+
+
 def _run_name(label_col: str, quality: str) -> str:
     """Return the subdirectory name for one label × quality run."""
     prefix = "binary__" if _is_binary_col(label_col) else ""
@@ -62,6 +97,17 @@ def _display_path(path: Path | str) -> str:
         return project_relative_path(path)
     except ValueError:
         return str(Path(path))
+
+
+def _safe_plot_token(value: object) -> str:
+    """Return a compact filename token for a label-grid value."""
+    return (
+        str(value)
+        .replace("/", "-")
+        .replace("\\", "-")
+        .replace(" ", "_")
+        .replace("|", "-")
+    )
 
 
 def _log_feature_table_overview(features_path: Path) -> None:
@@ -85,16 +131,61 @@ def _collect_per_class_imu(
     label_col: str,
     quality: str,
 ) -> list[pd.DataFrame]:
-    """Collect all per-class IMU contribution CSVs from a single run directory."""
+    """Collect per-class IMU contribution CSVs from a single run directory."""
     frames: list[pd.DataFrame] = []
+    consolidated = run_out / "imu_contribution_per_class.csv"
+    if consolidated.exists():
+        try:
+            df = read_csv(consolidated)
+            df.insert(0, "label_col", label_col)
+            df.insert(1, "min_quality", quality)
+            return [df]
+        except Exception as exc:
+            log.warning("Could not read per-class IMU CSV %s: %s", consolidated.name, exc)
+
     for path in run_out.glob("imu_contribution_per_class_*_vs_*__*.csv"):
         try:
             df = read_csv(path)
+            stem = path.stem.removeprefix("imu_contribution_per_class_")
+            pair, _, model = stem.partition("__")
+            better, _, baseline = pair.partition("_vs_")
             df.insert(0, "label_col", label_col)
             df.insert(1, "min_quality", quality)
+            if "better" not in df.columns:
+                df.insert(2, "better", better)
+            if "baseline" not in df.columns:
+                df.insert(3, "baseline", baseline)
+            if "model" not in df.columns:
+                df.insert(4, "model", model)
             frames.append(df)
         except Exception as exc:
             log.warning("Could not read per-class IMU CSV %s: %s", path.name, exc)
+    return frames
+
+
+def _collect_model_artifact_csv(
+    run_out: Path,
+    filename: str,
+    *,
+    label_col: str,
+    quality: str,
+) -> list[pd.DataFrame]:
+    """Collect a per-model artifact CSV and add label-grid context."""
+    frames: list[pd.DataFrame] = []
+    for path in sorted(run_out.glob(f"*/{filename}")):
+        model = path.parent.name
+        try:
+            df = read_csv(path)
+        except Exception as exc:
+            log.warning("Could not read %s: %s", _display_path(path), exc)
+            continue
+        if df.empty:
+            continue
+        df.insert(0, "label_col", label_col)
+        df.insert(1, "min_quality", quality)
+        df.insert(2, "is_binary", _is_binary_col(label_col))
+        df.insert(3, "model", model)
+        frames.append(df)
     return frames
 
 
@@ -110,6 +201,7 @@ def run_label_grid_evaluation(
     no_plots: bool = False,
     evaluation_models: tuple[str, ...] | None = None,
     permutation_models: tuple[str, ...] = ("random_forest",),
+    save_trained_models: bool = False,
 ) -> dict[str, Any]:
     """Run scenario evaluation for each (label_col, quality) combination.
 
@@ -158,6 +250,10 @@ def run_label_grid_evaluation(
     grid_metrics: list[pd.DataFrame] = []
     grid_imu: list[pd.DataFrame] = []
     grid_imu_per_class: list[pd.DataFrame] = []
+    grid_feature_importance: list[pd.DataFrame] = []
+    grid_feature_importance_by_group: list[pd.DataFrame] = []
+    grid_permutation_importance: list[pd.DataFrame] = []
+    grid_permutation_importance_by_group: list[pd.DataFrame] = []
     runs_meta: list[dict[str, Any]] = []
 
     for label_idx, label_col in enumerate(label_cols, start=1):
@@ -190,6 +286,7 @@ def run_label_grid_evaluation(
                     compute_permutation_importance=compute_perm,
                     evaluation_models=cv_models,
                     permutation_models=perm_models,
+                    save_trained_models=save_trained_models,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 log.warning(
@@ -281,6 +378,23 @@ def run_label_grid_evaluation(
                     run_name,
                 )
 
+            artifact_specs = (
+                ("feature_importance.csv", grid_feature_importance),
+                ("feature_importance_by_group.csv", grid_feature_importance_by_group),
+                ("permutation_importance.csv", grid_permutation_importance),
+                ("permutation_importance_by_group.csv", grid_permutation_importance_by_group),
+            )
+            for filename, sink in artifact_specs:
+                frames = _collect_model_artifact_csv(
+                    run_out,
+                    filename,
+                    label_col=label_col,
+                    quality=quality,
+                )
+                if frames:
+                    sink.extend(frames)
+                    log.debug("  collected %d %s frame(s) for %s", len(frames), filename, run_name)
+
     grid_metrics_df = (
         pd.concat(grid_metrics, ignore_index=True) if grid_metrics else pd.DataFrame()
     )
@@ -289,6 +403,26 @@ def run_label_grid_evaluation(
     )
     grid_imu_per_class_df = (
         pd.concat(grid_imu_per_class, ignore_index=True) if grid_imu_per_class else pd.DataFrame()
+    )
+    grid_feature_importance_df = (
+        pd.concat(grid_feature_importance, ignore_index=True)
+        if grid_feature_importance
+        else pd.DataFrame()
+    )
+    grid_feature_importance_by_group_df = (
+        pd.concat(grid_feature_importance_by_group, ignore_index=True)
+        if grid_feature_importance_by_group
+        else pd.DataFrame()
+    )
+    grid_permutation_importance_df = (
+        pd.concat(grid_permutation_importance, ignore_index=True)
+        if grid_permutation_importance
+        else pd.DataFrame()
+    )
+    grid_permutation_importance_by_group_df = (
+        pd.concat(grid_permutation_importance_by_group, ignore_index=True)
+        if grid_permutation_importance_by_group
+        else pd.DataFrame()
     )
 
     if not grid_metrics_df.empty:
@@ -320,6 +454,58 @@ def run_label_grid_evaluation(
             "Wrote label-grid per-class IMU contribution → %s (%d rows)",
             project_relative_path(imu_pc_path),
             len(grid_imu_per_class_df),
+        )
+
+    if not grid_feature_importance_df.empty:
+        fi_path = output_dir / "label_grid_feature_importance.csv"
+        merge_csv(
+            grid_feature_importance_df,
+            fi_path,
+            ["label_col", "min_quality", "model", "feature_set", "feature"],
+        )
+        log.info(
+            "Wrote label-grid feature importance → %s (%d rows)",
+            project_relative_path(fi_path),
+            len(grid_feature_importance_df),
+        )
+
+    if not grid_feature_importance_by_group_df.empty:
+        fig_path = output_dir / "label_grid_feature_importance_by_group.csv"
+        merge_csv(
+            grid_feature_importance_by_group_df,
+            fig_path,
+            ["label_col", "min_quality", "model", "feature_set", "sensor_group"],
+        )
+        log.info(
+            "Wrote label-grid feature importance by group → %s (%d rows)",
+            project_relative_path(fig_path),
+            len(grid_feature_importance_by_group_df),
+        )
+
+    if not grid_permutation_importance_df.empty:
+        perm_path = output_dir / "label_grid_permutation_importance.csv"
+        merge_csv(
+            grid_permutation_importance_df,
+            perm_path,
+            ["label_col", "min_quality", "model", "feature_set", "feature"],
+        )
+        log.info(
+            "Wrote label-grid permutation importance → %s (%d rows)",
+            project_relative_path(perm_path),
+            len(grid_permutation_importance_df),
+        )
+
+    if not grid_permutation_importance_by_group_df.empty:
+        perm_grp_path = output_dir / "label_grid_permutation_importance_by_group.csv"
+        merge_csv(
+            grid_permutation_importance_by_group_df,
+            perm_grp_path,
+            ["label_col", "min_quality", "model", "feature_set", "sensor_group"],
+        )
+        log.info(
+            "Wrote label-grid permutation importance by group → %s (%d rows)",
+            project_relative_path(perm_grp_path),
+            len(grid_permutation_importance_by_group_df),
         )
 
     # ------------------------------------------------------------------
@@ -363,6 +549,128 @@ def run_label_grid_evaluation(
                         )
             except Exception as exc:
                 log.warning("Label-grid IMU contribution figure failed: %s", exc)
+
+        if (
+            not grid_feature_importance_df.empty
+            or not grid_feature_importance_by_group_df.empty
+            or not grid_permutation_importance_df.empty
+            or not grid_permutation_importance_by_group_df.empty
+        ):
+            try:
+                from visualization._eval_common import (
+                    plot_permutation_importance,
+                    plot_sensor_group_contribution,
+                )
+                from visualization.plot_eval_scenario import plot_feature_importance
+
+                fi_figures_dir = figures_dir / "feature_importance"
+                fi_figures_dir.mkdir(exist_ok=True)
+
+                if not grid_feature_importance_df.empty:
+                    for (label, quality, model, fs), sub in grid_feature_importance_df.groupby(
+                        ["label_col", "min_quality", "model", "feature_set"],
+                        sort=False,
+                    ):
+                        stem = "__".join(
+                            _safe_plot_token(v) for v in (label, f"q-{quality}", model, fs)
+                        )
+                        plot_feature_importance(
+                            sub.drop(
+                                columns=[
+                                    "label_col",
+                                    "min_quality",
+                                    "is_binary",
+                                    "model",
+                                    "feature_set",
+                                ],
+                                errors="ignore",
+                            ),
+                            fi_figures_dir / f"label_grid_feature_importance__{stem}.png",
+                            title=f"Feature importance — {label} / q={quality} / {model} / {fs}",
+                        )
+
+                if not grid_feature_importance_by_group_df.empty:
+                    for (label, quality, model, fs), sub in grid_feature_importance_by_group_df.groupby(
+                        ["label_col", "min_quality", "model", "feature_set"],
+                        sort=False,
+                    ):
+                        stem = "__".join(
+                            _safe_plot_token(v) for v in (label, f"q-{quality}", model, fs)
+                        )
+                        plot_sensor_group_contribution(
+                            sub.drop(
+                                columns=[
+                                    "label_col",
+                                    "min_quality",
+                                    "is_binary",
+                                    "model",
+                                    "feature_set",
+                                ],
+                                errors="ignore",
+                            ),
+                            fi_figures_dir / f"label_grid_feature_importance_by_group__{stem}.png",
+                            title=(
+                                "Feature importance by sensor group — "
+                                f"{label} / q={quality} / {model} / {fs}"
+                            ),
+                        )
+
+                perm_figures_dir = figures_dir / "permutation_importance"
+                perm_figures_dir.mkdir(exist_ok=True)
+
+                if not grid_permutation_importance_df.empty:
+                    for (label, quality, model, fs), sub in grid_permutation_importance_df.groupby(
+                        ["label_col", "min_quality", "model", "feature_set"],
+                        sort=False,
+                    ):
+                        stem = "__".join(
+                            _safe_plot_token(v) for v in (label, f"q-{quality}", model, fs)
+                        )
+                        plot_permutation_importance(
+                            sub.sort_values("perm_importance_mean", ascending=False).drop(
+                                columns=[
+                                    "label_col",
+                                    "min_quality",
+                                    "is_binary",
+                                    "model",
+                                    "feature_set",
+                                ],
+                                errors="ignore",
+                            ),
+                            perm_figures_dir / f"label_grid_permutation_importance__{stem}.png",
+                            title=(
+                                "Permutation importance — "
+                                f"{label} / q={quality} / {model} / {fs}"
+                            ),
+                        )
+
+                if not grid_permutation_importance_by_group_df.empty:
+                    for (label, quality, model, fs), sub in grid_permutation_importance_by_group_df.groupby(
+                        ["label_col", "min_quality", "model", "feature_set"],
+                        sort=False,
+                    ):
+                        stem = "__".join(
+                            _safe_plot_token(v) for v in (label, f"q-{quality}", model, fs)
+                        )
+                        plot_sensor_group_contribution(
+                            sub.drop(
+                                columns=[
+                                    "label_col",
+                                    "min_quality",
+                                    "is_binary",
+                                    "model",
+                                    "feature_set",
+                                ],
+                                errors="ignore",
+                            ),
+                            perm_figures_dir / f"label_grid_permutation_importance_by_group__{stem}.png",
+                            title=(
+                                "Permutation importance by sensor group — "
+                                f"{label} / q={quality} / {model} / {fs}"
+                            ),
+                        )
+            except Exception as exc:
+                log.warning("Label-grid feature-importance figures failed: %s", exc)
 
     # ------------------------------------------------------------------
     # JSON summary

@@ -444,26 +444,45 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
         )
 
     all_results_disk: dict[str, dict] = {}
-    model_dirs = sorted(d for d in output_dir.iterdir() if d.is_dir() and d.name != "figures")
+    ignored_dirs = {"figures", "per_class_reports", "saved_models"}
+    model_dirs = sorted(
+        d
+        for d in output_dir.iterdir()
+        if d.is_dir()
+        and d.name not in ignored_dirs
+        and (
+            (d / "confusion_matrix.csv").exists()
+            or (d / "feature_importance.csv").exists()
+            or (d / "feature_importance_by_group.csv").exists()
+            or any(d.glob("per_class_report_*.json"))
+        )
+    )
 
     for model_dir in model_dirs:
         model_name = model_dir.name
         model_figures_dir = model_dir / "figures"
         model_figures_dir.mkdir(exist_ok=True)
 
-        for cm_path in sorted(model_dir.glob("confusion_matrix_*.csv")):
+        cm_path = model_dir / "confusion_matrix.csv"
+        if cm_path.exists():
             try:
-                cm_df = pd.read_csv(cm_path, index_col=0)
-                _, _, fs_name = cm_path.stem.partition("confusion_matrix_")
-                human = (
-                    f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
-                    f"{fs_name.replace('_', ' ').title()}"
-                )
-                out = model_figures_dir / f"{cm_path.stem}.png"
-                plot_confusion_matrix(cm_df, out, title=f"Confusion matrix — {human}")
-                generated.append(out)
+                cm_long = pd.read_csv(cm_path)
+                for fs_name, sub in cm_long.groupby("feature_set", sort=False):
+                    cm_wide = sub.pivot_table(
+                        index="true", columns="predicted", values="count",
+                        aggfunc="sum", fill_value=0,
+                    )
+                    cm_wide.columns.name = None
+                    cm_wide.index.name = None
+                    human = (
+                        f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                        f"{str(fs_name).replace('_', ' ').title()}"
+                    )
+                    out = model_figures_dir / f"confusion_matrix_{fs_name}.png"
+                    plot_confusion_matrix(cm_wide, out, title=f"Confusion matrix — {human}")
+                    generated.append(out)
             except Exception as exc:
-                log.warning("Failed to plot confusion matrix %s: %s", cm_path.name, exc)
+                log.warning("Failed to plot confusion matrix: %s", exc)
 
         fi_path = model_dir / "feature_importance.csv"
         if fi_path.exists():
@@ -503,7 +522,10 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to plot feature importance by group %s: %s", fi_grp_path.name, exc)
 
-        for pc_path in sorted(model_dir.glob("per_class_report_*.json")):
+        legacy_report_paths = sorted(model_dir.glob("per_class_report_*.json"))
+        report_dir = output_dir / "per_class_reports" / model_name
+        report_paths = sorted(report_dir.glob("per_class_report_*.json")) if report_dir.exists() else []
+        for pc_path in [*report_paths, *legacy_report_paths]:
             try:
                 _, _, fs_name = pc_path.stem.partition("per_class_report_")
                 data = json.loads(pc_path.read_text(encoding="utf-8"))
@@ -535,7 +557,7 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
             except Exception as exc:
                 log.warning("Failed to plot per-class F1 for %s: %s", fs_name, exc)
 
-        out = figures_dir / "per_class_f1_by_feature_set.png"
+        out = figures_dir / "feature_set_comparison_per_class_f1.png"
         try:
             result = plot_per_class_f1_feature_set_comparison(
                 all_results_disk,
