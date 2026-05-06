@@ -43,6 +43,22 @@ from visualization.plot_labels import _label_colors, _label_patches
 log = logging.getLogger(__name__)
 
 
+def _save_confusion_matrix_figure(fig: matplotlib.figure.Figure, output_path: Path) -> None:
+    """Save a confusion matrix figure, retrying without tight bbox on font-copy bugs."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    except AttributeError as exc:
+        msg = str(exc)
+        if "FontProperties" not in msg or "__newobj__" not in msg:
+            raise
+        log.warning(
+            "Tight-bbox save failed for confusion matrix (%s); retrying without tight bbox",
+            exc,
+        )
+        fig.savefig(output_path, dpi=_DPI)
+
+
 # ---------------------------------------------------------------------------
 # Confusion matrix
 # ---------------------------------------------------------------------------
@@ -91,9 +107,11 @@ def plot_confusion_matrix(
     plt.colorbar(im, ax=ax, shrink=0.8, label="Recall" if normalize else "Count")
     ax.set_title(title, fontsize=11)
 
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        fig.tight_layout()
+        _save_confusion_matrix_figure(fig, output_path)
+    finally:
+        plt.close(fig)
     log.debug("Wrote confusion matrix → %s", _display_path(output_path))
     return output_path
 
@@ -467,22 +485,49 @@ def generate_evaluation_figures(output_dir: Path) -> list[Path]:
         if cm_path.exists():
             try:
                 cm_long = pd.read_csv(cm_path)
-                for fs_name, sub in cm_long.groupby("feature_set", sort=False):
-                    cm_wide = sub.pivot_table(
-                        index="true", columns="predicted", values="count",
-                        aggfunc="sum", fill_value=0,
-                    )
-                    cm_wide.columns.name = None
-                    cm_wide.index.name = None
-                    human = (
-                        f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
-                        f"{str(fs_name).replace('_', ' ').title()}"
-                    )
-                    out = model_figures_dir / f"confusion_matrix_{fs_name}.png"
-                    plot_confusion_matrix(cm_wide, out, title=f"Confusion matrix — {human}")
-                    generated.append(out)
+            except pd.errors.EmptyDataError:
+                log.warning("Confusion matrix CSV is empty: %s", _display_path(cm_path))
             except Exception as exc:
-                log.warning("Failed to plot confusion matrix: %s", exc)
+                log.warning("Failed to load confusion matrix CSV %s: %s", cm_path.name, exc)
+            else:
+                required_cols = {"feature_set", "true", "predicted", "count"}
+                missing = required_cols - set(cm_long.columns)
+                if cm_long.empty:
+                    log.warning("Confusion matrix CSV has no rows: %s", _display_path(cm_path))
+                elif missing:
+                    log.warning(
+                        "Confusion matrix CSV %s missing columns: %s",
+                        _display_path(cm_path),
+                        sorted(missing),
+                    )
+                else:
+                    for fs_name, sub in cm_long.groupby("feature_set", sort=False):
+                        try:
+                            cm_wide = sub.pivot_table(
+                                index="true", columns="predicted", values="count",
+                                aggfunc="sum", fill_value=0,
+                            )
+                            cm_wide.columns.name = None
+                            cm_wide.index.name = None
+                            human = (
+                                f"{_MODEL_DISPLAY.get(model_name, model_name)} / "
+                                f"{str(fs_name).replace('_', ' ').title()}"
+                            )
+                            out = model_figures_dir / f"confusion_matrix_{fs_name}.png"
+                            plot_confusion_matrix(
+                                cm_wide,
+                                out,
+                                title=f"Confusion matrix — {human}",
+                            )
+                            generated.append(out)
+                        except Exception as exc:
+                            log.warning(
+                                "Failed to plot confusion matrix for %s / %s: %s",
+                                model_name,
+                                fs_name,
+                                exc,
+                                exc_info=log.isEnabledFor(logging.DEBUG),
+                            )
 
         fi_path = model_dir / "feature_importance.csv"
         if fi_path.exists():
