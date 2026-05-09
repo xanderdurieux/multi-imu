@@ -11,6 +11,8 @@ from visualization.plot_exports_calibration import (
     run_calibration_eda,
 )
 from visualization.plot_exports_features import (
+    plot_export_feature_summary,
+    plot_feature_family_summary,
     plot_feature_correlation,
     plot_feature_distributions_by_label,
     plot_label_distribution,
@@ -40,8 +42,10 @@ from visualization.plot_exports_sync import (
 
 __all__ = [
     "plot_calibration_quality_overview",
+    "plot_export_feature_summary",
     "plot_feature_correlation",
     "plot_feature_distributions_by_label",
+    "plot_feature_family_summary",
     "plot_forward_confidence",
     "plot_gravity_residuals",
     "plot_label_distribution",

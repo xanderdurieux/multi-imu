@@ -64,6 +64,113 @@ _GROUP_TITLES = {
     "cross": "Cross-sensor features by scenario label",
 }
 
+_FEATURE_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("bike", "Bike only", "#3498db"),
+    ("rider", "Rider only", "#e74c3c"),
+    ("cross", "Cross-sensor", "#2ecc71"),
+)
+
+_FEATURE_FAMILY_ORDER: tuple[str, ...] = (
+    "Statistical",
+    "Temporal",
+    "Frequency",
+    "Peaks",
+    "Orientation",
+    "Cross-sensor",
+)
+
+_FEATURE_FAMILY_COLORS: dict[str, str] = {
+    "Statistical": "#4c78a8",
+    "Temporal": "#f58518",
+    "Frequency": "#54a24b",
+    "Peaks": "#e45756",
+    "Orientation": "#b279a2",
+    "Cross-sensor": "#72b7b2",
+}
+
+
+def _feature_columns(df: pd.DataFrame) -> list[str]:
+    """Return numeric exported feature columns grouped by sensor prefixes."""
+    return [
+        c
+        for c in df.columns
+        if pd.api.types.is_numeric_dtype(df[c])
+        and c.startswith(("bike_", "rider_", "cross_"))
+        and not df[c].isna().all()
+    ]
+
+
+def _feature_family(feature: str) -> str:
+    """Return a presentation-friendly feature family for an exported column."""
+    if feature.startswith("cross_"):
+        return "Cross-sensor"
+
+    name = feature.replace("bike_", "", 1).replace("rider_", "", 1)
+    if "_temporal_" in name:
+        return "Temporal"
+    if "_spectral_" in name or "_dominant_freq" in name or "_bandpower_" in name:
+        return "Frequency"
+    if "_peak_" in name:
+        return "Peaks"
+    if any(token in name for token in ("pitch", "roll", "yaw_rate")):
+        return "Orientation"
+    return "Statistical"
+
+
+def _feature_group(feature: str) -> str:
+    """Return bike/rider/cross group for an exported feature column."""
+    return feature.split("_", 1)[0]
+
+
+def _feature_family_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """Return feature counts indexed by sensor group and feature family."""
+    cols = _feature_columns(df)
+    rows = [
+        {
+            "group": _feature_group(col),
+            "family": _feature_family(col),
+            "feature": col,
+        }
+        for col in cols
+    ]
+    if not rows:
+        return pd.DataFrame(index=[g for g, _, _ in _FEATURE_GROUPS], columns=_FEATURE_FAMILY_ORDER).fillna(0)
+
+    counts = (
+        pd.DataFrame(rows)
+        .groupby(["group", "family"])
+        .size()
+        .unstack(fill_value=0)
+        .reindex(index=[g for g, _, _ in _FEATURE_GROUPS], fill_value=0)
+        .reindex(columns=_FEATURE_FAMILY_ORDER, fill_value=0)
+    )
+    return counts.astype(int)
+
+
+def _feature_set_totals(counts: pd.DataFrame) -> dict[str, int]:
+    """Return canonical model feature-set sizes from group/family counts."""
+    bike = int(counts.loc["bike"].sum()) if "bike" in counts.index else 0
+    rider = int(counts.loc["rider"].sum()) if "rider" in counts.index else 0
+    cross = int(counts.loc["cross"].sum()) if "cross" in counts.index else 0
+    return {
+        "Bike": bike,
+        "Rider": rider,
+        "Fused\n(no cross)": bike + rider,
+        "Fused": bike + rider + cross,
+    }
+
+
+def _format_int(value: float | int) -> str:
+    """Return integer with thin presentation-friendly thousands grouping."""
+    return f"{int(value):,}"
+
+
+def _pct(value: float, total: float) -> str:
+    """Return percent string."""
+    if total <= 0:
+        return "0.0%"
+    return f"{100.0 * float(value) / float(total):.1f}%"
+
 
 def plot_label_distribution(df: pd.DataFrame, output_dir: Path) -> Path:
     """Horizontal bar chart showing window count per scenario label."""
@@ -108,6 +215,271 @@ def plot_label_distribution(df: pd.DataFrame, output_dir: Path) -> Path:
     ax.spines["right"].set_visible(False)
 
     fig.tight_layout()
+    return save_figure(fig, out_path, dpi=DPI)
+
+
+def plot_feature_family_summary(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Stacked feature-family chart for the exported model inputs."""
+    out_path = output_dir / "feature_family_summary.png"
+    counts = _feature_family_counts(df)
+    if int(counts.to_numpy().sum()) == 0:
+        log.debug("No exported feature columns found; skipping feature-family summary")
+        return None
+
+    group_labels = {key: label for key, label, _ in _FEATURE_GROUPS}
+    group_colors = {key: color for key, _, color in _FEATURE_GROUPS}
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(11.5, 5.2),
+        gridspec_kw={"width_ratios": [1.6, 1.0]},
+    )
+    ax_stack, ax_totals = axes
+
+    y = np.arange(len(counts.index))
+    left = np.zeros(len(counts.index), dtype=float)
+    for family in _FEATURE_FAMILY_ORDER:
+        vals = counts[family].to_numpy(dtype=float)
+        if not np.any(vals):
+            continue
+        ax_stack.barh(
+            y,
+            vals,
+            left=left,
+            height=0.62,
+            color=_FEATURE_FAMILY_COLORS[family],
+            edgecolor="white",
+            linewidth=0.7,
+            label=family,
+        )
+        for i, val in enumerate(vals):
+            if val >= 8:
+                ax_stack.text(
+                    left[i] + val / 2,
+                    y[i],
+                    str(int(val)),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="white" if family in {"Statistical", "Peaks", "Orientation"} else "black",
+                )
+        left += vals
+
+    ax_stack.set_yticks(y)
+    ax_stack.set_yticklabels([group_labels.get(g, g) for g in counts.index], fontsize=9)
+    ax_stack.invert_yaxis()
+    ax_stack.set_title("Feature families by source")
+    ax_stack.grid(axis="x", alpha=0.25, lw=0.6)
+    ax_stack.spines["top"].set_visible(False)
+    ax_stack.spines["right"].set_visible(False)
+    ax_stack.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.42),
+        ncol=3,
+        fontsize=8,
+        frameon=False,
+    )
+
+    totals = _feature_set_totals(counts)
+    total_labels = list(totals)
+    total_vals = list(totals.values())
+    total_colors = [
+        group_colors["bike"],
+        group_colors["rider"],
+        "#f39c12",
+        group_colors["cross"],
+    ]
+    bars = ax_totals.bar(total_labels, total_vals, color=total_colors, edgecolor="white", linewidth=0.7)
+    for bar, val in zip(bars, total_vals):
+        ax_totals.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + max(total_vals) * 0.025,
+            str(val),
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    ax_totals.set_ylabel("Features available to model")
+    ax_totals.set_title("Feature-set sizes")
+    ax_totals.set_ylim(top=max(total_vals) * 1.18)
+    ax_totals.grid(axis="y", alpha=0.25, lw=0.6)
+    ax_totals.spines["top"].set_visible(False)
+    ax_totals.spines["right"].set_visible(False)
+
+    fig.suptitle("Feature extraction overview", fontsize=13, y=0.98)
+    fig.tight_layout(rect=(0.0, 0.12, 1.0, 0.94))
+    return save_figure(fig, out_path, dpi=DPI)
+
+
+def plot_export_feature_summary(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Full slide-style summary of exported feature extraction outputs."""
+    out_path = output_dir / "feature_extraction_summary.png"
+    feature_counts = _feature_family_counts(df)
+    if df.empty or int(feature_counts.to_numpy().sum()) == 0:
+        log.debug("No feature rows or columns found; skipping export feature summary")
+        return None
+
+    n_windows = len(df)
+    n_sessions = int(df["session"].nunique()) if "session" in df.columns else 0
+    n_recordings = int(df["recording_name"].nunique()) if "recording_name" in df.columns else 0
+    n_sections = int(df["section_id"].nunique()) if "section_id" in df.columns else 0
+    duration_min = (
+        float(df.groupby("section_id")["window_end_ms"].max().sub(df.groupby("section_id")["window_start_ms"].min()).sum() / 60000.0)
+        if "section_id" in df.columns and {"window_start_ms", "window_end_ms"}.issubset(df.columns)
+        else float("nan")
+    )
+
+    window_counts = (
+        df["window_type"].fillna("unknown").value_counts()
+        if "window_type" in df.columns
+        else pd.Series({"windows": n_windows})
+    )
+    quality_counts = (
+        df["quality_tier"].fillna("?").value_counts()
+        if "quality_tier" in df.columns
+        else pd.Series(dtype=int)
+    )
+    feature_set_totals = _feature_set_totals(feature_counts)
+
+    mean_samples = {
+        "Sporsa": float(pd.to_numeric(df.get("window_n_samples_sporsa"), errors="coerce").mean())
+        if "window_n_samples_sporsa" in df.columns else float("nan"),
+        "Arduino": float(pd.to_numeric(df.get("window_n_samples_arduino"), errors="coerce").mean())
+        if "window_n_samples_arduino" in df.columns else float("nan"),
+    }
+    valid_ratio = {
+        "Sporsa": float(pd.to_numeric(df.get("window_valid_ratio_sporsa"), errors="coerce").mean())
+        if "window_valid_ratio_sporsa" in df.columns else float("nan"),
+        "Arduino": float(pd.to_numeric(df.get("window_valid_ratio_arduino"), errors="coerce").mean())
+        if "window_valid_ratio_arduino" in df.columns else float("nan"),
+    }
+
+    fig = plt.figure(figsize=(13.5, 8.3))
+    gs = fig.add_gridspec(3, 4, height_ratios=[0.72, 1.25, 1.15], hspace=0.88, wspace=0.50)
+
+    ax_cards = fig.add_subplot(gs[0, :])
+    ax_cards.axis("off")
+    cards = [
+        ("Windows", _format_int(n_windows), "1.0 s windows / 0.25 s hop"),
+        ("Sections", str(n_sections), f"{n_recordings} recordings / {n_sessions} sessions"),
+        ("Duration", f"{duration_min:.1f} min" if np.isfinite(duration_min) else "n/a", "section-level processed data"),
+        ("Model inputs", str(int(feature_counts.to_numpy().sum())), "numeric fused features"),
+    ]
+    card_colors = ("#ecf5ff", "#fff4e5", "#ecf8f1", "#f5f0ff")
+    for i, (title, value, subtitle) in enumerate(cards):
+        x0 = 0.02 + i * 0.245
+        ax_cards.add_patch(
+            plt.Rectangle(
+                (x0, 0.12),
+                0.225,
+                0.76,
+                facecolor=card_colors[i],
+                edgecolor="#d6dce5",
+                linewidth=0.8,
+            )
+        )
+        ax_cards.text(x0 + 0.018, 0.70, title, fontsize=9, color="#4a5568", ha="left", va="center")
+        ax_cards.text(x0 + 0.018, 0.43, value, fontsize=18, fontweight="bold", ha="left", va="center")
+        ax_cards.text(x0 + 0.018, 0.22, subtitle, fontsize=8, color="#4a5568", ha="left", va="center")
+
+    ax_family = fig.add_subplot(gs[1, :2])
+    x = np.arange(len(feature_counts.index))
+    bottom = np.zeros(len(feature_counts.index), dtype=float)
+    group_labels = {key: label for key, label, _ in _FEATURE_GROUPS}
+    for family in _FEATURE_FAMILY_ORDER:
+        vals = feature_counts[family].to_numpy(dtype=float)
+        if not np.any(vals):
+            continue
+        ax_family.bar(
+            x,
+            vals,
+            bottom=bottom,
+            color=_FEATURE_FAMILY_COLORS[family],
+            edgecolor="white",
+            linewidth=0.7,
+            label=family,
+        )
+        bottom += vals
+    ax_family.set_xticks(x)
+    ax_family.set_xticklabels([group_labels.get(g, g) for g in feature_counts.index], fontsize=8)
+    ax_family.set_ylabel("Feature count")
+    ax_family.set_title("Feature families by source")
+    ax_family.grid(axis="y", alpha=0.25, lw=0.6)
+    ax_family.spines["top"].set_visible(False)
+    ax_family.spines["right"].set_visible(False)
+    ax_family.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.40),
+        ncol=3,
+        fontsize=7,
+        frameon=False,
+    )
+
+    ax_sets = fig.add_subplot(gs[1, 2:])
+    set_labels = list(feature_set_totals)
+    set_vals = list(feature_set_totals.values())
+    set_colors = ["#3498db", "#e74c3c", "#f39c12", "#2ecc71"]
+    bars = ax_sets.bar(set_labels, set_vals, color=set_colors, edgecolor="white", linewidth=0.7)
+    for bar, val in zip(bars, set_vals):
+        ax_sets.text(bar.get_x() + bar.get_width() / 2, val + max(set_vals) * 0.02, str(val), ha="center", va="bottom", fontsize=9)
+    ax_sets.set_title("Feature sets used in evaluation")
+    ax_sets.set_ylabel("Features")
+    ax_sets.set_ylim(top=max(set_vals) * 1.18)
+    ax_sets.grid(axis="y", alpha=0.25, lw=0.6)
+    ax_sets.spines["top"].set_visible(False)
+    ax_sets.spines["right"].set_visible(False)
+
+    ax_windows = fig.add_subplot(gs[2, 0])
+    labels = window_counts.index.astype(str).tolist()
+    vals = window_counts.to_numpy(dtype=float)
+    colors = ["#4c78a8", "#f58518", "#9ca3af"][: len(vals)]
+    ax_windows.pie(vals, labels=labels, colors=colors, autopct=lambda p: f"{p:.1f}%", textprops={"fontsize": 8})
+    ax_windows.set_title("Window types")
+
+    ax_quality = fig.add_subplot(gs[2, 1])
+    if not quality_counts.empty:
+        order = [q for q in ("A", "B", "C", "?") if q in quality_counts.index]
+        vals_q = [int(quality_counts[q]) for q in order]
+        colors_q = [{"A": "#2ecc71", "B": "#f39c12", "C": "#e74c3c"}.get(q, "#95a5a6") for q in order]
+        bars_q = ax_quality.bar(order, vals_q, color=colors_q, edgecolor="white", linewidth=0.7)
+        for bar, val in zip(bars_q, vals_q):
+            ax_quality.text(bar.get_x() + bar.get_width() / 2, val + max(vals_q) * 0.02, _pct(val, n_windows), ha="center", va="bottom", fontsize=8)
+    ax_quality.set_title("Window quality")
+    ax_quality.set_ylabel("Windows")
+    ax_quality.grid(axis="y", alpha=0.25, lw=0.6)
+    ax_quality.spines["top"].set_visible(False)
+    ax_quality.spines["right"].set_visible(False)
+
+    ax_samples = fig.add_subplot(gs[2, 2])
+    sample_labels = list(mean_samples)
+    sample_vals = [mean_samples[k] for k in sample_labels]
+    bars_s = ax_samples.bar(sample_labels, sample_vals, color=["#3498db", "#e74c3c"], edgecolor="white", linewidth=0.7)
+    for bar, val in zip(bars_s, sample_vals):
+        if np.isfinite(val):
+            ax_samples.text(bar.get_x() + bar.get_width() / 2, val + max(sample_vals) * 0.03, f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+    ax_samples.set_title("Mean samples / window")
+    ax_samples.set_ylabel("Samples")
+    ax_samples.grid(axis="y", alpha=0.25, lw=0.6)
+    ax_samples.spines["top"].set_visible(False)
+    ax_samples.spines["right"].set_visible(False)
+
+    ax_valid = fig.add_subplot(gs[2, 3])
+    valid_labels = list(valid_ratio)
+    valid_vals = [valid_ratio[k] * 100.0 for k in valid_labels]
+    bars_v = ax_valid.bar(valid_labels, valid_vals, color=["#3498db", "#e74c3c"], edgecolor="white", linewidth=0.7)
+    for bar, val in zip(bars_v, valid_vals):
+        if np.isfinite(val):
+            ax_valid.text(bar.get_x() + bar.get_width() / 2, min(100, val) + 2, f"{val:.1f}%", ha="center", va="bottom", fontsize=8)
+    ax_valid.set_title("Mean valid ratio")
+    ax_valid.set_ylabel("Valid samples")
+    ax_valid.set_ylim(0, 108)
+    ax_valid.grid(axis="y", alpha=0.25, lw=0.6)
+    ax_valid.spines["top"].set_visible(False)
+    ax_valid.spines["right"].set_visible(False)
+
+    fig.suptitle("Exports stage: feature extraction summary", fontsize=14, y=0.985)
+    fig.subplots_adjust(top=0.90, bottom=0.07, left=0.06, right=0.97)
     return save_figure(fig, out_path, dpi=DPI)
 
 
@@ -444,6 +816,8 @@ def run_eda(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     _add(plot_label_distribution(df, figures_dir))
     _add(plot_quality_distribution(df, figures_dir))
     _add(plot_section_overview(df, figures_dir))
+    _add(plot_feature_family_summary(df, figures_dir))
+    _add(plot_export_feature_summary(df, figures_dir))
     _add(plot_feature_distributions_by_label(df, figures_dir))
     _add(plot_feature_correlation(df, figures_dir))
     _add(plot_pca_by_label(df, figures_dir))
