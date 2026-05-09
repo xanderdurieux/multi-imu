@@ -754,6 +754,191 @@ def _task_to_dict(task: TwoStageEventTask) -> dict[str, Any]:
     }
 
 
+def _flush_task_figures(
+    task_dir: Path,
+    out_dir: Path,
+    completed_task_dirs: list[Path],
+) -> None:
+    """Merge per-task CSVs into top-level files and regenerate figures."""
+    for fname, keys in (
+        ("two_stage_event_metrics.csv", ["task", "feature_set", "model"]),
+        ("two_stage_event_fold_scores.csv", ["task", "feature_set", "model", "fold"]),
+        ("two_stage_event_imu_contribution.csv", ["task", "model", "better", "baseline", "metric"]),
+    ):
+        src = task_dir / fname
+        if src.exists():
+            try:
+                df = read_csv(src)
+                if not df.empty:
+                    merge_csv(df, out_dir / fname, keys)
+            except Exception as exc:
+                log.warning("Intermediate CSV flush failed for %s: %s", fname, exc)
+
+    all_candidates: list[pd.DataFrame] = []
+    for tdir in completed_task_dirs:
+        p = tdir / "two_stage_event_candidates.csv"
+        if p.exists():
+            try:
+                df = read_csv(p)
+                if not df.empty:
+                    all_candidates.append(df)
+            except Exception:
+                pass
+    if all_candidates:
+        write_csv(pd.concat(all_candidates, ignore_index=True), out_dir / "two_stage_event_candidates.csv")
+
+    try:
+        from visualization.plot_eval_events import generate_two_stage_event_figures
+        generate_two_stage_event_figures(out_dir)
+    except Exception as exc:
+        log.warning("Intermediate two-stage event figures failed: %s", exc)
+
+
+def _load_reusable_task_summary(
+    task_dir: Path,
+    task: TwoStageEventTask,
+    *,
+    fp: str,
+    models: tuple[str, ...],
+    min_quality: str | None,
+    seed: int,
+    target_recall: float,
+    hop_s: float,
+) -> dict[str, Any] | None:
+    """Return saved per-task summary when it matches the current config; None means rerun."""
+    summary_path = task_dir / f"two_stage_event_{task.name}_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        saved = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not read task summary for %s: %s", task.name, exc)
+        return None
+    if saved.get("features_fingerprint") != fp:
+        return None
+    if saved.get("models") != list(models):
+        return None
+    if saved.get("min_quality") != min_quality:
+        return None
+    if saved.get("seed") != seed:
+        return None
+    try:
+        if float(saved.get("target_recall")) != float(target_recall):
+            return None
+        if float(saved.get("hop_s")) != float(hop_s):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if saved.get("task") != task.name:
+        return None
+    if saved.get("status") == "ok" and not (task_dir / "two_stage_event_metrics.csv").exists():
+        return None
+    return saved
+
+
+def _collect_task_artifacts(
+    task_dir: Path,
+    reused_summary: dict[str, Any],
+    *,
+    metrics_rows: list[dict[str, Any]],
+    fold_frames: list[pd.DataFrame],
+    prediction_frames: list[pd.DataFrame],
+    contribution_frames: list[pd.DataFrame],
+    skipped: list[dict[str, Any]],
+    support: dict[str, Any],
+) -> None:
+    """Load per-task CSVs into top-level accumulators when reusing a saved task."""
+    skipped.extend(reused_summary.get("skipped", []))
+    task_name = reused_summary.get("task", "")
+    if reused_summary.get("support"):
+        support[task_name] = reused_summary["support"]
+    if reused_summary.get("status") != "ok":
+        return
+
+    def _try_load(filename: str) -> pd.DataFrame:
+        p = task_dir / filename
+        if p.exists():
+            try:
+                return read_csv(p)
+            except Exception as exc:
+                log.warning("Could not load %s for reuse: %s", p.name, exc)
+        return pd.DataFrame()
+
+    mdf = _try_load("two_stage_event_metrics.csv")
+    if not mdf.empty:
+        metrics_rows.extend(mdf.to_dict("records"))
+
+    fdf = _try_load("two_stage_event_fold_scores.csv")
+    if not fdf.empty:
+        fold_frames.append(fdf)
+
+    pdf = _try_load("two_stage_event_predictions.csv")
+    if not pdf.empty:
+        prediction_frames.append(pdf)
+
+    cdf = _try_load("two_stage_event_imu_contribution.csv")
+    if not cdf.empty:
+        contribution_frames.append(cdf)
+
+
+def _write_task_artifacts(
+    task_dir: Path,
+    task: TwoStageEventTask,
+    *,
+    fp: str,
+    models: tuple[str, ...],
+    min_quality: str | None,
+    seed: int,
+    target_recall: float,
+    hop_s: float,
+    status: str,
+    task_skipped: list[dict[str, Any]],
+    support_entry: dict[str, Any],
+    task_fold_df: pd.DataFrame,
+    task_predictions_df: pd.DataFrame,
+) -> None:
+    """Write per-task artifact CSVs and summary JSON to task_dir."""
+    if not task_fold_df.empty:
+        merge_csv(
+            task_fold_df,
+            task_dir / "two_stage_event_fold_scores.csv",
+            ["feature_set", "model", "fold"],
+        )
+
+    if not task_predictions_df.empty:
+        write_csv(task_predictions_df, task_dir / "two_stage_event_predictions.csv")
+        candidates = task_predictions_df[task_predictions_df["detector_pred"] == 1].copy()
+        candidates = candidates[_candidate_columns(candidates)]
+        write_csv(candidates, task_dir / "two_stage_event_candidates.csv")
+        intervals = _merge_candidate_intervals(candidates, hop_s=hop_s)
+        write_csv(intervals, task_dir / "two_stage_event_intervals.csv")
+
+    imu_df = _imu_contribution_rows(task_fold_df) if not task_fold_df.empty else pd.DataFrame()
+    if not imu_df.empty:
+        merge_csv(
+            imu_df,
+            task_dir / "two_stage_event_imu_contribution.csv",
+            ["model", "better", "baseline", "metric"],
+        )
+
+    summary_doc: dict[str, Any] = {
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "task": task.name,
+        "status": status,
+        "features_fingerprint": fp,
+        "models": list(models),
+        "min_quality": min_quality,
+        "seed": seed,
+        "target_recall": target_recall,
+        "hop_s": hop_s,
+        "support": support_entry,
+        "skipped": task_skipped,
+    }
+    (task_dir / f"two_stage_event_{task.name}_summary.json").write_text(
+        json.dumps(summary_doc, indent=2, default=_json_default), encoding="utf-8"
+    )
+
+
 def _load_reusable_two_stage_summary(
     out_dir: Path,
     *,
@@ -862,28 +1047,88 @@ def run_two_stage_event_evaluation(
     if source_df.empty:
         raise ValueError("No rows remain after quality filtering")
 
+    fp = features_fingerprint(features_path)
+
     metrics_rows: list[dict[str, Any]] = []
     fold_frames: list[pd.DataFrame] = []
     prediction_frames: list[pd.DataFrame] = []
+    contribution_frames: list[pd.DataFrame] = []
     skipped: list[dict[str, Any]] = []
     support: dict[str, Any] = {}
+    completed_task_dirs: list[Path] = []
+
+    _task_kwargs = dict(
+        fp=fp, models=model_ids, min_quality=min_quality,
+        seed=seed, target_recall=target_recall, hop_s=hop_s,
+    )
 
     n_tasks = len(tasks)
     for ti, task in enumerate(tasks, start=1):
         log.info("── Two-stage task %d/%d: %s ──", ti, n_tasks, task.name)
+        task_dir = out_dir / task.name
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        if not force:
+            reusable_task = _load_reusable_task_summary(task_dir, task, **_task_kwargs)
+            if reusable_task is not None:
+                log.info("  Reusing saved task artifacts for %s", task.name)
+                _collect_task_artifacts(
+                    task_dir,
+                    reusable_task,
+                    metrics_rows=metrics_rows,
+                    fold_frames=fold_frames,
+                    prediction_frames=prediction_frames,
+                    contribution_frames=contribution_frames,
+                    skipped=skipped,
+                    support=support,
+                )
+                if not no_plots and reusable_task.get("status") == "ok":
+                    completed_task_dirs.append(task_dir)
+                    _flush_task_figures(task_dir, out_dir, completed_task_dirs)
+                continue
+
         task_df = build_two_stage_task_table(source_df, task)
+
+        task_skipped: list[dict[str, Any]] = []
+        task_fold_frames: list[pd.DataFrame] = []
+        task_prediction_frames: list[pd.DataFrame] = []
+        support_entry: dict[str, Any] = {}
+
         if task_df.empty:
-            skipped.append({"task": task.name, "reason": "no_labeled_rows"})
+            task_skipped.append({"task": task.name, "reason": "no_labeled_rows"})
+            _write_task_artifacts(
+                task_dir, task, **_task_kwargs,
+                status="skipped", task_skipped=task_skipped,
+                support_entry={}, task_fold_df=pd.DataFrame(),
+                task_predictions_df=pd.DataFrame(),
+            )
+            skipped.extend(task_skipped)
             continue
-        support[task.name] = _support_by_recording(task_df, task)
+
+        support_entry = _support_by_recording(task_df, task)
+        support[task.name] = support_entry
 
         detector_counts = task_df["detector_label"].value_counts().to_dict()
         contrast_counts = task_df.loc[task_df["contrast_eligible"], "contrast_label"].value_counts().to_dict()
         if len(detector_counts) < 2:
-            skipped.append({"task": task.name, "reason": "detector_has_one_class", "counts": detector_counts})
+            task_skipped.append({"task": task.name, "reason": "detector_has_one_class", "counts": detector_counts})
+            _write_task_artifacts(
+                task_dir, task, **_task_kwargs,
+                status="skipped", task_skipped=task_skipped,
+                support_entry=support_entry, task_fold_df=pd.DataFrame(),
+                task_predictions_df=pd.DataFrame(),
+            )
+            skipped.extend(task_skipped)
             continue
         if len(contrast_counts) < 2:
-            skipped.append({"task": task.name, "reason": "contrast_has_one_class", "counts": contrast_counts})
+            task_skipped.append({"task": task.name, "reason": "contrast_has_one_class", "counts": contrast_counts})
+            _write_task_artifacts(
+                task_dir, task, **_task_kwargs,
+                status="skipped", task_skipped=task_skipped,
+                support_entry=support_entry, task_fold_df=pd.DataFrame(),
+                task_predictions_df=pd.DataFrame(),
+            )
+            skipped.extend(task_skipped)
             continue
 
         groups = _ensure_recording_groups(task_df)
@@ -894,13 +1139,18 @@ def run_two_stage_event_evaluation(
             .to_dict()
         )
         if min(class_group_counts.values()) < 2:
-            skipped.append(
-                {
-                    "task": task.name,
-                    "reason": "detector_class_not_in_two_recordings",
-                    "class_group_counts": class_group_counts,
-                }
+            task_skipped.append({
+                "task": task.name,
+                "reason": "detector_class_not_in_two_recordings",
+                "class_group_counts": class_group_counts,
+            })
+            _write_task_artifacts(
+                task_dir, task, **_task_kwargs,
+                status="skipped", task_skipped=task_skipped,
+                support_entry=support_entry, task_fold_df=pd.DataFrame(),
+                task_predictions_df=pd.DataFrame(),
             )
+            skipped.extend(task_skipped)
             continue
 
         active_sets = _active_feature_sets(task_df)
@@ -920,30 +1170,20 @@ def run_two_stage_event_evaluation(
                 )
                 try:
                     fold_rows, predictions = _cv_two_stage(
-                        task_df,
-                        task,
-                        feature_cols,
-                        model_id,
-                        seed=seed,
-                        target_recall=target_recall,
-                        hop_s=hop_s,
+                        task_df, task, feature_cols, model_id,
+                        seed=seed, target_recall=target_recall, hop_s=hop_s,
                     )
                 except Exception as exc:
                     log.warning(
                         "Two-stage event evaluation failed for %s/%s/%s: %s",
-                        task.name,
-                        feature_set,
-                        model_id,
-                        exc,
+                        task.name, feature_set, model_id, exc,
                     )
-                    skipped.append(
-                        {
-                            "task": task.name,
-                            "feature_set": feature_set,
-                            "model": model_id,
-                            "reason": str(exc),
-                        }
-                    )
+                    task_skipped.append({
+                        "task": task.name,
+                        "feature_set": feature_set,
+                        "model": model_id,
+                        "reason": str(exc),
+                    })
                     continue
 
                 fold_df = pd.DataFrame(fold_rows)
@@ -958,22 +1198,61 @@ def run_two_stage_event_evaluation(
                 fold_df.insert(0, "task", task.name)
                 fold_df.insert(1, "feature_set", feature_set)
                 fold_df.insert(2, "model", model_id)
-                fold_frames.append(fold_df)
+                task_fold_frames.append(fold_df)
 
                 predictions.insert(0, "task", task.name)
                 predictions.insert(1, "feature_set", feature_set)
                 predictions.insert(2, "model", model_id)
-                prediction_frames.append(predictions)
+                task_prediction_frames.append(predictions)
 
-                metrics_rows.append(
-                    _aggregate_fold_metrics(
-                        fold_df,
-                        task=task.name,
-                        feature_set=feature_set,
-                        model=model_id,
-                        n_features=len(feature_cols),
-                    )
+                metrics_row = _aggregate_fold_metrics(
+                    fold_df,
+                    task=task.name,
+                    feature_set=feature_set,
+                    model=model_id,
+                    n_features=len(feature_cols),
                 )
+                metrics_rows.append(metrics_row)
+                merge_csv(
+                    pd.DataFrame([metrics_row]),
+                    task_dir / "two_stage_event_metrics.csv",
+                    ["feature_set", "model"],
+                )
+                merge_csv(
+                    fold_df,
+                    task_dir / "two_stage_event_fold_scores.csv",
+                    ["feature_set", "model", "fold"],
+                )
+
+        task_fold_df = (
+            pd.concat(task_fold_frames, ignore_index=True) if task_fold_frames else pd.DataFrame()
+        )
+        task_predictions_df = (
+            pd.concat(task_prediction_frames, ignore_index=True) if task_prediction_frames else pd.DataFrame()
+        )
+        _write_task_artifacts(
+            task_dir, task, **_task_kwargs,
+            status="ok", task_skipped=task_skipped,
+            support_entry=support_entry,
+            task_fold_df=task_fold_df,
+            task_predictions_df=task_predictions_df,
+        )
+        skipped.extend(task_skipped)
+        if not task_fold_df.empty:
+            fold_frames.append(task_fold_df)
+        if not task_predictions_df.empty:
+            prediction_frames.append(task_predictions_df)
+        cdf_path = task_dir / "two_stage_event_imu_contribution.csv"
+        if cdf_path.exists():
+            try:
+                cdf = read_csv(cdf_path)
+                if not cdf.empty:
+                    contribution_frames.append(cdf)
+            except Exception as exc:
+                log.warning("Could not load imu contribution CSV for %s: %s", task.name, exc)
+        if not no_plots:
+            completed_task_dirs.append(task_dir)
+            _flush_task_figures(task_dir, out_dir, completed_task_dirs)
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_path = out_dir / "two_stage_event_metrics.csv"
@@ -1003,11 +1282,12 @@ def run_two_stage_event_evaluation(
     intervals_path = out_dir / "two_stage_event_intervals.csv"
     write_csv(intervals_df, intervals_path)
 
-    imu_df = _imu_contribution_rows(fold_scores_df)
+    imu_df = (
+        pd.concat(contribution_frames, ignore_index=True) if contribution_frames else pd.DataFrame()
+    )
     imu_path = out_dir / "two_stage_event_imu_contribution.csv"
     merge_csv(imu_df, imu_path, ["task", "model", "better", "baseline", "metric"])
 
-    fp = features_fingerprint(features_path)
     summary_path = out_dir / "two_stage_event_summary.json"
     if summary_path.exists():
         try:
@@ -1046,15 +1326,11 @@ def run_two_stage_event_evaluation(
             "imu_contribution": _display_path(imu_path),
         },
     }
-    if not no_plots:
-        try:
-            from visualization.plot_eval_events import generate_two_stage_event_figures
-            figure_paths = generate_two_stage_event_figures(out_dir)
-            summary["artifacts"]["figures"] = [
-                _display_path(path) for path in figure_paths
-            ]
-        except Exception as exc:
-            log.warning("Two-stage event figure generation failed: %s", exc)
+    figures_dir = out_dir / "figures"
+    if not no_plots and figures_dir.exists():
+        summary["artifacts"]["figures"] = [
+            _display_path(p) for p in sorted(figures_dir.glob("*.png"))
+        ]
     summary_path.write_text(json.dumps(summary, indent=2, default=_json_default), encoding="utf-8")
     log.info(
         "Two-stage event evaluation complete: %d metric row(s) -> %s",

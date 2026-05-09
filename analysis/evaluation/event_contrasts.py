@@ -57,6 +57,15 @@ _SENSOR_GROUP_NAME: dict[str, str] = {
 }
 
 
+def _safe_balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Return balanced accuracy when both classes are present, otherwise nan."""
+    return (
+        float(balanced_accuracy_score(y_true, y_pred))
+        if len(np.unique(y_true)) == 2
+        else np.nan
+    )
+
+
 @dataclass(frozen=True)
 class EventContrast:
     """Configuration for a binary event contrast."""
@@ -267,7 +276,7 @@ def _cv_binary_evaluate(
             {
                 "fold": float(fold_idx),
                 "accuracy": float(accuracy_score(y[val_idx], pred)),
-                "balanced_accuracy": float(balanced_accuracy_score(y[val_idx], pred)),
+                "balanced_accuracy": _safe_balanced_accuracy(y[val_idx], pred),
                 "macro_f1": float(f1_score(y[val_idx], pred, average="macro", labels=all_labels, zero_division=0)),
             }
         )
@@ -275,7 +284,7 @@ def _cv_binary_evaluate(
     finite_proba = np.isfinite(oof_proba_pos)
     out: dict[str, Any] = {
         "accuracy": float(accuracy_score(y, oof_pred)),
-        "balanced_accuracy": float(balanced_accuracy_score(y, oof_pred)),
+        "balanced_accuracy": _safe_balanced_accuracy(y, oof_pred),
         "macro_f1": float(f1_score(y, oof_pred, average="macro", labels=all_labels, zero_division=0)),
         "fold_scores": fold_rows,
         "oof_pred": oof_pred,
@@ -420,6 +429,216 @@ def _display_path(path: Path | str) -> str:
         return str(Path(path))
 
 
+_CONTRAST_FIGURE_CSV_KEYS: tuple[tuple[str, list[str]], ...] = (
+    ("event_contrast_metrics.csv", ["contrast", "feature_set", "model"]),
+    ("event_contrast_imu_contribution.csv", ["contrast", "model", "better", "baseline", "metric"]),
+    ("event_contrast_feature_stability.csv", ["contrast", "feature_set", "model", "feature"]),
+    ("event_contrast_feature_importance_by_group.csv", ["contrast", "model", "feature_set", "sensor_group"]),
+)
+
+
+def _flush_contrast_figures(contrast_dir: Path, event_output_dir: Path) -> None:
+    """Merge per-contrast CSVs into top-level files and regenerate figures."""
+    for fname, keys in _CONTRAST_FIGURE_CSV_KEYS:
+        src = contrast_dir / fname
+        if src.exists():
+            try:
+                df = read_csv(src)
+                if not df.empty:
+                    merge_csv(df, event_output_dir / fname, keys)
+            except Exception as exc:
+                log.warning("Intermediate CSV flush failed for %s: %s", fname, exc)
+    try:
+        from visualization.plot_eval_events import generate_event_contrast_figures
+        generate_event_contrast_figures(event_output_dir)
+    except Exception as exc:
+        log.warning("Intermediate event contrast figures failed: %s", exc)
+
+
+def _load_reusable_contrast_summary(
+    contrast_dir: Path,
+    contrast: EventContrast,
+    *,
+    fp: str,
+    models: tuple[str, ...],
+    group_col: str,
+    min_quality: str | None,
+    seed: int,
+    permutation_n_repeats: int,
+    stability_top_k: int,
+) -> dict[str, Any] | None:
+    """Return saved per-contrast summary when it matches the current config; None means rerun."""
+    summary_path = contrast_dir / f"event_contrast_{contrast.name}_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        saved = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not read contrast summary for %s: %s", contrast.name, exc)
+        return None
+    for key, expected in (
+        ("features_fingerprint", fp),
+        ("models", list(models)),
+        ("group_col", group_col),
+        ("min_quality", min_quality),
+        ("seed", seed),
+        ("permutation_n_repeats", permutation_n_repeats),
+        ("stability_top_k", stability_top_k),
+        ("contrast", contrast.name),
+    ):
+        if saved.get(key) != expected:
+            return None
+    if saved.get("status") == "ok" and not (contrast_dir / "event_contrast_metrics.csv").exists():
+        return None
+    return saved
+
+
+def _collect_contrast_artifacts(
+    contrast_dir: Path,
+    reused_summary: dict[str, Any],
+    *,
+    metrics_rows: list[dict[str, Any]],
+    audit_frames: list[pd.DataFrame],
+    stability_frames: list[pd.DataFrame],
+    perm_frames: list[pd.DataFrame],
+    contribution_frames: list[pd.DataFrame],
+    skipped: list[dict[str, Any]],
+) -> None:
+    """Load per-contrast CSVs into top-level accumulators when reusing a saved contrast."""
+    skipped.extend(reused_summary.get("skipped", []))
+    if reused_summary.get("status") != "ok":
+        return
+
+    def _try_load(filename: str) -> pd.DataFrame:
+        p = contrast_dir / filename
+        if p.exists():
+            try:
+                return read_csv(p)
+            except Exception as exc:
+                log.warning("Could not load %s for reuse: %s", p.name, exc)
+        return pd.DataFrame()
+
+    mdf = _try_load("event_contrast_metrics.csv")
+    if not mdf.empty:
+        metrics_rows.extend(mdf.to_dict("records"))
+
+    wdf = _try_load("event_contrast_windows.csv")
+    if not wdf.empty:
+        audit_frames.append(wdf)
+
+    sdf = _try_load("event_contrast_feature_stability.csv")
+    if not sdf.empty:
+        stability_frames.append(sdf)
+
+    pdf = _try_load("event_contrast_feature_importance.csv")
+    if not pdf.empty:
+        perm_frames.append(pdf)
+
+    cdf = _try_load("event_contrast_imu_contribution.csv")
+    if not cdf.empty:
+        contribution_frames.append(cdf)
+
+
+def _write_contrast_artifacts(
+    contrast_dir: Path,
+    contrast: EventContrast,
+    *,
+    fp: str,
+    models: tuple[str, ...],
+    group_col: str,
+    min_quality: str | None,
+    seed: int,
+    permutation_n_repeats: int,
+    stability_top_k: int,
+    status: str,
+    n_windows: int,
+    n_groups: int,
+    n_splits: int,
+    label_counts: dict[str, int],
+    contrast_skipped: list[dict[str, Any]],
+    contrast_metrics_rows: list[dict[str, Any]],
+    contrast_stability_frames: list[pd.DataFrame],
+    contrast_perm_frames: list[pd.DataFrame],
+    contrast_results: dict[tuple[str, str, str], dict[str, Any]],
+    audit: pd.DataFrame,
+) -> None:
+    """Write per-contrast artifact CSVs and summary JSON to contrast_dir."""
+    metrics_df = pd.DataFrame(contrast_metrics_rows)
+    if not metrics_df.empty:
+        merge_csv(metrics_df, contrast_dir / "event_contrast_metrics.csv", ["feature_set", "model"])
+
+    contribution_rows = _paired_contribution_rows(contrast_results)
+    contribution_df = pd.DataFrame(contribution_rows)
+    if not contribution_df.empty:
+        merge_csv(
+            contribution_df,
+            contrast_dir / "event_contrast_imu_contribution.csv",
+            ["model", "better", "baseline", "metric"],
+        )
+
+    stability_df = (
+        pd.concat(contrast_stability_frames, ignore_index=True)
+        if contrast_stability_frames
+        else pd.DataFrame()
+    )
+    if not stability_df.empty:
+        merge_csv(
+            stability_df,
+            contrast_dir / "event_contrast_feature_stability.csv",
+            ["feature_set", "model", "feature"],
+        )
+
+    perm_df = (
+        pd.concat(contrast_perm_frames, ignore_index=True)
+        if contrast_perm_frames
+        else pd.DataFrame()
+    )
+    if not perm_df.empty:
+        merge_csv(
+            perm_df,
+            contrast_dir / "event_contrast_feature_importance.csv",
+            ["model", "feature_set", "feature"],
+        )
+        grouped_frames: list[pd.DataFrame] = []
+        for (model_id, fs_name), sub in perm_df.groupby(["model", "feature_set"], sort=False):
+            drop_cols = [c for c in ("contrast", "model", "feature_set") if c in sub.columns]
+            grp = aggregate_by_sensor_group(sub.drop(columns=drop_cols))
+            grp.insert(0, "contrast", contrast.name)
+            grp.insert(1, "model", model_id)
+            grp.insert(2, "feature_set", fs_name)
+            grouped_frames.append(grp)
+        if grouped_frames:
+            merge_csv(
+                pd.concat(grouped_frames, ignore_index=True),
+                contrast_dir / "event_contrast_feature_importance_by_group.csv",
+                ["model", "feature_set", "sensor_group"],
+            )
+
+    if not audit.empty:
+        write_csv(audit, contrast_dir / "event_contrast_windows.csv")
+
+    summary_doc: dict[str, Any] = {
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "contrast": contrast.name,
+        "status": status,
+        "features_fingerprint": fp,
+        "models": list(models),
+        "group_col": group_col,
+        "min_quality": min_quality,
+        "seed": seed,
+        "permutation_n_repeats": permutation_n_repeats,
+        "stability_top_k": stability_top_k,
+        "n_windows": n_windows,
+        "n_groups": n_groups,
+        "n_splits": n_splits,
+        "label_counts": label_counts,
+        "skipped": contrast_skipped,
+    }
+    (contrast_dir / f"event_contrast_{contrast.name}_summary.json").write_text(
+        json.dumps(summary_doc, indent=2, default=_json_default), encoding="utf-8"
+    )
+
+
 def _load_reusable_event_summary(
     event_output_dir: Path,
     *,
@@ -525,47 +744,121 @@ def run_event_contrast_evaluation(
     if source_df.empty:
         raise ValueError("No rows remain after quality filtering")
 
+    fp = features_fingerprint(features_path)
+
     metrics_rows: list[dict[str, Any]] = []
     audit_frames: list[pd.DataFrame] = []
     stability_frames: list[pd.DataFrame] = []
     perm_frames: list[pd.DataFrame] = []
-    all_results: dict[tuple[str, str, str], dict[str, Any]] = {}
+    contribution_frames: list[pd.DataFrame] = []
     skipped: list[dict[str, Any]] = []
 
     n_contrasts = len(contrast_configs)
     for ci, contrast in enumerate(contrast_configs, start=1):
         log.info("── Event contrast %d/%d: %s ──", ci, n_contrasts, contrast.name)
+        contrast_dir = event_output_dir / contrast.name
+        contrast_dir.mkdir(parents=True, exist_ok=True)
+
+        if not force:
+            reusable_contrast = _load_reusable_contrast_summary(
+                contrast_dir,
+                contrast,
+                fp=fp,
+                models=model_ids,
+                group_col=group_col,
+                min_quality=min_quality,
+                seed=seed,
+                permutation_n_repeats=permutation_n_repeats,
+                stability_top_k=stability_top_k,
+            )
+            if reusable_contrast is not None:
+                log.info("  Reusing saved contrast artifacts for %s", contrast.name)
+                _collect_contrast_artifacts(
+                    contrast_dir,
+                    reusable_contrast,
+                    metrics_rows=metrics_rows,
+                    audit_frames=audit_frames,
+                    stability_frames=stability_frames,
+                    perm_frames=perm_frames,
+                    contribution_frames=contribution_frames,
+                    skipped=skipped,
+                )
+                if not no_plots and reusable_contrast.get("status") == "ok":
+                    _flush_contrast_figures(contrast_dir, event_output_dir)
+                continue
+
         contrast_df, audit = build_event_contrast_table(source_df, contrast)
-        if not audit.empty:
-            audit_frames.append(audit)
+
+        contrast_skipped: list[dict[str, Any]] = []
+        contrast_metrics_rows: list[dict[str, Any]] = []
+        contrast_stability_frames: list[pd.DataFrame] = []
+        contrast_perm_frames: list[pd.DataFrame] = []
+        contrast_results: dict[tuple[str, str, str], dict[str, Any]] = {}
+        n_windows = 0
+        n_groups = 0
+        n_splits_used = 0
+        label_counts: dict[str, int] = {}
+
+        _write_kwargs = dict(
+            fp=fp, models=model_ids, group_col=group_col, min_quality=min_quality,
+            seed=seed, permutation_n_repeats=permutation_n_repeats, stability_top_k=stability_top_k,
+        )
 
         if contrast_df.empty:
-            skipped.append({"contrast": contrast.name, "reason": "no_matching_windows"})
+            contrast_skipped.append({"contrast": contrast.name, "reason": "no_matching_windows"})
+            _write_contrast_artifacts(
+                contrast_dir, contrast, **_write_kwargs,
+                status="skipped", n_windows=0, n_groups=0, n_splits=0,
+                label_counts={}, contrast_skipped=contrast_skipped,
+                contrast_metrics_rows=[], contrast_stability_frames=[],
+                contrast_perm_frames=[], contrast_results={}, audit=audit,
+            )
+            skipped.extend(contrast_skipped)
+            if not audit.empty:
+                audit_frames.append(audit)
             continue
+
         label_counts = contrast_df["event_contrast_label"].value_counts().to_dict()
         if len(label_counts) < 2:
-            skipped.append(
-                {
-                    "contrast": contrast.name,
-                    "reason": "only_one_class",
-                    "label_counts": label_counts,
-                }
+            contrast_skipped.append({
+                "contrast": contrast.name,
+                "reason": "only_one_class",
+                "label_counts": label_counts,
+            })
+            _write_contrast_artifacts(
+                contrast_dir, contrast, **_write_kwargs,
+                status="skipped", n_windows=len(contrast_df), n_groups=0, n_splits=0,
+                label_counts=label_counts, contrast_skipped=contrast_skipped,
+                contrast_metrics_rows=[], contrast_stability_frames=[],
+                contrast_perm_frames=[], contrast_results={}, audit=audit,
             )
+            skipped.extend(contrast_skipped)
+            if not audit.empty:
+                audit_frames.append(audit)
             continue
 
-        groups = _ensure_recording_group(contrast_df, group_col).to_numpy()
-        n_groups = int(len(np.unique(groups)))
-        n_splits = min(5, n_groups)
-        if n_splits < 2:
-            skipped.append(
-                {
-                    "contrast": contrast.name,
-                    "reason": "not_enough_groups",
-                    "n_groups": n_groups,
-                }
+        groups_arr = _ensure_recording_group(contrast_df, group_col).to_numpy()
+        n_groups = int(len(np.unique(groups_arr)))
+        n_splits_used = min(5, n_groups)
+        if n_splits_used < 2:
+            contrast_skipped.append({
+                "contrast": contrast.name,
+                "reason": "not_enough_groups",
+                "n_groups": n_groups,
+            })
+            _write_contrast_artifacts(
+                contrast_dir, contrast, **_write_kwargs,
+                status="skipped", n_windows=len(contrast_df), n_groups=n_groups, n_splits=0,
+                label_counts=label_counts, contrast_skipped=contrast_skipped,
+                contrast_metrics_rows=[], contrast_stability_frames=[],
+                contrast_perm_frames=[], contrast_results={}, audit=audit,
             )
+            skipped.extend(contrast_skipped)
+            if not audit.empty:
+                audit_frames.append(audit)
             continue
 
+        n_windows = len(contrast_df)
         active_sets = _active_feature_sets(contrast_df)
         y = (
             contrast_df["event_contrast_label"]
@@ -579,10 +872,10 @@ def run_event_contrast_evaluation(
         )
         log.info(
             "  %d windows  normal=%s(%d)  critical=%s(%d)  groups=%d  splits=%d",
-            len(contrast_df),
+            n_windows,
             contrast.normal_label, label_counts.get(contrast.normal_label, 0),
             contrast.critical_label, label_counts.get(contrast.critical_label, 0),
-            n_groups, n_splits,
+            n_groups, n_splits_used,
         )
 
         n_fs = len(active_sets)
@@ -598,25 +891,19 @@ def run_event_contrast_evaluation(
                 model = _build_model(model_id, seed)
                 try:
                     result = _cv_binary_evaluate(
-                        X,
-                        y,
-                        groups,
-                        model,
-                        n_splits=n_splits,
+                        X, y, groups_arr, model, n_splits=n_splits_used,
                     )
                 except Exception as exc:
                     log.warning("Event contrast CV failed for %s/%s/%s: %s", *key, exc)
-                    skipped.append(
-                        {
-                            "contrast": contrast.name,
-                            "feature_set": fs_name,
-                            "model": model_id,
-                            "reason": f"cv_failed: {exc}",
-                        }
-                    )
+                    contrast_skipped.append({
+                        "contrast": contrast.name,
+                        "feature_set": fs_name,
+                        "model": model_id,
+                        "reason": f"cv_failed: {exc}",
+                    })
                     continue
 
-                all_results[key] = result
+                contrast_results[key] = result
                 log.info(
                     "    → accuracy=%.3f  balanced_acc=%.3f  macro_f1=%.3f  AP=%s  ROC-AUC=%s",
                     result["accuracy"],
@@ -625,77 +912,123 @@ def run_event_contrast_evaluation(
                     f"{result['average_precision']:.3f}" if np.isfinite(result["average_precision"]) else "n/a",
                     f"{result['roc_auc']:.3f}" if np.isfinite(result["roc_auc"]) else "n/a",
                 )
-                metrics_rows.append(
-                    {
-                        "contrast": contrast.name,
-                        "feature_set": fs_name,
-                        "model": model_id,
-                        "n_windows": int(len(contrast_df)),
-                        "n_groups": n_groups,
-                        "n_splits": n_splits,
-                        "normal_label": contrast.normal_label,
-                        "critical_label": contrast.critical_label,
-                        "support_normal": int((y == 0).sum()),
-                        "support_critical": int((y == 1).sum()),
-                        "n_sliding": int(window_type_counts.get("sliding", 0)),
-                        "n_event_aligned": int(window_type_counts.get("event_aligned", 0)),
-                        "n_features": len(feat_cols),
-                        "accuracy": round(float(result["accuracy"]), 4),
-                        "balanced_accuracy": round(float(result["balanced_accuracy"]), 4),
-                        "macro_f1": round(float(result["macro_f1"]), 4),
-                        "average_precision": round(float(result["average_precision"]), 4)
-                        if np.isfinite(result["average_precision"])
-                        else np.nan,
-                        "roc_auc": round(float(result["roc_auc"]), 4)
-                        if np.isfinite(result["roc_auc"])
-                        else np.nan,
-                    }
+                metrics_row: dict[str, Any] = {
+                    "contrast": contrast.name,
+                    "feature_set": fs_name,
+                    "model": model_id,
+                    "n_windows": int(n_windows),
+                    "n_groups": n_groups,
+                    "n_splits": n_splits_used,
+                    "normal_label": contrast.normal_label,
+                    "critical_label": contrast.critical_label,
+                    "support_normal": int((y == 0).sum()),
+                    "support_critical": int((y == 1).sum()),
+                    "n_sliding": int(window_type_counts.get("sliding", 0)),
+                    "n_event_aligned": int(window_type_counts.get("event_aligned", 0)),
+                    "n_features": len(feat_cols),
+                    "accuracy": round(float(result["accuracy"]), 4),
+                    "balanced_accuracy": round(float(result["balanced_accuracy"]), 4),
+                    "macro_f1": round(float(result["macro_f1"]), 4),
+                    "average_precision": round(float(result["average_precision"]), 4)
+                    if np.isfinite(result["average_precision"])
+                    else np.nan,
+                    "roc_auc": round(float(result["roc_auc"]), 4)
+                    if np.isfinite(result["roc_auc"])
+                    else np.nan,
+                }
+                contrast_metrics_rows.append(metrics_row)
+                merge_csv(
+                    pd.DataFrame([metrics_row]),
+                    contrast_dir / "event_contrast_metrics.csv",
+                    ["feature_set", "model"],
                 )
 
+                log.info("    feature stability (%d splits) ...", n_splits_used)
                 try:
                     stability = summarize_feature_stability(
-                        X,
-                        y,
-                        groups,
-                        _build_model(model_id, seed),
-                        feat_cols,
-                        n_splits=n_splits,
-                        top_k=stability_top_k,
-                        seed=seed,
+                        X, y, groups_arr, _build_model(model_id, seed), feat_cols,
+                        n_splits=n_splits_used, top_k=stability_top_k, seed=seed,
                     )
                     if not stability.empty:
                         stability.insert(0, "contrast", contrast.name)
                         stability.insert(1, "feature_set", fs_name)
                         stability.insert(2, "model", model_id)
-                        stability_frames.append(stability)
+                        contrast_stability_frames.append(stability)
+                        merge_csv(
+                            stability,
+                            contrast_dir / "event_contrast_feature_stability.csv",
+                            ["feature_set", "model", "feature"],
+                        )
                 except Exception as exc:
                     log.warning("Feature stability failed for %s/%s/%s: %s", *key, exc)
 
+                log.info(
+                    "    permutation importance (%d splits, %d repeats) ...",
+                    n_splits_used, permutation_n_repeats,
+                )
                 try:
                     perm_df = compute_permutation_importance_grouped(
-                        X,
-                        y,
-                        groups,
-                        _build_model(model_id, seed),
-                        feat_cols,
-                        n_splits=n_splits,
-                        n_repeats=permutation_n_repeats,
-                        scoring="f1_macro",
-                        seed=seed,
+                        X, y, groups_arr, _build_model(model_id, seed), feat_cols,
+                        n_splits=n_splits_used, n_repeats=permutation_n_repeats,
+                        scoring="f1_macro", seed=seed,
                     )
                     if not perm_df.empty:
                         perm_df.insert(0, "contrast", contrast.name)
                         perm_df.insert(1, "model", model_id)
                         perm_df.insert(2, "feature_set", fs_name)
-                        perm_frames.append(perm_df)
+                        contrast_perm_frames.append(perm_df)
+                        merge_csv(
+                            perm_df,
+                            contrast_dir / "event_contrast_feature_importance.csv",
+                            ["model", "feature_set", "feature"],
+                        )
+                        drop_cols = [c for c in ("contrast", "model", "feature_set") if c in perm_df.columns]
+                        grp = aggregate_by_sensor_group(perm_df.drop(columns=drop_cols))
+                        grp.insert(0, "contrast", contrast.name)
+                        grp.insert(1, "model", model_id)
+                        grp.insert(2, "feature_set", fs_name)
+                        merge_csv(
+                            grp,
+                            contrast_dir / "event_contrast_feature_importance_by_group.csv",
+                            ["model", "feature_set", "sensor_group"],
+                        )
                 except Exception as exc:
                     log.warning("Permutation importance failed for %s/%s/%s: %s", *key, exc)
+
+        _write_contrast_artifacts(
+            contrast_dir, contrast, **_write_kwargs,
+            status="ok", n_windows=n_windows, n_groups=n_groups, n_splits=n_splits_used,
+            label_counts=label_counts, contrast_skipped=contrast_skipped,
+            contrast_metrics_rows=contrast_metrics_rows,
+            contrast_stability_frames=contrast_stability_frames,
+            contrast_perm_frames=contrast_perm_frames,
+            contrast_results=contrast_results,
+            audit=audit,
+        )
+        skipped.extend(contrast_skipped)
+        if not audit.empty:
+            audit_frames.append(audit)
+        metrics_rows.extend(contrast_metrics_rows)
+        stability_frames.extend(contrast_stability_frames)
+        perm_frames.extend(contrast_perm_frames)
+        cdf_path = contrast_dir / "event_contrast_imu_contribution.csv"
+        if cdf_path.exists():
+            try:
+                cdf = read_csv(cdf_path)
+                if not cdf.empty:
+                    contribution_frames.append(cdf)
+            except Exception as exc:
+                log.warning("Could not load contribution CSV for %s: %s", contrast.name, exc)
+        if not no_plots:
+            _flush_contrast_figures(contrast_dir, event_output_dir)
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_path = event_output_dir / "event_contrast_metrics.csv"
     merge_csv(metrics_df, metrics_path, ["contrast", "feature_set", "model"])
 
-    contribution_df = pd.DataFrame(_paired_contribution_rows(all_results))
+    contribution_df = (
+        pd.concat(contribution_frames, ignore_index=True) if contribution_frames else pd.DataFrame()
+    )
     contribution_path = event_output_dir / "event_contrast_imu_contribution.csv"
     merge_csv(contribution_df, contribution_path, ["contrast", "model", "better", "baseline", "metric"])
 
@@ -707,15 +1040,15 @@ def run_event_contrast_evaluation(
     stability_path = event_output_dir / "event_contrast_feature_stability.csv"
     merge_csv(stability_df, stability_path, ["contrast", "feature_set", "model", "feature"])
 
-    perm_df = (
+    perm_df_all = (
         pd.concat(perm_frames, ignore_index=True) if perm_frames else pd.DataFrame()
     )
     perm_path = event_output_dir / "event_contrast_feature_importance.csv"
-    merge_csv(perm_df, perm_path, ["contrast", "model", "feature_set", "feature"])
+    merge_csv(perm_df_all, perm_path, ["contrast", "model", "feature_set", "feature"])
 
-    if not perm_df.empty:
+    if not perm_df_all.empty:
         grouped_perm_frames = []
-        for (contrast_name, model_id, fs_name), sub in perm_df.groupby(
+        for (contrast_name, model_id, fs_name), sub in perm_df_all.groupby(
             ["contrast", "model", "feature_set"], sort=False
         ):
             grouped = aggregate_by_sensor_group(sub.drop(columns=["contrast", "model", "feature_set"]))
@@ -732,7 +1065,6 @@ def run_event_contrast_evaluation(
     audit_path = event_output_dir / "event_contrast_windows.csv"
     write_csv(audit_df, audit_path)
 
-    fp = features_fingerprint(features_path)
     summary_path = event_output_dir / "event_contrast_summary.json"
     if summary_path.exists():
         try:
@@ -768,15 +1100,11 @@ def run_event_contrast_evaluation(
             "windows": str(_display_path(audit_path)),
         },
     }
-    if not no_plots:
-        try:
-            from visualization.plot_eval_events import generate_event_contrast_figures
-            figure_paths = generate_event_contrast_figures(event_output_dir)
-            summary["artifacts"]["figures"] = [
-                _display_path(path) for path in figure_paths
-            ]
-        except Exception as exc:
-            log.warning("Event contrast figure generation failed: %s", exc)
+    figures_dir = event_output_dir / "figures"
+    if not no_plots and figures_dir.exists():
+        summary["artifacts"]["figures"] = [
+            _display_path(p) for p in sorted(figures_dir.glob("*.png"))
+        ]
     summary_path.write_text(json.dumps(summary, indent=2, default=_json_default), encoding="utf-8")
     log.info(
         "Event contrast evaluation complete: %d metric row(s) -> %s",
