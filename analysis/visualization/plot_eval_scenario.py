@@ -42,6 +42,10 @@ from visualization.plot_labels import _label_colors, _label_patches
 
 log = logging.getLogger(__name__)
 
+_LABEL_GRID_CMAP = "RdYlGn"
+_LABEL_GRID_QUALITY_ORDER = ("poor", "marginal", "good")
+_LABEL_GRID_QUALITY_FEATURE_SETS = ("bike", "rider", "fused_no_cross", "fused")
+
 
 def _save_confusion_matrix_figure(fig: matplotlib.figure.Figure, output_path: Path) -> None:
     """Save a confusion matrix figure, retrying without tight bbox on font-copy bugs."""
@@ -114,6 +118,31 @@ def plot_confusion_matrix(
         plt.close(fig)
     log.debug("Wrote confusion matrix → %s", _display_path(output_path))
     return output_path
+
+
+def _label_grid_color_limits(values: np.ndarray) -> tuple[float, float]:
+    """Return compact score limits for label-grid heatmaps."""
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    lower = float(np.floor(np.nanmin(finite) * 20.0) / 20.0)
+    return max(0.0, lower), 1.0
+
+
+def _label_grid_text_color(value: float, vmin: float, vmax: float) -> str:
+    """Choose annotation text color from the normalized heatmap value."""
+    if vmax <= vmin:
+        return "black"
+    rel = (float(value) - vmin) / (vmax - vmin)
+    return "white" if rel < 0.28 else "black"
+
+
+def _ordered_quality_filters(values: pd.Series) -> list[str]:
+    """Return quality filters in pipeline quality order."""
+    present = list(dict.fromkeys(values.dropna().astype(str)))
+    ordered = [q for q in _LABEL_GRID_QUALITY_ORDER if q in present]
+    ordered.extend(sorted(q for q in present if q not in _LABEL_GRID_QUALITY_ORDER))
+    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +703,8 @@ def plot_label_grid_heatmap(
     fig, ax = plt.subplots(
         figsize=(max(5.5, 0.9 * pivot.shape[1] + 3.5), max(3.5, 0.55 * pivot.shape[0] + 1.5))
     )
-    im = ax.imshow(pivot.values, cmap="viridis", aspect="auto", vmin=0, vmax=1)
+    vmin, vmax = _label_grid_color_limits(pivot.values)
+    im = ax.imshow(pivot.values, cmap=_LABEL_GRID_CMAP, aspect="auto", vmin=vmin, vmax=vmax)
 
     ax.set_xticks(range(pivot.shape[1]))
     ax.set_xticklabels(pivot.columns, fontsize=9)
@@ -692,7 +722,7 @@ def plot_label_grid_heatmap(
                 j, i, f"{v:.3f}",
                 ha="center", va="center",
                 fontsize=8,
-                color="white" if v > 0.55 else "black",
+                color=_label_grid_text_color(v, vmin, vmax),
             )
 
     plt.colorbar(im, ax=ax, shrink=0.8, label=metric)
@@ -711,65 +741,112 @@ def plot_label_grid_quality_grid(
     *,
     metric: str = "macro_f1",
 ) -> Path | None:
-    """One heatmap panel per feature set showing label × quality grid."""
+    """Grouped bars comparing feature sets across label schemes and quality filters."""
     if grid_df.empty:
         return None
 
-    feature_sets = [fs for fs in _FS_ORDER if fs in grid_df["feature_set"].unique()]
+    present_feature_sets = grid_df["feature_set"].dropna().astype(str).unique().tolist()
+    feature_sets = [fs for fs in _LABEL_GRID_QUALITY_FEATURE_SETS if fs in present_feature_sets]
     if not feature_sets:
         log.debug("Label-grid quality grid: no known feature sets; skipping")
         return None
 
+    label_cols = list(dict.fromkeys(grid_df["label_col"].dropna().astype(str)))
+    qualities = _ordered_quality_filters(grid_df["min_quality"])
+    if not label_cols or not qualities:
+        log.debug("Label-grid quality grid: no label columns or quality filters; skipping")
+        return None
+
+    df = (
+        grid_df.sort_values(metric, ascending=False)
+        .groupby(["label_col", "min_quality", "feature_set"], as_index=False, sort=False)
+        .first()
+    )
+    vmin, vmax = _label_grid_color_limits(df[metric].to_numpy(dtype=float))
+
+    n_rows = min(2, len(qualities))
+    n_cols = int(np.ceil(len(qualities) / n_rows))
     fig, axes = plt.subplots(
-        1, len(feature_sets),
-        figsize=(max(6.0, 3.0 * len(feature_sets) + 1.5), 3.6),
-        sharey=True,
+        n_rows,
+        n_cols,
+        figsize=(max(10.5, 1.05 * len(label_cols) * n_cols + 2.0), max(4.2, 3.2 * n_rows)),
+        layout="constrained",
         squeeze=False,
     )
     axes_flat = axes.ravel()
 
-    last_im = None
-    for ax, fs in zip(axes_flat, feature_sets):
-        sub = grid_df[grid_df["feature_set"] == fs]
-        sub = (
-            sub.sort_values(metric, ascending=False)
-            .groupby(["label_col", "min_quality"], as_index=False)
-            .first()
-        )
+    plotted = False
+    x = np.arange(len(label_cols))
+    width = min(0.18, 0.82 / max(1, len(feature_sets)))
+    offsets = np.linspace(
+        -width * (len(feature_sets) - 1) / 2,
+        width * (len(feature_sets) - 1) / 2,
+        len(feature_sets),
+    )
+
+    label_display = [label.replace("scenario_label_", "") for label in label_cols]
+
+    for panel_idx, (ax, quality) in enumerate(zip(axes_flat, qualities)):
+        sub = df[df["min_quality"].astype(str) == quality]
         pivot = sub.pivot_table(
-            index="label_col", columns="min_quality", values=metric, aggfunc="max"
-        )
+            index="label_col",
+            columns="feature_set",
+            values=metric,
+            aggfunc="max",
+        ).reindex(index=label_cols, columns=feature_sets)
         if pivot.empty:
             ax.set_visible(False)
             continue
-        last_im = ax.imshow(pivot.values, cmap="viridis", aspect="auto", vmin=0, vmax=1)
-        ax.set_xticks(range(pivot.shape[1]))
-        ax.set_xticklabels(pivot.columns, fontsize=8)
-        ax.set_yticks(range(pivot.shape[0]))
-        ax.set_yticklabels(pivot.index, fontsize=8)
-        ax.set_title(_FS_DISPLAY.get(fs, fs), fontsize=10)
-        for i in range(pivot.shape[0]):
-            for j in range(pivot.shape[1]):
-                v = pivot.values[i, j]
-                if pd.isna(v):
+
+        for fs, offset in zip(feature_sets, offsets):
+            values = pd.to_numeric(pivot[fs], errors="coerce").to_numpy(dtype=float)
+            bars = ax.bar(
+                x + offset,
+                values,
+                width=width,
+                color=_FEATURE_SET_COLORS.get(fs, "#7f8c8d"),
+                edgecolor="white",
+                linewidth=0.6,
+                label=_FS_DISPLAY.get(fs, fs).replace("\n", " "),
+            )
+            for bar, value in zip(bars, values):
+                if not np.isfinite(value):
                     continue
                 ax.text(
-                    j, i, f"{v:.2f}",
-                    ha="center", va="center",
+                    bar.get_x() + bar.get_width() / 2,
+                    value + 0.008,
+                    f"{value:.2f}",
+                    ha="center",
+                    va="bottom",
                     fontsize=7,
-                    color="white" if v > 0.55 else "black",
+                    rotation=90 if len(label_cols) > 6 else 0,
                 )
+        plotted = True
+        ax.set_xticks(x)
+        ax.set_xticklabels(label_display, rotation=35, ha="right", fontsize=8)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel(metric)
+        if len(qualities) > 1:
+            ax.set_title(f"min_quality = {quality}", fontsize=10)
+        ax.grid(axis="y", alpha=0.25, lw=0.6)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
 
-    if last_im is None:
+    for ax in axes_flat[len(qualities):]:
+        ax.set_visible(False)
+
+    if not plotted:
         plt.close(fig)
-        log.debug("Label-grid quality grid: no plottable cells; skipping %s", output_path.name)
+        log.debug("Label-grid feature-set comparison: no plottable cells; skipping %s", output_path.name)
         return None
 
-    fig.colorbar(last_im, ax=axes_flat.tolist(), shrink=0.85, label=metric)
-    fig.suptitle(f"{metric} across label scheme × quality filter", fontsize=11)
-    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    visible_axes = [ax for ax in axes_flat if ax.get_visible()]
+    handles, labels = visible_axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=len(feature_sets), fontsize=8, frameon=False)
+    fig.suptitle(f"{metric}: feature-set comparison across label scheme × quality filter", fontsize=11)
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight", pad_inches=0.18)
     plt.close(fig)
-    log.info("Wrote label-grid quality grid → %s", _display_path(output_path))
+    log.info("Wrote label-grid feature-set comparison → %s", _display_path(output_path))
     return output_path
 
 
