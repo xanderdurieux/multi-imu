@@ -52,5 +52,16 @@ def plot_section_pipeline_stage(section_dir: Path, stage: str) -> None:
         plot_features_full(section_dir)
         plot_labels(section_dir, stage="calibrated")
         plot_labels(section_dir, stage="features")
+    elif stage == "inference":
+        from visualization.plot_inference import (
+            plot_inference_class_distribution,
+            plot_inference_section,
+        )
+        labels_dir = section_dir / "labels"
+        if labels_dir.is_dir():
+            for labels_path in sorted(labels_dir.glob("labels_inferred_*.csv")):
+                label_col = labels_path.stem.removeprefix("labels_inferred_")
+                plot_inference_section(section_dir, label_col)
+                plot_inference_class_distribution(section_dir, label_col)
     else:
         raise ValueError(f"Invalid stage: {stage}")

@@ -19,6 +19,7 @@ _KNOWN_STAGES = [
     "exports",
     "dataset_summary",
     "evaluation",
+    "inference",
     "report",
     "thesis_bundle",
 ]
@@ -84,6 +85,8 @@ class WorkflowConfig:
     )
     two_stage_event_tasks: list[str] = field(default_factory=lambda: ["core"])
     two_stage_target_recall: float = 0.90
+
+    inference_model_paths: list[str] = field(default_factory=list)
 
     thesis_protocol_path: str = ""
     # Minimum quality filter applied to all evaluation methods.
@@ -154,6 +157,11 @@ class WorkflowConfig:
             value = getattr(self, field_name)
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 errors.append(f"{field_name} must be a list of strings")
+
+        if not isinstance(self.inference_model_paths, list) or not all(
+            isinstance(p, str) for p in self.inference_model_paths
+        ):
+            errors.append("inference_model_paths must be a list of strings")
 
         valid_eval_methods = {"label_grid", "event_contrasts", "two_stage_events"}
         if not isinstance(self.evaluation_methods, list):

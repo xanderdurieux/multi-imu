@@ -906,6 +906,7 @@ def run_evaluation(
                         feature_set=fs_name,
                         model_name=model_name,
                         output_dir=output_dir / model_name / "saved_models",
+                        section_ids=df["section_id"].values if "section_id" in df.columns else None,
                     )
                 except Exception as exc:
                     log.warning("Could not save trained model for %s: %s", key, exc)

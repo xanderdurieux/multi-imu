@@ -538,6 +538,18 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
             log.warning("features_fused.csv not found — skipping evaluation")
             result["skipped"] += 1
 
+    elif stage == "inference":
+        from inference.pipeline import run_inference
+        model_paths = [Path(p) for p in cfg.inference_model_paths if p]
+        if not model_paths:
+            log.warning("inference stage: inference_model_paths is empty — skipping")
+            result["skipped"] += 1
+        else:
+            counts = run_inference(recordings, model_paths, force=cfg.force, no_plots=cfg.no_plots)
+            result["ok"] += counts["ok"]
+            result["failed"] += counts["failed"]
+            result["skipped"] += counts["skipped"]
+
     elif stage == "report":
         from reporting.pipeline import run_report
         fused = exports_root() / "features_fused.csv"

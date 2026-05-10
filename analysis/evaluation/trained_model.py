@@ -58,6 +58,7 @@ class TrainedModel:
     model_name: str
     trained_at_utc: str
     n_training_samples: int
+    transition_matrix: list[list[float]] | None = None
 
     # ------------------------------------------------------------------
     # Inference helpers
@@ -65,10 +66,11 @@ class TrainedModel:
 
     def _align_features(self, df: pd.DataFrame) -> np.ndarray:
         """Select and order feature columns, filling missing ones with NaN."""
-        aligned = pd.DataFrame(index=df.index)
-        for col in self.feature_names:
-            aligned[col] = pd.to_numeric(df[col], errors="coerce") if col in df.columns else np.nan
-        return aligned.to_numpy(dtype=float)
+        out = np.full((len(df), len(self.feature_names)), np.nan)
+        for i, col in enumerate(self.feature_names):
+            if col in df.columns:
+                out[:, i] = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+        return out
 
     def predict(self, df: pd.DataFrame) -> list[str]:
         """Return predicted class labels for each row in *df*."""
@@ -92,6 +94,27 @@ class TrainedModel:
         le.classes_ = np.array(self.classes)
         col_names = le.inverse_transform(col_order).tolist()
         return pd.DataFrame(proba, columns=col_names, index=df.index)
+
+
+def estimate_transition_matrix(
+    y: np.ndarray,
+    section_ids: np.ndarray,
+    n_classes: int,
+    smoothing: float = 1.0,
+) -> list[list[float]]:
+    """Estimate a row-stochastic label transition matrix from training windows.
+
+    Counts consecutive label pairs within each section (never across section
+    boundaries) and applies Laplace smoothing so that no transition has zero
+    probability.  *y* must contain integer-encoded labels in ``[0, n_classes)``.
+    """
+    counts = np.full((n_classes, n_classes), smoothing)
+    for sid in np.unique(section_ids):
+        labels = y[section_ids == sid]
+        for a, b in zip(labels[:-1], labels[1:]):
+            counts[a, b] += 1
+    trans = counts / counts.sum(axis=1, keepdims=True)
+    return trans.tolist()
 
 
 def train_final_pipeline(
@@ -123,6 +146,7 @@ def save_trained_model(
     feature_set: str,
     model_name: str,
     output_dir: Path,
+    section_ids: np.ndarray | None = None,
 ) -> Path:
     """Train on *all* data and serialise the pipeline + metadata.
 
@@ -145,6 +169,12 @@ def save_trained_model(
         _display_path(model_path),
     )
 
+    transition_matrix: list[list[float]] | None = None
+    if section_ids is not None:
+        transition_matrix = estimate_transition_matrix(
+            y, section_ids, n_classes=len(label_encoder.classes_)
+        )
+
     meta = {
         "label_col": label_col,
         "classes": list(label_encoder.classes_),
@@ -153,6 +183,7 @@ def save_trained_model(
         "model_name": model_name,
         "trained_at_utc": datetime.now(timezone.utc).isoformat(),
         "n_training_samples": int(len(y)),
+        "transition_matrix": transition_matrix,
     }
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     log.debug("Saved model metadata → %s", _display_path(meta_path))
@@ -201,6 +232,7 @@ def load_trained_model(model_path: Path | str) -> TrainedModel:
         model_name=meta["model_name"],
         trained_at_utc=meta["trained_at_utc"],
         n_training_samples=meta["n_training_samples"],
+        transition_matrix=meta.get("transition_matrix"),
     )
 
 
