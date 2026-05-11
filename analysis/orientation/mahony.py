@@ -10,6 +10,8 @@ from common.quaternion import (
     tilt_quat_from_acc,
 )
 
+_G = 9.81
+
 
 class MahonyFilter:
     """Stateful Mahony orientation filter."""
@@ -42,6 +44,7 @@ class MahonyFilter:
         gyro_rad: np.ndarray,
         mag: np.ndarray | None = None,
         dt: float | None = None,
+        acc_gain_threshold: float = 0.0,
     ) -> np.ndarray:
         """Return update."""
         if dt is None:
@@ -64,7 +67,12 @@ class MahonyFilter:
                 2.0 * (w * x + y * z),
                 w * w - x * x - y * y + z * z,
             ])
-            error += np.cross(a, v)
+            acc_err = np.cross(a, v)
+            # Scale correction down when acceleration deviates from g — dynamics
+            if acc_gain_threshold > 0.0:
+                weight = max(0.0, 1.0 - abs(an - _G) / acc_gain_threshold)
+                acc_err *= weight
+            error += acc_err
 
         # --- Magnetometer correction (MARG) ------------------------------------
         if mag is not None:

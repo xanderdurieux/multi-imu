@@ -39,6 +39,8 @@ _SENSORS = ("sporsa", "arduino")
 _G = 9.81
 _DEG = 180.0 / np.pi
 _RAD = np.pi / 180.0
+_DEFAULT_ACC_GAIN_THRESHOLD = 1.0  # m/s² — suppress acc correction when dynamics exceed this
+_METRIC_ACC_REJECT_THRESHOLD = 1.0  # m/s² — exclude dynamically contaminated samples from scoring
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +143,14 @@ def _gravity_residual(
     Q: np.ndarray,
     static_windows: list[tuple[float, float]],
 ) -> float:
-    """Return mean gravity error in static windows."""
+    """Return mean gravity direction error in static windows.
+
+    Normalises each acc sample to a unit vector before rotating so the metric
+    reflects orientation error only, independent of any stale magnitude calibration.
+    Samples whose acc magnitude deviates more than _METRIC_ACC_REJECT_THRESHOLD from
+    g are excluded to avoid dynamic contamination of the nominally-static windows.
+    Residual is scaled by g so the unit remains m/s².
+    """
     indices: list[int] = []
     for t0, t1 in static_windows:
         indices.extend(np.where((timestamps >= t0) & (timestamps <= t1))[0].tolist())
@@ -152,8 +161,14 @@ def _gravity_residual(
     for i in indices:
         if i >= len(Q):
             continue
-        acc_world = quat_rotate(Q[i], acc[i])
-        err = float(np.linalg.norm(acc_world - np.array([0.0, 0.0, _G])))
+        a = acc[i]
+        an = float(np.linalg.norm(a))
+        if not np.isfinite(an) or an < 1e-6:
+            continue
+        if abs(an - _G) > _METRIC_ACC_REJECT_THRESHOLD:
+            continue
+        acc_world_unit = quat_rotate(Q[i], a / an)
+        err = float(_G * np.linalg.norm(acc_world_unit - np.array([0.0, 0.0, 1.0])))
         if np.isfinite(err):
             errors.append(err)
     return float(np.mean(errors)) if errors else float("inf")
@@ -227,6 +242,7 @@ def process_section_orientation(
     force: bool = False,
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
+    acc_gain_threshold: float = _DEFAULT_ACC_GAIN_THRESHOLD,
     label_set: str | None = None,
 ) -> dict[str, Any]:
     """Process section orientation."""
@@ -247,6 +263,7 @@ def process_section_orientation(
         "method": "mahony",
         "Kp": Kp,
         "Ki": Ki,
+        "acc_gain_threshold": acc_gain_threshold,
         "created_at_utc": datetime.now(UTC).isoformat(),
         "sensors": {},
     }
@@ -291,7 +308,7 @@ def process_section_orientation(
             g_body = quat_rotate(quat_conjugate(q0), np.array([0.0, 0.0, _G]))
             q0 = tilt_quat_from_acc(g_body)
 
-        Q = run_mahony(acc, gyro_rad, dt_arr, q0=q0, mag=mag, Kp=Kp, Ki=Ki)
+        Q = run_mahony(acc, gyro_rad, dt_arr, q0=q0, mag=mag, Kp=Kp, Ki=Ki, acc_gain_threshold=acc_gain_threshold)
 
         static_wins = _static_windows(cal, sensor)
         residual = _gravity_residual(timestamps, acc, Q, static_wins)
@@ -322,6 +339,7 @@ def process_recording_orientation(
     force: bool = False,
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
+    acc_gain_threshold: float = _DEFAULT_ACC_GAIN_THRESHOLD,
     label_set: str | None = None,
     **_ignored,
 ) -> list[dict[str, Any]]:
@@ -337,7 +355,7 @@ def process_recording_orientation(
         try:
             stats = process_section_orientation(
                 sec_dir, sample_rate_hz=sample_rate_hz, force=force, Kp=Kp, Ki=Ki,
-                label_set=label_set,
+                acc_gain_threshold=acc_gain_threshold, label_set=label_set,
             )
             results.append(stats)
         except Exception as exc:

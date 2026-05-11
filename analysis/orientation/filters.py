@@ -31,6 +31,7 @@ def run_mahony(
     mag: np.ndarray | None = None,
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
+    acc_gain_threshold: float = 0.0,
 ) -> np.ndarray:
     """Run mahony."""
     N = len(acc)
@@ -49,13 +50,14 @@ def run_mahony(
         if not np.any(np.all(np.isfinite(mag_filled), axis=1)):
             mag_filled = None
 
-    if _HAS_AHRS:
+    # ahrs library does not support per-sample adaptive gain; use numpy path when needed
+    if _HAS_AHRS and acc_gain_threshold == 0.0:
         try:
             return _run_ahrs(acc, gyro_rad, dt_arr, q0, mag_filled, Kp, Ki)
         except Exception as exc:
             log.warning("ahrs Mahony failed (%s) — falling back to numpy", exc)
 
-    return _run_numpy(acc, gyro_rad, dt_arr, q0, mag_filled, Kp, Ki)
+    return _run_numpy(acc, gyro_rad, dt_arr, q0, mag_filled, Kp, Ki, acc_gain_threshold)
 
 
 def _run_ahrs(
@@ -86,6 +88,7 @@ def _run_numpy(
     mag: np.ndarray | None,
     Kp: float,
     Ki: float,
+    acc_gain_threshold: float = 0.0,
 ) -> np.ndarray:
     """Run numpy."""
     from .mahony import MahonyFilter
@@ -107,7 +110,7 @@ def _run_numpy(
         pending_dt += dt_i
         m = mag[i] if mag is not None else None
         mag_i = m if (m is not None and np.all(np.isfinite(m))) else None
-        Q[i] = filt.update(acc[i], g, mag=mag_i, dt=pending_dt)
+        Q[i] = filt.update(acc[i], g, mag=mag_i, dt=pending_dt, acc_gain_threshold=acc_gain_threshold)
         pending_dt = 0.0
 
     return Q
