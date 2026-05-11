@@ -1094,8 +1094,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Event labeler — {title_esc}</title>
-  <script src="{plotly_js_url_esc}"></script>
+  <title>Event labeler — __TITLE_ESC__</title>
+  <script src="__PLOTLY_JS_URL_ESC__"></script>
   <style>
     :root {{
       font-family: system-ui, sans-serif;
@@ -1154,8 +1154,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       width: 100%;
     }}
     #plot-map-wrap {{
-      flex: 0 0 clamp(200px, 26vw, {map_col_max}px);
-      max-width: min(100%, {map_col_max}px);
+      flex: 0 0 clamp(200px, 26vw, __MAP_COL_MAX__px);
+      max-width: min(100%, __MAP_COL_MAX__px);
       min-height: 200px;
       align-self: stretch;
       display: flex;
@@ -1177,6 +1177,18 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }}
     th, td {{ border: 1px solid var(--border); padding: 6px 8px; text-align: left; }}
     th {{ background: #f1f5f9; }}
+    .color-cell {{ white-space: nowrap; min-width: 10rem; }}
+    .color-swatch {{
+      display: inline-block;
+      width: 1.25rem;
+      height: 1.25rem;
+      border-radius: 999px;
+      border: 1px solid rgba(15, 23, 42, 0.16);
+      vertical-align: middle;
+      margin-right: 0.45rem;
+      box-sizing: border-box;
+    }}
+    .color-text {{ vertical-align: middle; font-variant-numeric: tabular-nums; color: #475569; }}
     table input[type="number"], table input[type="text"] {{
       width: 100%;
       max-width: 12rem;
@@ -1222,8 +1234,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     <h1>Event labeler</h1>
     <div class="panel">
       <div class="row">
-        <div><label>Recording ID<br/><input type="text" id="recId" value="{recording_id_esc}"/></label></div>
-        <div><label>Section ID<br/><input type="text" id="secId" placeholder="2026-02-26_r2s1" value="{section_id_esc}"/></label></div>
+        <div><label>Recording ID<br/><input type="text" id="recId" value="__RECORDING_ID_ESC__"/></label></div>
+        <div><label>Section ID<br/><input type="text" id="secId" placeholder="2026-02-26_r2s1" value="__SECTION_ID_ESC__"/></label></div>
         <div><label>Label (scenario)<br/><input type="text" id="scenario" placeholder="e.g. braking_event"/></label></div>
         <div><label>Label source<br/><input type="text" id="labelSrc" value="manual_event_labeler"/></label></div>
       </div>
@@ -1245,14 +1257,14 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         <b>Hover:</b> each row shows Timestamp plus <code>…_x / _y / _z</code> (e.g. <code>bike_acc</code>); spikes align across panels. <b>Y range is fixed</b> — only the time axis zooms. The map cursor follows the hovered time, and a <b>vertical line</b> marks the same time on the speed chart. The right column shows <b>GPS speed</b> (m/s) under the map when the CSV has a speed column. The map is framed with margin so the full track stays in view.
         <b>Interval:</b> two clicks; <b>Peak:</b> one click. Times shown here are seconds from the first sporsa sample in this folder; downloaded CSVs also include absolute millisecond timestamps for the pipeline.
       </p>
-      <p class="gps-note">{gps_note_esc}</p>
-      {context_html}
-      {section_warn}
+      <p class="gps-note">__GPS_NOTE_ESC__</p>
+      __CONTEXT_HTML__
+      __SECTION_WARN__
     </div>
     <div class="plot-strip" id="plotStrip">
       <div class="plot-strip-inner">
         <div id="plot-time"></div>
-        <div id="plot-map-wrap" class="{map_wrap_class}">
+        <div id="plot-map-wrap" class="__MAP_WRAP_CLASS__">
           <div id="plot-map"></div>
         </div>
       </div>
@@ -1261,12 +1273,12 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       <b>Labeled intervals</b> <span id="count">0</span>
       <p class="adj-hint">Edit start, end, or scenario below; when you leave a field, the value is applied and the shaded intervals on the plot update.</p>
       <table>
-        <thead><tr><th>start (s)</th><th>end (s)</th><th>scenario_label</th><th></th></tr></thead>
+        <thead><tr><th>start (s)</th><th>end (s)</th><th>scenario_label</th><th>color</th><th></th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
   </div>
-  <script type="application/json" id="payload">{payload_json}</script>
+  <script type="application/json" id="payload">__PAYLOAD_JSON__</script>
   <script>
 (function() {{
   const payload = JSON.parse(document.getElementById('payload').textContent);
@@ -1326,10 +1338,28 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     return Math.round(x * 1000) / 1000;
   }}
 
+  function colorLabelHtml(label) {{
+    const color = colorForLabel(label);
+    const safe = String(color).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return '<span class="color-swatch" style="background:' + safe + '" title="' + safe + '"></span>' +
+      '<span class="color-text">' + safe + '</span>';
+  }}
+
+  function colorForLabel(label) {{
+    const text = String(label || '').trim().toLowerCase();
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {{
+      hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    }
+    const hue = Math.abs(Math.round(hash * 137.508)) % 360;
+    const saturation = 68 + (Math.abs(hash >> 8) % 18);
+    const lightness = 42 + (Math.abs(hash >> 16) % 14);
+    return `hsla(${{hue}}, ${{saturation}}%, ${{lightness}}%, 0.22)`;
+  }}
+
   function labelShapes() {{
     const out = shapeBase.slice();
-    const palette = ['rgba(79,70,229,0.18)', 'rgba(14,165,233,0.18)', 'rgba(234,88,12,0.18)', 'rgba(22,163,74,0.18)'];
-    rows.forEach(function(r, i) {{
+    rows.forEach(function(r) {{
       out.push({{
         type: 'rect',
         xref: 'x',
@@ -1338,7 +1368,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         x1: r.t1,
         y0: 0,
         y1: 1,
-        fillcolor: palette[i % palette.length],
+        fillcolor: colorForLabel(r.label),
         line: {{ width: 0 }},
         layer: 'below',
       }});
@@ -1441,6 +1471,11 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       labIn.addEventListener('change', function() {{ applyRowEdit(r.id); }});
       tdLab.appendChild(labIn);
       tr.appendChild(tdLab);
+
+      const tdColor = document.createElement('td');
+      tdColor.className = 'color-cell';
+      tdColor.innerHTML = colorLabelHtml(r.label);
+      tr.appendChild(tdColor);
 
       const tdRm = document.createElement('td');
       const btn = document.createElement('button');
@@ -1812,18 +1847,18 @@ def write_event_labeler_html(
     title_esc = html.escape(f"{recording_id}/{section_id or data_dir.name}")
     plotly_js_url = _plotly_js_cdn_url()
     log.info("Plotly.js CDN: %s", plotly_js_url)
-    page = _PAGE_TEMPLATE.format(
-        title_esc=title_esc,
-        plotly_js_url_esc=html.escape(plotly_js_url, quote=True),
-        recording_id_esc=html.escape(recording_id, quote=True),
-        section_id_esc=html.escape(section_id, quote=True),
-        gps_note_esc=html.escape(gps_note, quote=True),
-        context_html=context_html,
-        section_warn=section_warn,
-        map_wrap_class=map_wrap_class,
-        map_col_max=MAP_COLUMN_MAX_PX,
-        payload_json=payload_json,
-    )
+    page = _PAGE_TEMPLATE
+    page = page.replace("__TITLE_ESC__", title_esc)
+    page = page.replace("__PLOTLY_JS_URL_ESC__", html.escape(plotly_js_url, quote=True))
+    page = page.replace("__RECORDING_ID_ESC__", html.escape(recording_id, quote=True))
+    page = page.replace("__SECTION_ID_ESC__", html.escape(section_id, quote=True))
+    page = page.replace("__GPS_NOTE_ESC__", html.escape(gps_note, quote=True))
+    page = page.replace("__CONTEXT_HTML__", context_html)
+    page = page.replace("__SECTION_WARN__", section_warn)
+    page = page.replace("__MAP_WRAP_CLASS__", map_wrap_class)
+    page = page.replace("__MAP_COL_MAX__", str(MAP_COLUMN_MAX_PX))
+    page = page.replace("{{", "{").replace("}}", "}")
+    page = page.replace("__PAYLOAD_JSON__", payload_json)
     out_path.write_text(page, encoding="utf-8")
     log.info("Wrote %s (%.1f s span, responsive layout)", out_path, duration_s)
     return out_path

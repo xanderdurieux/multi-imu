@@ -60,6 +60,7 @@ class CalSegParams:
     recording_gap_min_ms: float
     burst_max_span_ms: float
     peak_pair_max_gap_ms: float
+    peak_overfull_factor: float
     transient_baseline_ms: float
     peak_prominence: float
 
@@ -91,6 +92,7 @@ def load_cal_seg_params(sensor: str, **overrides: Any) -> CalSegParams:
         recording_gap_min_ms=float(block["recording_gap_min_s"]) * 1000.0,
         burst_max_span_ms=float(block["burst_max_span_s"]) * 1000.0,
         peak_pair_max_gap_ms=float(block["peak_pair_max_gap_s"]) * 1000.0,
+        peak_overfull_factor=float(block.get("peak_overfull_factor", float("inf"))),
         transient_baseline_ms=float(block["transient_baseline_s"]) * 1000.0,
         peak_prominence=float(block["peak_prominence"]),
     )
@@ -220,6 +222,9 @@ def _filter_valid_clusters(
     for cluster in clusters:
         working = list(cluster)
         n_peaks = len(working)
+        overfull_limit = params.peak_max_count * params.peak_overfull_factor
+        if n_peaks > overfull_limit:
+            continue
 
         # If there are too many peaks in one burst, keep only the strongest
         # ones (by dynamic amplitude) rather than dropping the whole segment.
@@ -504,6 +509,7 @@ def export_calibration_segments_json(
             "recording_gap_min_s": params.recording_gap_min_ms / 1000.0,
             "burst_max_span_s": params.burst_max_span_ms / 1000.0,
             "peak_pair_max_gap_s": params.peak_pair_max_gap_ms / 1000.0,
+            "peak_overfull_factor": params.peak_overfull_factor,
             "transient_baseline_s": params.transient_baseline_ms / 1000.0,
             "peak_prominence": params.peak_prominence,
         },

@@ -233,7 +233,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                         log.info("sync plots skipped for %s: missing %s", rec, project_relative_path(synced_dir))
                     else:
                         try:
-                            plot_recording_pipeline_stage(rec, "synced")
+                            plot_recording_pipeline_stage(rec, "synced", label_set=cfg.label_set)
                         except Exception as exc:
                             log.warning("sync plots failed for %s: %s", rec, exc)
             except Exception as exc:
@@ -276,7 +276,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            plot_section_pipeline_stage(section_dir, "calibration")
+                            plot_section_pipeline_stage(section_dir, "calibration", label_set=cfg.label_set)
                         except Exception as exc:
                             log.warning("calibration plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
@@ -293,6 +293,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                     method=orient_method,
                     sample_rate_hz=cfg.sample_rate_hz,
                     force=cfg.force,
+                    label_set=cfg.label_set,
                 )
                 result["ok"] += len(results)
                 # Plots are now generated inside process_recording_orientation.
@@ -314,7 +315,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            plot_section_pipeline_stage(section_dir, "derived")
+                            plot_section_pipeline_stage(section_dir, "derived", label_set=cfg.label_set)
                         except Exception as exc:
                             log.warning("derived plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:
@@ -338,7 +339,7 @@ def _run_stage(stage: str, cfg: WorkflowConfig, recordings: list[str]) -> dict[s
                 if not cfg.no_plots:
                     for section_dir in iter_sections_for_recording(rec):
                         try:
-                            plot_section_pipeline_stage(section_dir, "features")
+                            plot_section_pipeline_stage(section_dir, "features", label_set=cfg.label_set)
                         except Exception as exc:
                             log.warning("features plots failed for %s: %s", section_dir.name, exc)
             except Exception as exc:

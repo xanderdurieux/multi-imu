@@ -200,7 +200,7 @@ def _build_output_df(
     return out
 
 
-def _plot_orientation_outputs(section_dir: Path) -> None:
+def _plot_orientation_outputs(section_dir: Path, label_set: str | None = None) -> None:
     """Generate orientation-stage diagnostics, including label overlays."""
     try:
         from visualization.plot_orientation import plot_orientation_stage
@@ -210,7 +210,7 @@ def _plot_orientation_outputs(section_dir: Path) -> None:
 
     try:
         from visualization.plot_labels import plot_labels
-        plot_labels(section_dir, stage="orientation")
+        plot_labels(section_dir, stage="orientation", label_set=label_set)
     except Exception as exc:
         log.warning("Orientation label overlay failed for %s: %s", section_dir.name, exc)
 
@@ -227,6 +227,7 @@ def process_section_orientation(
     force: bool = False,
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
+    label_set: str | None = None,
 ) -> dict[str, Any]:
     """Process section orientation."""
     orient_dir = section_stage_dir(section_dir.name, "orientation")
@@ -234,7 +235,7 @@ def process_section_orientation(
 
     if stats_json.exists() and not force:
         log.info("Orientation already exists for %s — skipping", project_relative_path(section_dir))
-        _plot_orientation_outputs(section_dir)
+        _plot_orientation_outputs(section_dir, label_set=label_set)
         return read_json_file(stats_json)
 
     orient_dir.mkdir(parents=True, exist_ok=True)
@@ -309,7 +310,7 @@ def process_section_orientation(
         )
 
     write_json_file(stats_json, stats)
-    _plot_orientation_outputs(section_dir)
+    _plot_orientation_outputs(section_dir, label_set=label_set)
     log.info("Orientation done for %s → %s", section_dir.name, project_relative_path(orient_dir))
     return stats
 
@@ -321,6 +322,7 @@ def process_recording_orientation(
     force: bool = False,
     Kp: float = _DEFAULT_KP,
     Ki: float = _DEFAULT_KI,
+    label_set: str | None = None,
     **_ignored,
 ) -> list[dict[str, Any]]:
     """Run orientation estimation for all sections of a recording."""
@@ -335,6 +337,7 @@ def process_recording_orientation(
         try:
             stats = process_section_orientation(
                 sec_dir, sample_rate_hz=sample_rate_hz, force=force, Kp=Kp, Ki=Ki,
+                label_set=label_set,
             )
             results.append(stats)
         except Exception as exc:

@@ -509,7 +509,7 @@ def plot_labels_derived(
 # Label resolution
 # ---------------------------------------------------------------------------
 
-def _infer_labels_path(target_dir: Path) -> Path:
+def _infer_labels_path(target_dir: Path, label_set: str | None = None) -> Path:
     """Infer the canonical label CSV for a recording stage or section directory."""
     recs_root = recordings_root()
     secs_root = sections_root()
@@ -517,7 +517,7 @@ def _infer_labels_path(target_dir: Path) -> Path:
     try:
         rel = target_dir.relative_to(recs_root)
         recording_name = rel.parts[0]
-        return recording_labels_csv(recording_name)
+        return recording_labels_csv(recording_name, label_set=label_set)
     except ValueError:
         pass
 
@@ -552,10 +552,11 @@ def plot_labels(
     stage: str = "auto",
     top_n: int = _FEATURES_TOP_N,
     output_path: Path | None = None,
+    label_set: str | None = None,
 ) -> Path | None:
     """Plot labels."""
     target_dir = resolve_data_dir(target)
-    labels_path = _infer_labels_path(target_dir)
+    labels_path = _infer_labels_path(target_dir, label_set=label_set)
     labels = load_labels(labels_path)
     if not labels:
         log.info("No labels at %s — spans will be omitted", labels_path)
@@ -628,6 +629,11 @@ def main(argv: list[str] | None = None) -> None:
         "-o", "--output",
         help="Output PNG path (auto-derived from stage directory if omitted).",
     )
+    parser.add_argument(
+        "--label-set",
+        default=None,
+        help="Label set directory under data/_labels (default: MULTI_IMU_LABEL_SET env var or v1).",
+    )
     args = parser.parse_args(argv)
 
     out_path = Path(args.output) if args.output else None
@@ -637,6 +643,7 @@ def main(argv: list[str] | None = None) -> None:
             stage=args.stage,
             top_n=args.top_n,
             output_path=out_path,
+            label_set=args.label_set,
         )
     except Exception as exc:
         log.error("Failed to plot labels: %s", exc)

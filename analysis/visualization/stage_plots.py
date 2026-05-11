@@ -7,51 +7,61 @@ from pathlib import Path
 from common.paths import recording_stage_dir
 
 
-def plot_recording_pipeline_stage(recording_name: str, stage: str) -> None:
+def plot_recording_pipeline_stage(
+    recording_name: str,
+    stage: str,
+    *,
+    label_set: str | None = None,
+) -> None:
     """Plot outputs for a recording-level stage directory (parsed / synced)."""
     if stage == "parsed":
         from visualization.plot_comparison import plot_stage_data
         from visualization.plot_labels import plot_labels
 
         plot_stage_data(recording_stage_dir(recording_name, stage))
-        plot_labels(recording_stage_dir(recording_name, stage), stage="sensor")
+        plot_labels(recording_stage_dir(recording_name, stage), stage="sensor", label_set=label_set)
     elif stage == "synced":
         from visualization.plot_sync import plot_sync_stage
         from visualization.plot_labels import plot_labels
 
         plot_sync_stage(recording_name)
-        plot_labels(recording_stage_dir(recording_name, stage), stage="sensor")
+        plot_labels(recording_stage_dir(recording_name, stage), stage="sensor", label_set=label_set)
     else:
         raise ValueError(f"Invalid stage: {stage}")
 
 
-def plot_section_pipeline_stage(section_dir: Path, stage: str) -> None:
+def plot_section_pipeline_stage(
+    section_dir: Path,
+    stage: str,
+    *,
+    label_set: str | None = None,
+) -> None:
     """Plot outputs for one section (calibration, orientation, derived, features)."""
     if stage == "calibration":
         from visualization.plot_calibration import plot_calibration_stage
         from visualization.plot_labels import plot_labels
 
         plot_calibration_stage(section_dir)
-        plot_labels(section_dir, stage="calibrated")
+        plot_labels(section_dir, stage="calibrated", label_set=label_set)
     elif stage == "orientation":
         from visualization.plot_orientation import plot_orientation_stage
         from visualization.plot_labels import plot_labels
 
         plot_orientation_stage(section_dir)
-        plot_labels(section_dir, stage="orientation")
+        plot_labels(section_dir, stage="orientation", label_set=label_set)
     elif stage == "derived":
         from visualization.plot_derived import plot_derived_stage
         from visualization.plot_labels import plot_labels
 
         plot_derived_stage(section_dir)
-        plot_labels(section_dir, stage="derived")
+        plot_labels(section_dir, stage="derived", label_set=label_set)
     elif stage == "features":
         from visualization.plot_features import plot_features_full
         from visualization.plot_labels import plot_labels
 
         plot_features_full(section_dir)
-        plot_labels(section_dir, stage="calibrated")
-        plot_labels(section_dir, stage="features")
+        plot_labels(section_dir, stage="calibrated", label_set=label_set)
+        plot_labels(section_dir, stage="features", label_set=label_set)
     elif stage == "inference":
         from visualization.plot_inference import (
             plot_inference_class_distribution,
